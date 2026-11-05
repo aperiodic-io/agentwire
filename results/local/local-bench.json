@@ -1,0 +1,248 @@
+{
+  "description": "AgentWire on real local agent session logs (aggregates only)",
+  "train_fraction": 0.6,
+  "dictionary_bytes": 65536,
+  "verified_roundtrip": true,
+  "corpora": {
+    "claude-code": {
+      "train_sessions": 69,
+      "test_sessions": 46,
+      "test_messages": 25997,
+      "test_bytes": 78536479,
+      "message_bytes_p50": 1475,
+      "message_bytes_p90": 4629,
+      "message_bytes_p99": 42049,
+      "train_period_end": "2026-10-21",
+      "test_period": [
+        "2026-10-21",
+        "2026-11-04"
+      ],
+      "variants": [
+        {
+          "variant": "awf1/one",
+          "description": "AWF1, one independent frame per message",
+          "raw_bytes": 78536479,
+          "wire_bytes": 34418376,
+          "ratio_x": 2.282,
+          "frames": 25997,
+          "messages_per_frame": 1.0,
+          "wait_p50_ms": 0,
+          "wait_p99_ms": 0,
+          "wait_max_ms": 0,
+          "encode_mib_s": 102.9
+        },
+        {
+          "variant": "awf1/one+dict",
+          "description": "AWF1, one frame per message, dictionary",
+          "raw_bytes": 78536479,
+          "wire_bytes": 25038118,
+          "ratio_x": 3.137,
+          "frames": 25997,
+          "messages_per_frame": 1.0,
+          "wait_p50_ms": 0,
+          "wait_p99_ms": 0,
+          "wait_max_ms": 0,
+          "encode_mib_s": 27.5
+        },
+        {
+          "variant": "awf1/batch",
+          "description": "AWF1, 25 ms / 32 msg / 64 KiB batches at real timing",
+          "raw_bytes": 78536479,
+          "wire_bytes": 29410925,
+          "ratio_x": 2.67,
+          "frames": 9274,
+          "messages_per_frame": 2.8,
+          "wait_p50_ms": 25,
+          "wait_p99_ms": 25,
+          "wait_max_ms": 25,
+          "encode_mib_s": 152.7
+        },
+        {
+          "variant": "awf1/batch+dict",
+          "description": "AWF1 batches + dictionary",
+          "raw_bytes": 78536479,
+          "wire_bytes": 22246484,
+          "ratio_x": 3.53,
+          "frames": 9274,
+          "messages_per_frame": 2.8,
+          "wait_p50_ms": 25,
+          "wait_p99_ms": 25,
+          "wait_max_ms": 25,
+          "encode_mib_s": 61.2
+        },
+        {
+          "variant": "awc1/stream",
+          "description": "AWC1 stream, window 1 MiB",
+          "raw_bytes": 78536479,
+          "wire_bytes": 13052782,
+          "ratio_x": 6.017,
+          "frames": 25997,
+          "messages_per_frame": 1.0,
+          "wait_p50_ms": 0,
+          "wait_p99_ms": 0,
+          "wait_max_ms": 0,
+          "encode_mib_s": 96.1
+        },
+        {
+          "variant": "awc1/stream+dict",
+          "description": "AWC1 stream + dictionary, window 1 MiB",
+          "raw_bytes": 78536479,
+          "wire_bytes": 12591222,
+          "ratio_x": 6.237,
+          "frames": 25997,
+          "messages_per_frame": 1.0,
+          "wait_p50_ms": 0,
+          "wait_p99_ms": 0,
+          "wait_max_ms": 0,
+          "encode_mib_s": 102.8
+        },
+        {
+          "variant": "awc1/stream+dict/w8M",
+          "description": "AWC1 stream + dictionary, window 8 MiB",
+          "raw_bytes": 78536479,
+          "wire_bytes": 12233500,
+          "ratio_x": 6.42,
+          "frames": 25997,
+          "messages_per_frame": 1.0,
+          "wait_p50_ms": 0,
+          "wait_p99_ms": 0,
+          "wait_max_ms": 0,
+          "encode_mib_s": 97.8
+        },
+        {
+          "variant": "ref/whole-file",
+          "description": "Reference: whole session file in one Zstd-3 frame (offline, no framing)",
+          "raw_bytes": 78536479,
+          "wire_bytes": 11980923,
+          "ratio_x": 6.555,
+          "frames": 46,
+          "messages_per_frame": 565.15,
+          "wait_p50_ms": null,
+          "wait_p99_ms": null,
+          "wait_max_ms": null,
+          "encode_mib_s": 681.8
+        }
+      ]
+    },
+    "codex": {
+      "train_sessions": 226,
+      "test_sessions": 152,
+      "test_messages": 81299,
+      "test_bytes": 401748128,
+      "message_bytes_p50": 888,
+      "message_bytes_p90": 6208,
+      "message_bytes_p99": 60302,
+      "train_period_end": "2026-08-21",
+      "test_period": [
+        "2026-08-21",
+        "2026-11-01"
+      ],
+      "variants": [
+        {
+          "variant": "awf1/one",
+          "description": "AWF1, one independent frame per message",
+          "raw_bytes": 401748128,
+          "wire_bytes": 115153860,
+          "ratio_x": 3.489,
+          "frames": 81299,
+          "messages_per_frame": 1.0,
+          "wait_p50_ms": 0,
+          "wait_p99_ms": 0,
+          "wait_max_ms": 0,
+          "encode_mib_s": 167.8
+        },
+        {
+          "variant": "awf1/one+dict",
+          "description": "AWF1, one frame per message, dictionary",
+          "raw_bytes": 401748128,
+          "wire_bytes": 96357676,
+          "ratio_x": 4.169,
+          "frames": 81299,
+          "messages_per_frame": 1.0,
+          "wait_p50_ms": 0,
+          "wait_p99_ms": 0,
+          "wait_max_ms": 0,
+          "encode_mib_s": 48.4
+        },
+        {
+          "variant": "awf1/batch",
+          "description": "AWF1, 25 ms / 32 msg / 64 KiB batches at real timing",
+          "raw_bytes": 401748128,
+          "wire_bytes": 101856995,
+          "ratio_x": 3.944,
+          "frames": 45236,
+          "messages_per_frame": 1.8,
+          "wait_p50_ms": 25,
+          "wait_p99_ms": 25,
+          "wait_max_ms": 25,
+          "encode_mib_s": 207.6
+        },
+        {
+          "variant": "awf1/batch+dict",
+          "description": "AWF1 batches + dictionary",
+          "raw_bytes": 401748128,
+          "wire_bytes": 86948131,
+          "ratio_x": 4.621,
+          "frames": 45236,
+          "messages_per_frame": 1.8,
+          "wait_p50_ms": 25,
+          "wait_p99_ms": 25,
+          "wait_max_ms": 25,
+          "encode_mib_s": 74.5
+        },
+        {
+          "variant": "awc1/stream",
+          "description": "AWC1 stream, window 1 MiB",
+          "raw_bytes": 401748128,
+          "wire_bytes": 66896258,
+          "ratio_x": 6.006,
+          "frames": 81299,
+          "messages_per_frame": 1.0,
+          "wait_p50_ms": 0,
+          "wait_p99_ms": 0,
+          "wait_max_ms": 0,
+          "encode_mib_s": 155.2
+        },
+        {
+          "variant": "awc1/stream+dict",
+          "description": "AWC1 stream + dictionary, window 1 MiB",
+          "raw_bytes": 401748128,
+          "wire_bytes": 66660325,
+          "ratio_x": 6.027,
+          "frames": 81299,
+          "messages_per_frame": 1.0,
+          "wait_p50_ms": 0,
+          "wait_p99_ms": 0,
+          "wait_max_ms": 0,
+          "encode_mib_s": 159.7
+        },
+        {
+          "variant": "awc1/stream+dict/w8M",
+          "description": "AWC1 stream + dictionary, window 8 MiB",
+          "raw_bytes": 401748128,
+          "wire_bytes": 59484082,
+          "ratio_x": 6.754,
+          "frames": 81299,
+          "messages_per_frame": 1.0,
+          "wait_p50_ms": 0,
+          "wait_p99_ms": 0,
+          "wait_max_ms": 0,
+          "encode_mib_s": 161.0
+        },
+        {
+          "variant": "ref/whole-file",
+          "description": "Reference: whole session file in one Zstd-3 frame (offline, no framing)",
+          "raw_bytes": 401748128,
+          "wire_bytes": 57853801,
+          "ratio_x": 6.944,
+          "frames": 152,
+          "messages_per_frame": 534.86,
+          "wait_p50_ms": null,
+          "wait_p99_ms": null,
+          "wait_max_ms": null,
+          "encode_mib_s": 789.9
+        }
+      ]
+    }
+  }
+}

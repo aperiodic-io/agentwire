@@ -1,0 +1,10 @@
+{
+  "events": 29,
+  "condensed_events": 24,
+  "protected_events": 5,
+  "original_context_bytes": 65061,
+  "reduced_context_bytes": 12162,
+  "context_reduction_x": 5.35,
+  "cold_storage_bytes": 8980,
+  "fully_rehydratable": true
+}

@@ -1,0 +1,21 @@
+{
+  "project": "AgentWire POC",
+  "executed_tests": 69,
+  "test_result": "PASS",
+  "python": "3.14.7",
+  "system": "macOS-15.8.1-arm64-arm-64bit-Mach-O",
+  "libzstd": "1.5.7",
+  "run": "./reproduce.sh",
+  "source_sha256": {
+    "agentwire/transport.py": "f0b3d92808820023127f1321aab61f83ea1ccc57c10bdc6f0660d9a0ec825d76",
+    "agentwire/stream.py": "2cc931910b58a12d1bcf1e4faf25cabc11b1ce3aefac321dda2ac25e7055d140",
+    "agentwire/context.py": "487ce6843f9cf16d417a9916b75f338a0a1b79e13994d123a52a43b8b3ddebaa",
+    "agentwire/zstd.py": "4121bfb420e9f34d3a1b4fcf5164f5448f378cfa4fa6359c1f2b97b28b4f901a",
+    "agentwire/asyncio_transport.py": "bfeb46d7be1142beb67559c3832542b38dabae7252818b26877124cfbfdea03e",
+    "agentwire/benchmark.py": "2920dec6eadc9ec5114618342e44f8d771d3f3bae6c2ab81af56c8da81394490",
+    "agentwire/localbench.py": "34e9db3e2ef52ad6ec703760b7565285afd747323fbdbea801cea9739811fb01",
+    "results/bench.csv": "f88e068fe1b228baf2c26e1c54d82c7a24eb15297837438dc918ca8d8a7725d3",
+    "results/RESULTS.md": "8cd966006d371148926e9d429fa786062051378ed691f6124ef7711542d9a1a6",
+    "results/compression-ratios.png": "90ff804b8501f9ec5d703f273baa3883b06fedbf4a7d75d5c707bef91bf90553"
+  }
+}
