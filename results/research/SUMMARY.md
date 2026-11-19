@@ -282,6 +282,16 @@ Real OpenHands runs chained into one conversation; one full request body per tur
 | 3.04 MiB | 115 | 174 | 11× | 150× | 326× | 302× | 364× | 5× | 468× | 682× |
 | 6.01 MiB | 184 | 621 | 10× | 342× | 510× | 673× | 961× | 5× | 878× | 2,222× |
 
+## Per-request frames with the previous request as prefix (`--patch-from` / dcz-style)
+
+Each request is an independent standard zstd frame; +40 B per request for a dcz-style header.
+
+| Set | no prefix, zstd-3 | prefix, zstd-3 | prefix, zstd-3 + LDM | prefix, zstd-1 + LDM | prefix, zstd-9 + LDM |
+|---|---:|---:|---:|---:|---:|
+| api-requests (held-out) | 3.8× | 42.4× | 42.8× | 41.4× | 46.7× |
+| long context 1 MiB | 5.8× | 92.6× | 93.1× | 86.1× | 104.4× |
+| long context 6 MiB | 12.5× | 45.7× | 1,727.4× | 1,613.4× | 1,932.9× |
+
 ## Cost model
 
 Assumptions: AWS us-east-1 list prices on 2026-11-19: egress $0.09/GB (first 10 TB tier), S3 Standard $0.023/GB-month, Glacier Deep Archive $0.00099/GB-month; 1 TB of raw traffic per month; 12 months of logs retained (12 TB raw); compression CPU at $0.04/vCPU-hour (an assumption) and the single-core compress speed measured here. Each row applies its measured ratio to both columns, so read *wire* rows for egress and *store* rows for storage. Wire-row CPU uses the Python per-message speeds and so overstates native cost.

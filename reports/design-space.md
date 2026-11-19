@@ -15,7 +15,7 @@ Every approach is rated on the same axes: **ratio**, **speed** (compress/decompr
 
 | Codec | Knobs that matter here | Ratio | Speed (native, per core) | Latency | Memory | Random access | Ops complexity |
 |---|---|---|---|---|---|---|---|
-| **zstd** [1][3][4] | level 1–19 (22 ultra), `windowLog` (HTTP caps it at 8 MB [2]), long-distance matching (`--long`, default window 2^27 [3]), dictionaries, `--patch-from` (a reference "prefix") [5], `ZSTD_e_flush` for streaming [4] | High; with `--long` it matches xz on repetitive logs *(measured)* | ~500 MB/s at -1, GB/s decode [13] | Flush per message: none | Window + tables: ~2 MiB/side at w20, ~9 MiB at w23 (AgentWire) | Per frame; seekable format [7] | Low: one library, RFC 8878 |
+| **zstd** [1][3][4] | level 1–19 (22 ultra), `windowLog` (HTTP caps it at 8 MB [2]), long-distance matching (`--long`, default window 2^27 [3]), dictionaries, `--patch-from` (a reference "prefix") [5], `ZSTD_e_flush` for streaming [4] | High; zstd-19 `--long` is within 4–9% of xz-9e on packed corpora *(measured)* | ~500 MB/s at -1, GB/s decode [13] | Flush per message: none | Window + tables: ~2 MiB/side at w20, ~9 MiB at w23 (AgentWire) | Per frame; seekable format [7] | Low: one library, RFC 8878 |
 | **brotli** [8][9] | quality 0–11, `lgwin` 10–24 (30 non-RFC), raw shared dictionaries (brotli ≥ 1.1; `dcb` in RFC 9842 [10]) | Slightly above zstd at equal speed on small, text-like messages *(measured)* | q5 ~ zstd-6 speed; q11 is ~1 MB/s | Flush per message: none | Window-sized | Per stream | Medium: shared-dictionary API is new and browser-only on the web [11] |
 | **LZ4** [12][13] | fast / HC levels, linked vs independent blocks | Lowest (64 KiB window) | Fastest: ~770 MB/s compress, ~5 GB/s decompress [13] | None | Tiny | Per block (independent mode) | Low |
 | **gzip / DEFLATE** [16][17][18] | level, 32 KiB window, `Z_SYNC_FLUSH` (adds `00 00 ff ff`; permessage-deflate strips it [33]) | Good on short, repetitive messages; collapses once repetition is > 32 KiB away *(measured)* | ~50–100 MB/s at -6 | None with sync flush | ~256 KiB | Per member | Lowest: everywhere, including every HTTP stack |
@@ -38,11 +38,11 @@ context.
 | Approach | How it removes redundancy | Ratio | Speed | Latency | Memory | Random access | Ops complexity |
 |---|---|---|---|---|---|---|---|
 | **Windowed stream (AWC1, permessage-deflate)** [33] | The previous request is in the LZ window | Excellent while context < window | Codec speed | None | Window per connection | No | Low |
-| **zstd `--patch-from` / prefix** [3][5] | Previous message is a raw-content reference for an independent frame | Excellent; needs LDM at fast levels *(measured: 56 B vs 2.8 KB on a 135 KB append)* | Fast | None | Reference + window | Each frame needs only its reference | Medium: both sides must hold the same reference |
+| **zstd `--patch-from` / prefix** [3][5] | Previous message is a raw-content reference for an independent frame | Excellent; needs LDM *(measured: 1,727× vs 46× at a 6 MB context)* | Fast | None | Reference + window | Each frame needs only its reference | Medium: both sides must hold the same reference |
 | **AWD1 context delta** (this repo) | Explicit common-prefix/suffix against one of the last *k* messages, literal through a zstd stream | Excellent at any context size *(measured)* | Prefix compare is memcmp-speed | None | *k* × message size + small window | No | Low–medium |
 | **rsync** [21] | Rolling weak + strong block checksums against the receiver's copy | Good for large files with scattered edits | Moderate | Round trip | Block-hash table | n/a | High: interactive protocol |
 | **VCDIFF** [22] / **bsdiff** [23] | Generic COPY/ADD against a source | Good | bsdiff is slow and memory-hungry (17n) [23] | Batch | High | n/a | Medium |
-| **FastCDC + dedup** [19][20] | Content-defined chunks, store each unique chunk once | Captures cross-session and cross-agent duplicates a window cannot reach; chunk granularity loses small repeats | ~1 GB/s native [20]; ~9 MB/s pure Python *(measured)* | Batch | Chunk index | Per chunk | High: index, GC, chunk-size tuning |
+| **FastCDC + dedup** [19][20] | Content-defined chunks, store each unique chunk once | In principle catches duplicates beyond any window; *measured* it loses to long-window zstd on every corpus here | ~1 GB/s native [20]; ~9 MB/s pure Python *(measured)* | Batch | Chunk index | Per chunk | High: index, GC, chunk-size tuning |
 | **Prompt caching** [29][30] | The provider deduplicates the token prefix server-side | Saves *compute and input-token cost*, not bytes on the wire; the full body is still uploaded | n/a | n/a | Provider side | n/a | Must keep the prefix byte-stable |
 
 **Prefix sharing in storage.** For archives, append-only structure means a session log can be stored as
@@ -57,7 +57,7 @@ observation masking) breaks both the provider's prefix cache and the wire-level 
 
 | Approach | Ratio | Speed | Latency | Memory | Random access | Ops complexity |
 |---|---|---|---|---|---|---|
-| **Columnar JSON (AWJ1, this repo)**: keys/structure separated from per-path value columns, each zstd'd | Small gain over row-wise zstd at equal level on keyed records; none on text-heavy transcripts *(measured)* | Python JSON parse + re-serialize dominates | Batch (needs a block) | Block-sized | Per block | Medium: must prove byte-exact re-serialization; falls back to verbatim |
+| **Columnar JSON (AWJ1, this repo)**: keys/structure separated from per-path value columns, each zstd'd | +2–18% over row-wise zstd at equal level on keyed JSON logs; −1 to −15% on requests, log lines and SSE *(measured)* | Python JSON parse + re-serialize dominates | Batch (needs a block) | Block-sized | Per block | Medium: must prove byte-exact re-serialization; falls back to verbatim |
 | **Parquet + zstd** [34][35][36] | Similar to zstd on the payload column; adds typed columns, statistics, page index | Native, fast | Batch | Row-group sized | Row group / page | Medium: pyarrow or equivalent, schema evolution |
 | **Log-template extraction (CLP, LogReducer, Logzip)** [24][27][28] | 1.2–5.3× over LZMA on system logs [27], ~2× gzip with search on compressed data [24] | Fast native ingestion [24] | Batch | Template dictionary | Search without full decompress [24] | High: parser rules, template drift |
 | **Tokenizer-aware (store token IDs)** | Worse than UTF-8 + zstd *(measured)*: token IDs hide the byte patterns LZ coders exploit; ~4 bytes/token of text become 3-byte IDs | Tokenizing costs more than compressing | n/a | Vocabulary | n/a | Ties storage to one tokenizer version |
@@ -97,7 +97,7 @@ shared dictionary for the fixed JSON scaffolding, and delta-against-previous-eve
 | Format | Ratio | Random access | Notes |
 |---|---|---|---|
 | One zstd frame per session file | Good; `--long` helps sessions that repeat content > 8 MB apart | Whole session per read | Simplest; standard tools |
-| **zstd seekable** [7] (`agentwire/seekable.py`) | Close to whole-file at 256 KiB–1 MiB frames *(measured)* | One frame per read | Standard frames + seek table; readable by `zstd -d`; verified against an independent reader |
+| **zstd seekable** [7] (`agentwire/seekable.py`) | 77–99% of the packed-corpus ratio at 1–4 MiB frames *(measured)* | One frame per read | Standard frames + seek table; readable by `zstd -d`; verified against an independent reader |
 | Parquet + zstd [34][35] | Close to zstd on blob columns | Row group / page | Best when you query metadata (session, kind, time) |
 | CDC dedup store [19] | Adds cross-session dedup | Per chunk | Worth it only when exact repeats are common across sessions (tool outputs, file reads, CI logs) |
 | Cold tier (Glacier Deep Archive) [47] | n/a | Hours, 180-day minimum | At $0.00099/GB-month, ratio matters 23× less than on S3 Standard |

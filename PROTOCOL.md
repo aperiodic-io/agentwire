@@ -92,3 +92,27 @@ AWB1 (4 bytes) | compression_flag (1 byte) | original_len (u32 big endian)
 ```
 
 Archive recovery enforces a configurable raw-byte limit, checks original length and the full SHA-256, and returns canonical JSON bytes. One archive entry per distinct content SHA-256 is idempotent. AWB1 is not a wire protocol and is not currently encrypted.
+
+## AWD1: context-delta stream (experimental)
+
+For connections that re-send a growing context. Implemented in `agentwire/delta.py`.
+
+```
+stream := "AWD1" flags:u8 window_log:u8 references:u8 [dictionary_fingerprint:16 if flags & 1] record*
+record := body_len:uleb128 payload_len:uleb128 crc32(message):u32be payload
+body   := ref:u8 prefix:uleb128 suffix:uleb128 literal          (payload = zstd-flushed body)
+message = R[:prefix] + literal + R[len(R) - suffix:],  R = ref-th most recent message (empty if none yet)
+```
+
+- One zstd stream per connection carries every body (context takeover, flush per record). The optional dictionary is identified by the first 16 bytes of its SHA-256 and must match exactly.
+- Receivers bound `body_len`, `payload_len` and the rebuilt message size before decompressing, reject unknown references and `prefix + suffix > len(R)`, verify the CRC32 of the rebuilt message, and poison the session on any error.
+- Both sides keep the last `references` messages (1–32). Memory is O(references × message size) plus the zstd window.
+
+## Seekable archives
+
+`agentwire/seekable.py` writes the zstd seekable format: independent zstd frames (content checksum on), then a skippable frame `0x184D2A5E` whose payload is `{compressed_size:u32le, decompressed_size:u32le}*` plus the 9-byte footer `n_frames:u32le descriptor:u8 0x8F92EAB1:u32le`. An optional message index is a skippable frame `0x184D2A5B` (`count:uleb128 raw_len:uleb128 zstd(uleb128 lengths)`). It sits before the seek table and is listed in it with decompressed size 0, which keeps the archive valid for independent seekable readers. This was verified against pyzstd's `SeekableZstdFile`.
+
+## Research block formats (not wire protocols)
+
+- **AWJ1** (`agentwire/jsoncol.py`): a columnar JSON block. Messages that a known serializer style reproduces byte-for-byte are split into a structure stream, a key table and per-path value columns; anything else is stored verbatim. A CRC32 covers all messages.
+- **AWK1** (`agentwire/cdc.py`): a FastCDC chunk store. Each entry is `sha256[32] raw_len:u32 comp_len:u32 zstd_frame`, and a recipe is the concatenation of the chunks' 16-byte digest prefixes.

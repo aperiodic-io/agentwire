@@ -138,6 +138,16 @@ def longctx(L, x):
     L.append("")
 
 
+def patchfrom(L, x):
+    keys = [k for k in x["rows"][0] if k not in ("set", "raw_bytes")]
+    L += ["## Per-request frames with the previous request as prefix (`--patch-from` / dcz-style)", "",
+          "Each request is an independent standard zstd frame; +40 B per request for a dcz-style header.", "",
+          "| Set | " + " | ".join(keys) + " |", "|---|" + "---:|" * len(keys)]
+    for r in x["rows"]:
+        L.append(f"| {r['set']} | " + " | ".join(f"{r[k]:,.1f}×" for k in keys) + " |")
+    L.append("")
+
+
 def costs(L, t, s):
     """$ per month per 1 TB/month of raw traffic (egress) and per 12 TB retained (storage)."""
     L += ["## Cost model", "",
@@ -181,7 +191,7 @@ def main():
         L += ["Machine: " + ", ".join(f"{k}={v}" for k, v in m.items()), ""]
     for name, fn in [("transport.json", transport), ("storage.json", storage), ("sse.json", sse),
                      ("dictionaries.json", dicts), ("multiplex.json", multiplex), ("tokens.json", tokens),
-                     ("reducer.json", reducer), ("longctx.json", longctx)]:
+                     ("reducer.json", reducer), ("longctx.json", longctx), ("patchfrom.json", patchfrom)]:
         data = j(name)
         if data:
             fn(L, data)
