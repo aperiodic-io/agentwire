@@ -1,0 +1,30 @@
+[package]
+name = "agentwire-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+agentwire = { path = "..", default-features = false }
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+
+# nightly-only (cargo fuzz): a workspace of its own
+[workspace]
+
+[[bin]]
+name = "delta"
+path = "fuzz_targets/delta.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false

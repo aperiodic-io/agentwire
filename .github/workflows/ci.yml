@@ -1,0 +1,176 @@
+name: ci
+on:
+  pull_request:
+    # ready_for_review: a draft's mutants run once it is ready (the mutants-plan job)
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+# a newer push to a pull request makes its running checks moot; a push to main is never cancelled
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# the token reads the repository only; the jobs that need more say so
+permissions: { contents: read }
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+jobs:
+  lint:
+    runs-on: celesto-memory
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # saved from main only: a pull request restores main's instead of evicting it with its own
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
+      - run: cargo fmt --all --check
+      # the library alone (what most users build) and everything (the proxies and their tests)
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo doc --no-deps --all-features
+        env: { RUSTDOCFLAGS: -D warnings }
+      # what crates.io would receive builds on its own
+      - run: cargo package --locked --all-features
+
+  test:
+    runs-on: celesto-memory
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with: { tool: "cargo-nextest,cargo-llvm-cov" }
+      # unit, property and integration tests with coverage; acceptance runs separately
+      - run: cargo llvm-cov nextest --all-features --lcov --output-path lcov.info -E 'not binary(acceptance)'
+      - run: cargo test --doc --all-features
+      - run: scripts/coverage-gate.sh lcov.info
+
+  # the proxies as real processes, between a tool and a recording upstream (tests/acceptance/)
+  acceptance:
+    runs-on: celesto-memory
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
+      - run: cargo test --locked --all-features --test acceptance
+
+  mutants-plan:
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    runs-on: celesto-memory
+    outputs: { shards: "${{ steps.plan.outputs.shards }}", count: "${{ steps.plan.outputs.count }}" }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { fetch-depth: 0 }
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with: { tool: cargo-mutants }
+      - id: plan
+        run: |
+          git diff origin/${{ github.base_ref }}... -- '*.rs' > pr.diff
+          n=$(cargo mutants --list --in-diff pr.diff | wc -l)
+          k=$(( (n + 49) / 50 )); if [ "$k" -gt 4 ]; then k=4; fi
+          echo "$n mutants: $k shards"
+          echo "count=$k" >> "$GITHUB_OUTPUT"
+          echo "shards=[$(seq -s, 0 $((k - 1)))]" >> "$GITHUB_OUTPUT"
+
+  # after lint: a pull request that fails fmt or clippy starts no shard
+  mutants:
+    needs: [lint, mutants-plan]
+    if: needs.mutants-plan.outputs.count != '0'
+    runs-on: celesto-memory
+    strategy:
+      fail-fast: false
+      matrix: { shard: "${{ fromJSON(needs.mutants-plan.outputs.shards) }}" }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { fetch-depth: 0 }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { shared-key: mutants, cache-on-failure: true }
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with: { tool: cargo-mutants }
+      - run: git diff origin/${{ github.base_ref }}... -- '*.rs' > pr.diff
+      # Every mutant in changed code must be caught by a test (.cargo/mutants.toml). cargo-mutants
+      # exits 2 when a mutant was missed and 3 when one timed out (it hung the suite, so it was
+      # detected), but reports 3 ahead of 2: a 3 passes only when missed.txt is empty. 4 (the
+      # unmutated tree's tests fail), 1, 5, 6 and 70 fail. Incremental builds: rust-cache turns them
+      # off, and each mutant would rebuild from scratch. Each test binary runs under a 4 GiB
+      # address-space limit, so a mutant that allocates without bound fails its test instead of
+      # the runner.
+      - env:
+          CARGO_INCREMENTAL: "1"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: "prlimit --as=4294967296"
+        run: |
+          c=0
+          cargo mutants --in-diff pr.diff --no-shuffle --shard ${{ matrix.shard }}/${{ needs.mutants-plan.outputs.count }} || c=$?
+          if [ "$c" -eq 3 ] && [ -s mutants.out/timeout.txt ] && ! [ -s mutants.out/missed.txt ]; then c=0; fi
+          exit "$c"
+
+  # The Kani proofs (`#[cfg(kani)] mod proofs` in src/codec.rs): nothing else builds them, so a
+  # change to that code breaks them unseen. Kani 0.68.0, as the proofs were verified with; its own
+  # nightly toolchain, so no -D warnings: RUSTFLAGS unset (an empty one is passed on as an argument).
+  kani:
+    if: github.event_name == 'pull_request'
+    runs-on: celesto-large
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { fetch-depth: 0 }
+      - id: changed
+        run: |
+          if git diff --quiet origin/${{ github.base_ref }}... -- '*.rs' Cargo.toml Cargo.lock rust-toolchain.toml; then
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          fi
+      # cargo-kani and the toolchain and CBMC its setup downloads (~/.kani), by version
+      - if: steps.changed.outputs.rust == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani
+            ~/.kani
+          key: kani-0.68.0-${{ runner.os }}
+      - if: steps.changed.outputs.rust == 'true'
+        run: |
+          command -v cargo-kani > /dev/null || env -u RUSTFLAGS cargo install --locked kani-verifier --version 0.68.0
+          env -u RUSTFLAGS cargo kani setup
+      - if: steps.changed.outputs.rust == 'true'
+        run: env -u RUSTFLAGS cargo kani --lib -j 2 --output-format=terse
+
+  # libFuzzer on every target for a minute
+  fuzz:
+    if: github.event_name == 'pull_request'
+    runs-on: celesto-memory
+    env: { RUSTFLAGS: "" } # -D warnings would fail on nightly-only lints
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+      # fuzz/ is a workspace of its own; keyed by the day's nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { workspaces: fuzz, key: "${{ steps.toolchain.outputs.cachekey }}" }
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with: { tool: cargo-fuzz }
+      - run: |
+          cd fuzz
+          for t in delta roundtrip; do
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$t" -- -max_total_time=60 -rss_limit_mb=3000 -max_len=65536
+          done
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: fuzz-artifacts, path: fuzz/artifacts }
+
+  # the release image builds, and its binary runs
+  image:
+    if: github.event_name == 'pull_request'
+    runs-on: celesto-memory
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          tags: agentwire:smoke
+          load: true
+          cache-from: type=gha,scope=image
+      - run: docker run --rm agentwire:smoke --version
