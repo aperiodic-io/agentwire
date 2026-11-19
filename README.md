@@ -176,7 +176,8 @@ cargo mutants                                   # every mutant must be caught (.
 | Mutation (`cargo mutants`) | Every mutant in a pull request's diff must fail a test. |
 
 CI runs all of these on pull requests ([.github/workflows/ci.yml](.github/workflows/ci.yml)),
-with every mutant and longer fuzzing nightly. A `vX.Y.Z` tag publishes the crate, the image, and
+with every mutant and longer fuzzing on demand ([nightly.yml](.github/workflows/nightly.yml), run from the
+Actions tab; its schedule is commented out). A `vX.Y.Z` tag publishes the crate, the image, and
 a GitHub release ([release.yml](.github/workflows/release.yml)).
 
 ## License
