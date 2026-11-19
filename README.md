@@ -464,3 +464,4 @@ research/run_all.sh
 - [reports/compression-research.md](reports/compression-research.md): compression research, recommendations per use case
 - [reports/design-space.md](reports/design-space.md): survey of codecs, delta/dedup, structure-aware and streaming approaches
 - [results/research/SUMMARY.md](results/research/SUMMARY.md): every research measurement
+- [site/index.html](site/index.html): the project website, a single static page with interactive demos (open it in a browser or serve `site/` with GitHub Pages)
