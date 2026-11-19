@@ -1,0 +1,1205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentWire: lossless compression for agent traffic</title>
+<meta name="description" content="AgentWire compresses AI-agent traffic (tool calls, results, transcripts, logs) losslessly, with zero added latency. Pure Python, zero dependencies, native libzstd.">
+<meta name="theme-color" content="#0b0b0a">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b0b0a'/%3E%3Cpath d='M5 16h7l3-7 4 14 3-7h5' fill='none' stroke='%23ffd60a' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0b0b0a; --bg-1:#111110; --bg-2:#171715; --bg-3:#1f1f1c;
+  --line:rgba(236,235,230,.08); --line-2:rgba(236,235,230,.14);
+  --text:#ecebe6; --text-2:#b9b7ae; --muted:#7f7d75; --faint:#55534d;
+  --y:#ffd60a; --y-2:#ffe45c; --y-ink:#1a1500; --y-dim:rgba(255,214,10,.12); --y-glow:rgba(255,214,10,.35);
+  --red:#ff6b5b; --green:#9be37a;
+  --sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --serif:"Instrument Serif",ui-serif,Georgia,serif;
+  --r:14px; --max:1180px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+::selection{background:var(--y);color:var(--y-ink)}
+a{color:inherit;text-decoration:none}
+code,kbd,.mono{font-family:var(--mono);font-size:.92em}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+:focus-visible{outline:2px solid var(--y);outline-offset:3px;border-radius:6px}
+
+/* grain */
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:100;opacity:.05;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+
+.wrap{max-width:var(--max);margin:0 auto;padding:0 28px}
+@media (max-width:640px){.wrap{padding:0 16px}.eyebrow{font-size:11px}.wire-hint{display:none}}
+
+/* nav */
+.nav{position:fixed;top:0;left:0;right:0;z-index:50;transition:background .3s,border-color .3s,backdrop-filter .3s;border-bottom:1px solid transparent}
+.nav.scrolled{background:rgba(11,11,10,.72);backdrop-filter:blur(14px) saturate(1.4);-webkit-backdrop-filter:blur(14px) saturate(1.4);border-color:var(--line)}
+.nav .wrap{display:flex;align-items:center;justify-content:space-between;height:64px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:-.02em;font-size:17px}
+.brand svg{width:26px;height:26px}
+.nav-links{display:flex;gap:4px;align-items:center}
+.nav-links a{padding:7px 12px;border-radius:999px;color:var(--text-2);font-size:14px;transition:color .2s,background .2s}
+.nav-links a:hover{color:var(--text);background:var(--bg-2)}
+.nav-links .gh{display:flex;align-items:center;gap:8px;border:1px solid var(--line-2);color:var(--text);margin-left:8px}
+.nav-links .gh:hover{border-color:var(--y);background:var(--y-dim)}
+@media (max-width:860px){.nav-links a:not(.gh){display:none}}
+
+/* hero */
+.hero{position:relative;padding:136px 0 40px;overflow:hidden}
+.hero-glow{position:absolute;width:900px;height:900px;left:50%;top:-380px;transform:translateX(-50%);background:radial-gradient(closest-side,rgba(255,214,10,.13),transparent 70%);pointer-events:none;filter:blur(10px)}
+.grid-bg{position:absolute;inset:0;pointer-events:none;
+  background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:64px 64px;mask-image:radial-gradient(ellipse 80% 60% at 50% 20%,#000 30%,transparent 75%);-webkit-mask-image:radial-gradient(ellipse 80% 60% at 50% 20%,#000 30%,transparent 75%);opacity:.55}
+.eyebrow{display:inline-flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12.5px;color:var(--text-2);border:1px solid var(--line-2);border-radius:999px;padding:6px 14px 6px 8px;background:rgba(17,17,16,.6);backdrop-filter:blur(6px)}
+.eyebrow .dot{width:18px;height:18px;border-radius:50%;background:var(--y-dim);display:grid;place-items:center}
+.eyebrow .dot::after{content:"";width:6px;height:6px;border-radius:50%;background:var(--y);box-shadow:0 0 10px var(--y)}
+h1{font-size:clamp(44px,7.4vw,96px);line-height:.98;letter-spacing:-.045em;font-weight:600;margin:26px 0 0}
+h1 em,h2 em{font-family:var(--serif);font-style:italic;font-weight:400;letter-spacing:-.02em;color:var(--y)}
+.lede{font-size:clamp(17px,1.7vw,20px);color:var(--text-2);max-width:560px;margin:26px 0 0;line-height:1.55}
+.lede strong{color:var(--text);font-weight:500}
+.cta{display:flex;flex-wrap:wrap;gap:12px;margin-top:36px;align-items:center}
+.btn{display:inline-flex;align-items:center;gap:10px;height:48px;padding:0 22px;border-radius:999px;font-weight:500;font-size:15px;transition:transform .2s,background .2s,box-shadow .2s,border-color .2s}
+.btn-y{background:var(--y);color:var(--y-ink);box-shadow:0 0 0 0 var(--y-glow)}
+.btn-y:hover{transform:translateY(-1px);box-shadow:0 8px 30px -6px var(--y-glow)}
+.btn-ghost{border:1px solid var(--line-2)}
+.btn-ghost:hover{border-color:var(--text-2)}
+.copy-chip{display:inline-flex;align-items:center;gap:12px;height:48px;padding:0 8px 0 18px;border-radius:999px;border:1px solid var(--line-2);background:var(--bg-1);font-family:var(--mono);font-size:13.5px;color:var(--text-2)}
+.copy-chip .p{color:var(--y)}
+.copy-chip button{height:34px;padding:0 12px;border-radius:999px;background:var(--bg-3);font-size:12px;color:var(--text-2);transition:background .2s,color .2s}
+.copy-chip button:hover{background:var(--y);color:var(--y-ink)}
+
+.wire-stage{position:relative;margin-top:52px;height:240px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.wire-stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.wire-hud{position:absolute;left:0;right:0;top:16px;display:flex;justify-content:space-between;pointer-events:none;font-family:var(--mono);font-size:11.5px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
+.wire-hud b{color:var(--text);font-weight:500}
+.wire-hud .y{color:var(--y)}
+.wire-tip{position:absolute;pointer-events:none;background:var(--bg-2);border:1px solid var(--line-2);border-radius:10px;padding:8px 11px;font-family:var(--mono);font-size:12px;white-space:nowrap;transform:translate(-50%,-120%);opacity:0;transition:opacity .15s;z-index:3}
+.wire-tip .k{color:var(--muted)}
+.wire-tip .y{color:var(--y)}
+.wire-hint{position:absolute;right:0;bottom:12px;font-family:var(--mono);font-size:11px;color:var(--faint)}
+
+.stats{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--line)}
+.stat{padding:30px 24px 30px 0}
+.stat+.stat{padding-left:24px;border-left:1px solid var(--line)}
+.stat .n{font-size:clamp(34px,4vw,50px);font-weight:600;letter-spacing:-.04em;line-height:1;font-variant-numeric:tabular-nums}
+.stat .n small{font-size:.5em;color:var(--y);margin-left:2px;font-weight:500}
+.stat .l{color:var(--muted);font-size:13.5px;margin-top:10px;line-height:1.45}
+@media (max-width:820px){.stats{grid-template-columns:1fr 1fr}.stat:nth-child(3){padding-left:0;border-left:0}.stat:nth-child(n+3){border-top:1px solid var(--line)}}
+
+/* sections */
+section{position:relative;padding:130px 0 0}
+.sec-head{display:grid;grid-template-columns:1fr 1fr;gap:40px;align-items:end;margin-bottom:56px}
+@media (max-width:860px){.sec-head{grid-template-columns:1fr;gap:18px}}
+.kicker{font-family:var(--mono);font-size:12px;color:var(--y);letter-spacing:.08em;text-transform:uppercase;display:flex;align-items:center;gap:10px;margin-bottom:18px}
+.kicker::before{content:"";width:22px;height:1px;background:var(--y)}
+h2{font-size:clamp(34px,4.6vw,58px);line-height:1.02;letter-spacing:-.04em;font-weight:600;margin:0}
+.sec-head p{color:var(--text-2);font-size:17px;margin:0;max-width:480px}
+h3{font-size:20px;letter-spacing:-.02em;font-weight:600;margin:0}
+
+.card{background:var(--bg-1);border:1px solid var(--line);border-radius:var(--r)}
+
+/* layers */
+.layers{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:860px){.layers{grid-template-columns:1fr}}
+.layer{padding:34px;position:relative;overflow:hidden;transition:border-color .3s}
+.layer:hover{border-color:var(--line-2)}
+.layer .tag{display:inline-flex;gap:8px;align-items:center;font-family:var(--mono);font-size:11.5px;padding:4px 10px;border-radius:999px;border:1px solid var(--line-2);color:var(--text-2);margin-bottom:22px}
+.layer .tag.y{border-color:rgba(255,214,10,.4);color:var(--y);background:var(--y-dim)}
+.layer h3{font-size:26px;margin-bottom:12px}
+.layer p{color:var(--text-2);margin:0 0 22px}
+.layer ul{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.layer li{position:relative;padding-left:18px;font-size:14.5px;color:var(--text-2)}
+.layer li::before{content:"";position:absolute;left:0;top:9px;width:6px;height:6px;border-radius:2px;background:var(--y)}
+.layer .art{height:120px;margin:-6px 0 22px;position:relative}
+
+/* playground */
+.pg{display:grid;grid-template-columns:1.05fr 1fr;gap:16px}
+@media (max-width:960px){.pg{grid-template-columns:1fr}}
+.pg-panel{padding:22px;display:flex;flex-direction:column;min-width:0}
+.pg-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin-bottom:16px}
+.seg{display:inline-flex;background:var(--bg);border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px;flex-wrap:wrap}
+.seg button{padding:6px 12px;border-radius:999px;font-size:13px;color:var(--muted);transition:color .2s,background .2s}
+.seg button:hover{color:var(--text)}
+.seg button[aria-pressed="true"]{background:var(--bg-3);color:var(--text)}
+.seg.y button[aria-pressed="true"]{background:var(--y);color:var(--y-ink)}
+.pg-actions{display:flex;gap:8px}
+.chip-btn{height:34px;padding:0 14px;border-radius:999px;border:1px solid var(--line-2);font-size:13px;display:inline-flex;align-items:center;gap:8px;transition:border-color .2s,background .2s,color .2s}
+.chip-btn:hover{border-color:var(--text-2)}
+.chip-btn.on{background:var(--y);border-color:var(--y);color:var(--y-ink)}
+.chip-btn svg{width:13px;height:13px}
+.feed{flex:1;min-height:340px;max-height:380px;overflow:hidden;position:relative;background:var(--bg);border:1px solid var(--line);border-radius:10px;font-family:var(--mono);font-size:12px}
+.feed::after{content:"";position:absolute;left:0;right:0;bottom:0;height:60px;background:linear-gradient(transparent,var(--bg));pointer-events:none}
+.feed-row{display:grid;grid-template-columns:34px 1fr auto;gap:10px;padding:8px 12px;border-bottom:1px solid var(--line);align-items:center;animation:rowIn .5s cubic-bezier(.2,.8,.2,1)}
+@keyframes rowIn{from{opacity:0;transform:translateY(-8px);background:var(--y-dim)}to{opacity:1;transform:none}}
+.feed-row .i{color:var(--faint)}
+.feed-row .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-2)}
+.feed-row .s{color:var(--muted);font-size:11px;text-align:right;white-space:nowrap}
+.feed-row .s b{color:var(--y);font-weight:500}
+.feed-empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--faint);font-size:13px;text-align:center;padding:20px}
+.pg-big{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+.meter{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:16px}
+.meter .lbl{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.meter .v{font-size:42px;font-weight:600;letter-spacing:-.04em;line-height:1.1;margin-top:8px;font-variant-numeric:tabular-nums}
+.meter .v small{font-size:.45em;color:var(--muted);font-weight:500;margin-left:3px}
+.meter.hl{border-color:rgba(255,214,10,.35);background:linear-gradient(180deg,rgba(255,214,10,.06),transparent)}
+.meter.hl .v{color:var(--y)}
+.meter .sub{font-size:12.5px;color:var(--muted);font-family:var(--mono);margin-top:4px}
+.bars-wrap{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:14px 14px 10px;flex:1;display:flex;flex-direction:column;min-height:200px}
+.bars-title{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;gap:10px;flex-wrap:wrap}
+.legend{display:flex;gap:14px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
+.bars{flex:1;display:flex;align-items:flex-end;gap:3px;min-height:150px;position:relative}
+.bars .col{flex:1;display:flex;gap:1px;align-items:flex-end;height:100%;min-width:0}
+.bars .col div{flex:1;border-radius:2px 2px 0 0;transition:height .5s cubic-bezier(.2,.8,.2,1);min-height:1px}
+.bars .a{background:var(--faint)}
+.bars .b{background:var(--y)}
+.pg-note{font-size:12.5px;color:var(--muted);margin-top:14px;line-height:1.5}
+.pg-note code{color:var(--text-2)}
+
+/* benchmarks */
+.bench{padding:30px}
+.bench-top{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:28px}
+.bench-top .meta{font-size:13.5px;color:var(--muted);max-width:520px}
+.brow{display:grid;grid-template-columns:260px 1fr 90px;gap:18px;align-items:center;padding:9px 0;position:relative}
+@media (max-width:760px){.brow{grid-template-columns:1fr 64px}.brow .track{grid-column:1/-1;order:3}}
+.brow .name{font-size:14.5px;color:var(--text-2)}
+.brow .name .lat{display:inline-block;font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:6px;padding:1px 7px;border-radius:999px;border:1px solid var(--line)}
+.brow .name .lat.w{color:var(--red);border-color:rgba(255,107,91,.3)}
+.brow .track{height:30px;background:var(--bg);border-radius:6px;position:relative;overflow:visible;border:1px solid var(--line)}
+.brow .fill{position:absolute;left:0;top:0;bottom:0;border-radius:5px;background:var(--bg-3);transition:width .9s cubic-bezier(.2,.8,.2,1)}
+.brow.best .fill{background:linear-gradient(90deg,rgba(255,214,10,.55),var(--y))}
+.brow .val{font-family:var(--mono);font-size:16px;text-align:right;font-variant-numeric:tabular-nums}
+.brow.best .val{color:var(--y)}
+.brow .ref{position:absolute;top:-6px;bottom:-6px;width:0;border-left:1.5px dashed var(--text-2);transition:left .9s cubic-bezier(.2,.8,.2,1);opacity:.6}
+.brow:hover .name{color:var(--text)}
+.bench-foot{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-top:22px;padding-top:20px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+.bench-foot .dash{display:inline-block;width:18px;border-top:1.5px dashed var(--text-2);vertical-align:middle;margin-right:8px;opacity:.6}
+
+.research{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
+@media (max-width:860px){.research{grid-template-columns:1fr}}
+.rcard{padding:28px}
+.rcard h3{margin-bottom:6px}
+.rcard p{color:var(--muted);font-size:14px;margin:0 0 22px}
+.lrow{display:grid;grid-template-columns:170px 1fr 74px;gap:12px;align-items:center;padding:7px 0;font-size:13.5px}
+.lrow .nm{color:var(--text-2)}
+.lrow .tr{height:10px;border-radius:99px;background:var(--bg);position:relative;overflow:hidden}
+.lrow .fl{position:absolute;inset:0 auto 0 0;border-radius:99px;background:var(--faint);width:0;transition:width 1.1s cubic-bezier(.2,.8,.2,1)}
+.lrow.best .fl{background:var(--y)}
+.lrow .vv{font-family:var(--mono);text-align:right;color:var(--text-2)}
+.lrow.best .vv{color:var(--y)}
+.scale-note{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:12px}
+
+/* wire format */
+.fmt{padding:30px}
+.fmt-top{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px;margin-bottom:26px}
+.fmt-top .sz{font-family:var(--mono);font-size:13px;color:var(--muted)}
+.fmt-top .sz b{color:var(--y);font-size:22px;font-weight:500;margin-right:4px}
+.bytes{display:flex;flex-wrap:wrap;gap:10px 9px}
+.field{display:flex;gap:3px;position:relative;cursor:default}
+.byte{width:30px;height:38px;border-radius:5px;background:var(--bg-3);display:grid;place-items:center;font-family:var(--mono);font-size:10.5px;color:var(--muted);transition:background .2s,color .2s,transform .2s}
+.field:hover .byte,.field.on .byte{background:var(--y);color:var(--y-ink)}
+.field.pl .byte{background:transparent;border:1px dashed var(--line-2);width:auto;padding:0 16px;color:var(--text-2)}
+.field.pl:hover .byte,.field.pl.on .byte{border-color:var(--y);color:var(--y);background:var(--y-dim)}
+@media (max-width:640px){.byte{width:22px;height:30px;font-size:9px}}
+.fmt-desc{margin-top:22px;display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:6px}
+.fd{padding:11px 13px;border-radius:9px;border:1px solid transparent;transition:border-color .2s,background .2s;cursor:default}
+.fd .h{font-family:var(--mono);font-size:12.5px;color:var(--text);display:flex;justify-content:space-between;gap:8px}
+.fd .h span{color:var(--muted)}
+.fd .d{font-size:13px;color:var(--muted);margin-top:3px;line-height:1.45}
+.fd.on{border-color:rgba(255,214,10,.4);background:var(--y-dim)}
+.fd.on .h{color:var(--y)}
+.fmt-compare{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:16px}
+@media (max-width:860px){.fmt-compare{grid-template-columns:1fr}}
+.fc{padding:24px}
+.fc .nm{font-family:var(--mono);font-size:13px;color:var(--y);margin-bottom:8px}
+.fc h3{font-size:18px;margin-bottom:8px}
+.fc p{font-size:14px;color:var(--muted);margin:0 0 14px}
+.fc .pc{display:grid;gap:6px;font-size:13.5px}
+.fc .pc div{display:flex;gap:10px;color:var(--text-2)}
+.fc .pc .p::before{content:"+";color:var(--green);font-family:var(--mono)}
+.fc .pc .m::before{content:"−";color:var(--red);font-family:var(--mono)}
+
+/* reducer */
+.rd{display:grid;grid-template-columns:1.5fr 1fr;gap:16px}
+@media (max-width:960px){.rd{grid-template-columns:1fr}}
+.rd-main{padding:24px}
+.budget{display:grid;grid-template-columns:auto 1fr auto;gap:18px;align-items:center;margin-bottom:22px}
+.budget label{font-family:var(--mono);font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.budget output{font-family:var(--mono);font-size:15px;color:var(--y);min-width:92px;text-align:right}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:28px;background:transparent;cursor:pointer}
+input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:99px;background:linear-gradient(90deg,var(--y) var(--p,50%),var(--bg-3) var(--p,50%))}
+input[type=range]::-moz-range-track{height:4px;border-radius:99px;background:var(--bg-3)}
+input[type=range]::-moz-range-progress{height:4px;border-radius:99px;background:var(--y)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:var(--y);margin-top:-8px;box-shadow:0 0 0 6px var(--y-dim)}
+input[type=range]::-moz-range-thumb{width:20px;height:20px;border:0;border-radius:50%;background:var(--y);box-shadow:0 0 0 6px var(--y-dim)}
+.ev{display:grid;grid-template-columns:22px 150px 1fr 70px;gap:12px;align-items:center;padding:9px 0;border-top:1px solid var(--line);font-size:13px}
+@media (max-width:640px){.ev{grid-template-columns:22px 1fr 60px}.ev .ebar{grid-column:2/-1;order:4}}
+.ev .ic{width:22px;height:22px;display:grid;place-items:center;color:var(--faint)}
+.ev .ic svg{width:14px;height:14px}
+.ev.prot .ic{color:var(--text-2)}
+.ev .nm{font-family:var(--mono);font-size:12px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ev .nm span{display:block;color:var(--faint);font-size:10.5px}
+.ev .ebar{height:22px;background:var(--bg);border-radius:5px;position:relative;overflow:hidden;border:1px solid var(--line)}
+.ev .ebar i{position:absolute;inset:0 auto 0 0;background:var(--bg-3);transition:width .7s cubic-bezier(.2,.8,.2,1);border-radius:4px}
+.ev.prot .ebar i{background:#3a3934}
+.ev.elig .ebar i{background:repeating-linear-gradient(135deg,#35342f 0 6px,#2a2925 6px 12px)}
+.ev.cond .ebar i{background:var(--y)}
+.ev .ebar em{position:absolute;left:10px;top:50%;transform:translateY(-50%);font-style:normal;font-family:var(--mono);font-size:10.5px;color:var(--muted);white-space:nowrap;opacity:0;transition:opacity .4s}
+.ev.cond .ebar em{opacity:1;left:auto;right:10px;color:var(--text-2)}
+.ev .sz{font-family:var(--mono);font-size:12px;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.ev.cond .sz{color:var(--y)}
+.rd-sum{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:18px;padding-top:18px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+.rd-sum b{color:var(--text);font-weight:500}
+.rd-sum .ok{color:var(--green)}
+.rd-sum .err{color:var(--red)}
+.rd-side{padding:24px;display:flex;flex-direction:column;gap:16px;min-width:0}
+.rd-side h4{margin:0;font-family:var(--mono);font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:400}
+.ref-json{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:14px;font-family:var(--mono);font-size:11.5px;line-height:1.65;color:var(--text-2);white-space:pre-wrap;word-break:break-all;min-height:170px}
+.ref-json .k{color:var(--muted)}
+.ref-json .s{color:var(--y)}
+.ref-json .n{color:#c9b6ff}
+.archive{display:flex;flex-direction:column;gap:6px}
+.blob{display:flex;justify-content:space-between;gap:10px;font-family:var(--mono);font-size:11.5px;padding:8px 10px;border-radius:8px;background:var(--bg);border:1px solid var(--line);color:var(--text-2);animation:rowIn .5s}
+.blob span{color:var(--muted)}
+.blob.ok{border-color:rgba(155,227,122,.4)}
+.blob.ok span{color:var(--green)}
+.archive .empty{font-size:13px;color:var(--faint)}
+.legend-rd{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:4px}
+.legend-rd span{display:inline-flex;gap:7px;align-items:center}
+.legend-rd i{width:14px;height:10px;border-radius:3px}
+
+/* chooser */
+.choose{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:860px){.choose{grid-template-columns:1fr}.answer{position:relative;top:0;order:-1}}
+.sits{display:flex;flex-direction:column;gap:4px;padding:10px}
+.sit{text-align:left;padding:13px 16px;border-radius:10px;color:var(--text-2);font-size:15px;display:flex;justify-content:space-between;align-items:center;gap:12px;transition:background .2s,color .2s}
+.sit:hover{background:var(--bg-2);color:var(--text)}
+.sit[aria-pressed="true"]{background:var(--bg-3);color:var(--text)}
+.sit .arr{opacity:0;color:var(--y);transition:opacity .2s,transform .2s;transform:translateX(-4px)}
+.sit[aria-pressed="true"] .arr{opacity:1;transform:none}
+.answer{padding:36px;position:sticky;top:90px;align-self:start;overflow:hidden}
+.answer .lab{font-family:var(--mono);font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.answer .mode{font-size:clamp(32px,3.6vw,46px);font-weight:600;letter-spacing:-.04em;line-height:1.05;margin:14px 0 18px;color:var(--y)}
+.answer p{color:var(--text-2);margin:0 0 22px}
+.answer pre{margin:0;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:14px 16px;font-family:var(--mono);font-size:12.5px;color:var(--text-2);overflow-x:auto;white-space:pre}
+.answer .swap{animation:swap .45s cubic-bezier(.2,.8,.2,1)}
+@keyframes swap{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+/* fail closed */
+.fails{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+@media (max-width:860px){.fails{grid-template-columns:1fr}}
+.fail{background:var(--bg-1);padding:26px;transition:background .3s}
+.fail:hover{background:var(--bg-2)}
+.fail .ex{font-family:var(--mono);font-size:12.5px;color:var(--red);margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.fail .ex::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--red);box-shadow:0 0 8px var(--red)}
+.fail h3{font-size:17px;margin-bottom:6px}
+.fail p{font-size:14px;color:var(--muted);margin:0}
+
+/* quick start */
+.qs{overflow:hidden}
+.qs-tabs{display:flex;gap:2px;padding:10px 10px 0;border-bottom:1px solid var(--line);overflow-x:auto}
+.qs-tabs button{padding:10px 16px;font-size:13.5px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap;transition:color .2s,border-color .2s}
+.qs-tabs button:hover{color:var(--text)}
+.qs-tabs button[aria-selected="true"]{color:var(--text);border-color:var(--y)}
+.qs-body{position:relative}
+.qs-body pre{margin:0;padding:26px 28px;font-family:var(--mono);font-size:13.5px;line-height:1.75;color:var(--text-2);overflow-x:auto;min-height:320px}
+.qs-body .copy{position:absolute;top:14px;right:14px;height:32px;padding:0 12px;border-radius:8px;border:1px solid var(--line-2);font-size:12px;color:var(--muted);background:var(--bg-1);transition:color .2s,border-color .2s}
+.qs-body .copy:hover{color:var(--y);border-color:var(--y)}
+.c-c{color:var(--faint)} .c-k{color:#c9b6ff} .c-s{color:var(--y)} .c-f{color:var(--text)} .c-p{color:var(--y)}
+
+/* closing */
+.closing{padding:160px 0 0;text-align:center}
+.closing h2{font-size:clamp(40px,6.4vw,84px);margin:0 auto}
+.closing p{color:var(--text-2);max-width:520px;margin:24px auto 0;font-size:17px}
+.closing .cta{justify-content:center}
+.status{margin:80px auto 0;max-width:720px;font-size:13.5px;color:var(--muted);border:1px solid var(--line);border-radius:12px;padding:16px 20px;text-align:left;display:flex;gap:14px;align-items:flex-start;background:var(--bg-1)}
+.status svg{flex:none;width:18px;height:18px;color:var(--y);margin-top:2px}
+footer{margin-top:120px;border-top:1px solid var(--line);padding:30px 0 40px}
+footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;color:var(--muted);font-size:13.5px}
+footer nav{display:flex;gap:20px;flex-wrap:wrap}
+footer a:hover{color:var(--y)}
+
+/* reveal */
+.rv{opacity:0;transform:translateY(22px);transition:opacity .9s cubic-bezier(.2,.8,.2,1),transform .9s cubic-bezier(.2,.8,.2,1)}
+.rv.in{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){.rv{opacity:1;transform:none;transition:none}*{animation:none!important}}
+</style>
+</head>
+<body>
+
+<header class="nav" id="nav">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="AgentWire home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#1f1f1c"/><path d="M5 16h7l3-7 4 14 3-7h5" fill="none" stroke="#ffd60a" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      agentwire
+    </a>
+    <nav class="nav-links">
+      <a href="#layers">How it works</a>
+      <a href="#playground">Playground</a>
+      <a href="#benchmarks">Benchmarks</a>
+      <a href="#reducer">Reducer</a>
+      <a href="#start">Quick start</a>
+      <a class="gh" href="https://github.com/aperiodic-io/agentwire">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-glow"></div>
+  <div class="grid-bg"></div>
+  <div class="wrap" style="position:relative">
+    <span class="eyebrow"><span class="dot"></span>Lossless · zero-delay · zero dependencies</span>
+    <h1>Agent traffic,<br><em>six times</em> lighter.</h1>
+    <p class="lede">AgentWire compresses what your agents send and store: tool calls, tool results, transcripts and logs. <strong>The receiver gets back the exact same bytes.</strong> It's pure Python on native libzstd, and it adds no latency.</p>
+    <div class="cta">
+      <a class="btn btn-y" href="#playground">Try it live
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg></a>
+      <span class="copy-chip"><span><span class="p">$</span> python3 -m agentwire demo</span><button data-copy="python3 -m agentwire demo">Copy</button></span>
+    </div>
+
+    <div class="wire-stage" id="wireStage">
+      <canvas id="wire" aria-label="Animation: messages are compressed by the encoder, travel small along the wire, and are restored byte-for-byte by the decoder" role="img"></canvas>
+      <div class="wire-hud">
+        <span>in <b id="hudIn">0 B</b></span>
+        <span>on the wire <b class="y" id="hudWire">0 B</b></span>
+        <span>ratio <b class="y" id="hudRatio">—</b></span>
+      </div>
+      <div class="wire-tip" id="wireTip"></div>
+      <div class="wire-hint">hover a packet · click for a burst</div>
+    </div>
+
+    <div class="stats">
+      <div class="stat rv"><div class="n"><span data-count="6.75" data-dec="2">0</span><small>×</small></div><div class="l">smaller on real Codex sessions, AWC1 stream with an 8 MiB window</div></div>
+      <div class="stat rv"><div class="n"><span data-count="0">0</span><small>ms</small></div><div class="l">added latency. Every message is flushed the moment it's sent</div></div>
+      <div class="stat rv"><div class="n"><span data-count="107" data-suf="K">0</span></div><div class="l">real messages replayed and verified byte-for-byte on decode</div></div>
+      <div class="stat rv"><div class="n"><span data-count="0">0</span></div><div class="l">pip dependencies. libzstd is loaded through ctypes</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- LAYERS -->
+<section id="layers">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div><div class="kicker">01 · Two layers</div><h2>Squeeze the wire. <em>Shrink</em> the context.</h2></div>
+      <p>Use them separately or together. The transport never touches your payloads. The reducer only touches what you've explicitly marked as low priority, and it can always restore it.</p>
+    </div>
+    <div class="layers">
+      <article class="card layer rv">
+        <span class="tag y">● byte-exact</span>
+        <div class="art"><canvas id="artT" style="width:100%;height:100%"></canvas></div>
+        <h3>Transport</h3>
+        <p>Frames and compresses streams of opaque binary messages, optionally with a shared, versioned Zstd dictionary. The other side reconstructs the exact bytes, IDs, kinds and order.</p>
+        <ul>
+          <li>AWC1 keeps one Zstd stream per connection, so each message compresses against everything sent before it</li>
+          <li>AWF1 sends self-contained frames for storage, fan-out and replay</li>
+          <li>AWD1 sends only the change when a client re-sends a growing context</li>
+        </ul>
+      </article>
+      <article class="card layer rv">
+        <span class="tag">◐ lossy in the prompt, recoverable from the archive</span>
+        <div class="art"><canvas id="artR" style="width:100%;height:100%"></canvas></div>
+        <h3>Context reducer</h3>
+        <p>Replaces low-priority tool results with a short preview and a SHA-256 reference. The full payload goes to a compressed, content-addressed archive first, so you can restore it exactly.</p>
+        <ul>
+          <li>Instructions, tool calls, state and errors are never touched</li>
+          <li>Deterministic: the largest savings are applied first, and it stops once the budget is met</li>
+          <li>Raises <code>BudgetExceeded</code> instead of silently dropping anything</li>
+        </ul>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- PLAYGROUND -->
+<section id="playground">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div><div class="kicker">02 · Playground</div><h2>History beats <em>batching.</em></h2></div>
+      <p>Send messages and watch the two strategies diverge. Compressing each message on its own gets nowhere. Once the stream remembers the connection, each new message costs only what's actually new.</p>
+    </div>
+    <div class="pg rv">
+      <div class="card pg-panel">
+        <div class="pg-bar">
+          <div class="seg" id="wl" role="group" aria-label="Workload">
+            <button aria-pressed="true" data-w="tool">Tool JSON</button>
+            <button aria-pressed="false" data-w="trans">Transcript</button>
+            <button aria-pressed="false" data-w="logs">Logs</button>
+            <button aria-pressed="false" data-w="chat">Tiny chat</button>
+            <button aria-pressed="false" data-w="rand">Random</button>
+          </div>
+        </div>
+        <div class="feed" id="feed"><div class="feed-empty" id="feedEmpty">Press <b style="color:var(--y);font-weight:500">&nbsp;Send&nbsp;</b> or turn on auto to start a connection.</div></div>
+        <div class="pg-bar" style="margin:16px 0 0">
+          <span class="mono" style="font-size:12px;color:var(--muted)" id="connInfo">connection idle</span>
+          <div class="pg-actions">
+            <button class="chip-btn" id="pgReset" title="Reset: start a new connection with empty history">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2.5 8a5.5 5.5 0 1 0 1.7-4"/><path d="M2 2.5v3h3"/></svg>Reset</button>
+            <button class="chip-btn" id="pgAuto"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M4 3l9 5-9 5z"/></svg>Auto</button>
+            <button class="chip-btn on" id="pgSend">Send →</button>
+          </div>
+        </div>
+      </div>
+      <div class="card pg-panel">
+        <div class="pg-big">
+          <div class="meter"><div class="lbl"><span>Per message</span><span>≈ AWF1</span></div><div class="v" id="mA">—<small>×</small></div><div class="sub" id="mAs">0 B on the wire</div></div>
+          <div class="meter hl"><div class="lbl"><span>Stream with history</span><span>≈ AWC1</span></div><div class="v" id="mB">—<small>×</small></div><div class="sub" id="mBs">0 B on the wire</div></div>
+        </div>
+        <div class="bars-wrap">
+          <div class="bars-title"><span>Wire bytes per message</span><span class="legend"><span><i style="background:var(--faint)"></i>independent</span><span><i style="background:var(--y)"></i>stream</span></span></div>
+          <div class="bars" id="bars"></div>
+        </div>
+        <p class="pg-note">This compresses for real, in your browser. It uses the built-in <code>CompressionStream</code> (deflate, 32 KiB window) because browsers don't ship zstd. Each stream message is costed as the growth of the compressed history plus a 5 B flush marker, and each format's frame header is added: 56 B for AWF1, 10 B for AWC1. AgentWire uses libzstd with up to an 8 MiB window, so the absolute numbers differ, but the shape is the same.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- BENCHMARKS -->
+<section id="benchmarks">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div><div class="kicker">03 · Benchmarks</div><h2>Measured on <em>real</em> sessions.</h2></div>
+      <p>198 held-out Claude Code and Codex sessions (107K messages, 458 MiB), replayed at their recorded timestamps. Dictionaries were trained only on older sessions. Every frame was decoded and compared byte-for-byte.</p>
+    </div>
+    <div class="card bench rv">
+      <div class="bench-top">
+        <div class="seg y" id="corp" role="group" aria-label="Corpus">
+          <button aria-pressed="true" data-c="cc">Claude Code</button>
+          <button aria-pressed="false" data-c="cx">Codex</button>
+        </div>
+        <span class="meta">Ratio = original payload bytes ÷ full wire bytes, <b style="color:var(--text-2);font-weight:500">headers included</b>.</span>
+      </div>
+      <div id="benchRows"></div>
+      <div class="bench-foot">
+        <span><span class="dash"></span>Offline reference: the whole finished session in one Zstd frame (<span id="offv">6.55×</span>)</span>
+        <span>AWC1 + 8 MiB window lands within <b style="color:var(--y);font-weight:500" id="gap">2%</b> of it, with zero delay</span>
+      </div>
+    </div>
+
+    <div class="research">
+      <div class="card rcard rv">
+        <h3>When the client re-sends the whole conversation</h3>
+        <p>92% of each LLM request is a byte-for-byte copy of the previous one. Compressing each request on its own can't see that.</p>
+        <div id="r1"></div>
+        <div class="scale-note">log scale · held-out public corpora, framing included</div>
+      </div>
+      <div class="card rcard rv">
+        <h3>When the context outgrows the window</h3>
+        <p>On 6 MB contexts, AWC1 with a 1 MiB window falls to 10×. The AWD1 context delta doesn't depend on window size.</p>
+        <div id="r2"></div>
+        <div class="scale-note">log scale · <a href="https://github.com/aperiodic-io/agentwire/blob/main/reports/compression-research.md" style="text-decoration:underline;text-underline-offset:3px">full research report ↗</a></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- WIRE FORMAT -->
+<section id="wire-format">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div><div class="kicker">04 · On the wire</div><h2>Every byte has a <em>job.</em></h2></div>
+      <p>Simple big-endian formats with canonical varints. Hover over a field to see what it does, or switch formats to compare their per-frame overhead.</p>
+    </div>
+    <div class="card fmt rv">
+      <div class="fmt-top">
+        <div class="seg y" id="fmtSeg" role="group" aria-label="Frame format">
+          <button aria-pressed="true" data-f="awc">AWC1 DATA</button>
+          <button aria-pressed="false" data-f="awf">AWF1 header</button>
+          <button aria-pressed="false" data-f="reset">AWC1 RESET</button>
+        </div>
+        <span class="sz"><b id="fmtSize">10</b><span id="fmtSizeL">bytes per message, typical</span></span>
+      </div>
+      <div class="bytes" id="bytes"></div>
+      <div class="fmt-desc" id="fmtDesc"></div>
+    </div>
+    <div class="fmt-compare">
+      <div class="card fc rv"><div class="nm">AWC1 · stream</div><h3>One Zstd stream per connection</h3><p>Flushes after every message. Matches can reach anything sent earlier on the connection, like <code>permessage-deflate</code> with context takeover.</p>
+        <div class="pc"><div class="p">0 ms added, 8–12 B per frame</div><div class="p">Best ratio on live traffic</div><div class="m">~2.1 + 1.5 MiB state per connection at a 1 MiB window</div><div class="m">Decodes in order only. Any error poisons the session</div></div></div>
+      <div class="card fc rv"><div class="nm">AWF1 · frames</div><h3>Bounded, self-contained batches</h3><p>Flushes at 32 messages, 64 KiB or 25 ms, whichever comes first. Each frame decodes on its own.</p>
+        <div class="pc"><div class="p">Store, fan out and replay frames independently</div><div class="p">Sends raw when compression doesn't help</div><div class="m">Must wait to collect history</div><div class="m">56 B header is heavy for small messages</div></div></div>
+      <div class="card fc rv"><div class="nm">AWD1 · context delta</div><h3>Send only what changed</h3><p>Each record is a shared prefix and suffix against one of the last N messages, plus a literal compressed on a single stream.</p>
+        <div class="pc"><div class="p">Stays efficient at any context size</div><div class="p">2,222× on 6 MB contexts</div><div class="m">Memory is O(references × message size)</div><div class="m">Only helps if the client re-sends context</div></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- REDUCER -->
+<section id="reducer">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div><div class="kicker">05 · Context reducer</div><h2>Forget on purpose. <em>Remember</em> on demand.</h2></div>
+      <p>Drag the budget down. Low-priority tool results get archived and replaced with references, largest savings first. Protected events never change. If the budget can't be met, it fails loudly.</p>
+    </div>
+    <div class="rd rv">
+      <div class="card rd-main">
+        <div class="budget">
+          <label for="budget">Budget</label>
+          <input type="range" id="budget" min="0" max="100" value="100" aria-describedby="rdStatus">
+          <output id="budgetOut" for="budget">—</output>
+        </div>
+        <div id="events"></div>
+        <div class="legend-rd" style="margin-top:14px">
+          <span><i style="background:#3a3934"></i>protected</span>
+          <span><i style="background:repeating-linear-gradient(135deg,#35342f 0 4px,#2a2925 4px 8px)"></i>eligible (low · ok · unpinned)</span>
+          <span><i style="background:var(--y)"></i>condensed to a ref</span>
+        </div>
+        <div class="rd-sum" id="rdStatus"></div>
+      </div>
+      <div class="card rd-side">
+        <h4>What the model sees instead</h4>
+        <div class="ref-json" id="refJson"><span class="k">// lower the budget to condense an observation</span></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+          <h4>Archive · AWB1, content-addressed</h4>
+          <button class="chip-btn" id="rehydrate" disabled style="opacity:.5">Rehydrate</button>
+        </div>
+        <div class="archive" id="archive"><span class="empty">Empty. Blobs are written <i>before</i> any reference is emitted.</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CHOOSER -->
+<section id="choose">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div><div class="kicker">06 · Pick a mode</div><h2>The right tool for <em>your</em> traffic.</h2></div>
+      <p>Each recommendation is based on measurements, not guesses. Pick the situation that matches yours.</p>
+    </div>
+    <div class="choose rv">
+      <div class="card sits" id="sits" role="group" aria-label="Situations"></div>
+      <div class="card answer" id="answer" aria-live="polite"></div>
+    </div>
+  </div>
+</section>
+
+<!-- FAIL CLOSED -->
+<section id="safety">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div><div class="kicker">07 · Fail closed</div><h2>It never <em>guesses.</em></h2></div>
+      <p>If a dictionary is missing or wrong, a frame is corrupt or oversized, or a sequence has a gap, the decoder raises an exception. It never hands you guessed data.</p>
+    </div>
+    <div class="fails rv">
+      <div class="fail"><div class="ex">DictionaryMismatch</div><h3>Exact dictionary identity</h3><p>Every frame or RESET carries a dictionary version and its SHA-256 fingerprint. The decoder never falls back to a different dictionary.</p></div>
+      <div class="fail"><div class="ex">ProtocolError</div><h3>Bounds checked before decompressing</h3><p>Sizes are validated before anything is buffered, and output is capped at the declared length. A peer can't make you allocate unbounded memory.</p></div>
+      <div class="fail"><div class="ex">SequenceError</div><h3>Gaps and replays caught</h3><p>AWF1 sequence numbers must be contiguous. Repeated, missing or reordered frames are rejected.</p></div>
+      <div class="fail"><div class="ex">SessionPoisoned</div><h3>No half-trusted state</h3><p>After any AWC1 error, the decoder's state is unknown, so every later call raises. Recovery means reconnecting with empty history.</p></div>
+      <div class="fail"><div class="ex">BudgetExceeded</div><h3>No silent drops</h3><p>If the budget can't be met without touching protected events, the reducer refuses rather than cutting anything important.</p></div>
+      <div class="fail"><div class="ex">ArchiveCorruptError</div><h3>Verified restores</h3><p>The archive checks the length and the full SHA-256 of every blob before returning it.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- QUICK START -->
+<section id="start">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div><div class="kicker">08 · Quick start</div><h2>Clone it. <em>Run</em> it.</h2></div>
+      <p>Requires Python 3.11+ and the system libzstd (<code>brew install zstd</code> or <code>apt install libzstd1</code>). No install step is needed to try it.</p>
+    </div>
+    <div class="card qs rv">
+      <div class="qs-tabs" role="tablist" id="qsTabs">
+        <button role="tab" aria-selected="true" data-t="cli">Shell</button>
+        <button role="tab" aria-selected="false" data-t="stream">Python · AWC1 stream</button>
+        <button role="tab" aria-selected="false" data-t="tcp">Python · async TCP</button>
+        <button role="tab" aria-selected="false" data-t="ctx">Python · context reducer</button>
+      </div>
+      <div class="qs-body"><button class="copy" id="qsCopy">Copy</button><pre id="qsCode"></pre></div>
+    </div>
+  </div>
+</section>
+
+<div class="closing">
+  <div class="wrap">
+    <h2 class="rv">Fewer bytes. <em>Same</em> bytes.</h2>
+    <p class="rv">Read the protocol, run the 131 tests, and benchmark it on your own Claude Code and Codex logs with <code>bench-local</code>.</p>
+    <div class="cta rv">
+      <a class="btn btn-y" href="https://github.com/aperiodic-io/agentwire">View on GitHub</a>
+      <a class="btn btn-ghost" href="https://github.com/aperiodic-io/agentwire/blob/main/PROTOCOL.md">Read PROTOCOL.md</a>
+    </div>
+    <div class="status rv">
+      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10" cy="10" r="8"/><path d="M10 6v5M10 14h.01"/></svg>
+      <span><b style="color:var(--text-2);font-weight:500">Engineering proof of concept.</b> There's no authentication, TLS, handshake, retries or durable delivery yet. Checksums catch accidents, not attackers, so run it inside TLS. See the <a href="https://github.com/aperiodic-io/agentwire/blob/main/ARCHITECTURE.md#practical-production-roadmap" style="color:var(--y)">production roadmap</a>.</span>
+    </div>
+  </div>
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>agentwire · aperiodic</span>
+    <nav>
+      <a href="https://github.com/aperiodic-io/agentwire/blob/main/README.md">README</a>
+      <a href="https://github.com/aperiodic-io/agentwire/blob/main/PROTOCOL.md">Protocol</a>
+      <a href="https://github.com/aperiodic-io/agentwire/blob/main/ARCHITECTURE.md">Architecture</a>
+      <a href="https://github.com/aperiodic-io/agentwire/blob/main/reports/compression-research.md">Research</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+(() => {
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const RM = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const fmtB = n => n < 1024 ? Math.round(n) + " B" : n < 1048576 ? (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KiB" : (n / 1048576).toFixed(1) + " MiB";
+const fmtN = n => n.toLocaleString("en-US");
+const enc = new TextEncoder();
+
+/* nav */
+const nav = $("#nav");
+const onScroll = () => nav.classList.toggle("scrolled", scrollY > 20);
+addEventListener("scroll", onScroll, { passive: true }); onScroll();
+
+/* copy buttons */
+function copy(text, btn) {
+  const done = () => { const t = btn.textContent; btn.textContent = "Copied"; setTimeout(() => btn.textContent = t, 1300); };
+  if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, done); else done();
+}
+$$("[data-copy]").forEach(b => b.addEventListener("click", () => copy(b.dataset.copy, b)));
+
+/* reveal + count-up */
+const countUp = el => {
+  const to = +el.dataset.count, dec = +(el.dataset.dec || 0), suf = el.dataset.suf || "";
+  if (RM || to === 0) { el.textContent = to.toFixed(dec) + suf; return; }
+  const t0 = performance.now(), D = 1400;
+  const step = t => { const k = Math.min(1, (t - t0) / D), e = 1 - Math.pow(1 - k, 4); el.textContent = (to * e).toFixed(dec) + suf; if (k < 1) requestAnimationFrame(step); };
+  requestAnimationFrame(step);
+};
+const io = new IntersectionObserver(es => es.forEach(e => {
+  if (!e.isIntersecting) return;
+  e.target.classList.add("in");
+  $$("[data-count]", e.target).forEach(countUp);
+  e.target.dispatchEvent(new CustomEvent("reveal"));
+  io.unobserve(e.target);
+}), { threshold: .15, rootMargin: "0px 0px -40px 0px" });
+$$(".rv").forEach(el => io.observe(el));
+
+/* ---------------- HERO WIRE ---------------- */
+(function hero() {
+  const stage = $("#wireStage"), cv = $("#wire"), ctx = cv.getContext("2d"), tip = $("#wireTip");
+  let W = 0, H = 0, dpr = 1;
+  const resize = () => { dpr = Math.min(2, devicePixelRatio || 1); W = stage.clientWidth; H = stage.clientHeight; cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); };
+  resize(); addEventListener("resize", resize);
+  const LABELS = [
+    ['tool_result', '{"stdout":"PASS tests/test_stream.py …'], ['tool_call', '{"name":"Bash","input":{"command":"pytest'],
+    ['assistant', '{"type":"text","text":"The failure is in'], ['tool_result', '{"content":[{"type":"text","text":"diff --git'],
+    ['state_patch', '{"op":"replace","path":"/plan/2","value'], ['tool_call', '{"name":"Read","input":{"file_path":"/src'],
+    ['observation', '{"status":200,"rows":[{"id":1841,"ok":true'], ['tool_result', '{"items":[{"name":"asset-31","origin":"obs'],
+  ];
+  const pk = []; let tIn = 0, tWire = 0, last = performance.now(), spawnAcc = 0, speedK = 1, hover = null, mx = -1, my = -1, pulses = [0, 0];
+  const E = () => W * (W < 640 ? .26 : .36), D = () => W * (W < 640 ? .74 : .70), Y = () => H * .56;
+  function spawn(x) {
+    const [kind, txt] = LABELS[(Math.random() * LABELS.length) | 0];
+    const w = (70 + Math.random() * 120) * Math.min(1, Math.max(.55, W / 1000)), bytes = Math.round(w * (18 + Math.random() * 60));
+    const ratio = 3.5 + Math.random() * 6;
+    pk.push({ x: x ?? -w - 4, w, kind, txt, bytes, wire: Math.max(14, Math.round(bytes / ratio)), ratio, st: 0, v: 70 + Math.random() * 14 });
+  }
+  for (let x = W * .62; x > -60;) { spawn(x); x -= pk[pk.length - 1].w + 60; }
+  stage.addEventListener("pointermove", e => { const r = cv.getBoundingClientRect(); mx = e.clientX - r.left; my = e.clientY - r.top; });
+  stage.addEventListener("pointerleave", () => { mx = my = -1; });
+  stage.addEventListener("click", () => { let lead = pk.reduce((m, p) => Math.min(m, p.x), 0); for (let i = 0; i < 5; i++) { spawn(); const p = pk[pk.length - 1]; lead -= p.w + 34; p.x = lead; } });
+  const pw = p => p.st === 1 ? Math.max(10, p.w / p.ratio) : p.w;
+  function draw(now) {
+    const dt = Math.min(.05, (now - last) / 1000); last = now;
+    ctx.clearRect(0, 0, W, H);
+    const y = Y(), e = E(), d = D();
+    // wire base
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(236,235,230,.13)";
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(e, y); ctx.moveTo(d, y); ctx.lineTo(W, y); ctx.stroke();
+    // compressed segment with flowing dashes
+    ctx.strokeStyle = "rgba(255,214,10,.45)"; ctx.setLineDash([3, 7]); ctx.lineDashOffset = -now / 25;
+    ctx.beginPath(); ctx.moveTo(e, y); ctx.lineTo(d, y); ctx.stroke(); ctx.setLineDash([]);
+    // labels
+    ctx.font = "500 10.5px Geist Mono, monospace"; ctx.textAlign = "center"; ctx.fillStyle = "#7f7d75";
+    ctx.fillText(W < 640 ? "ENCODE" : "ENCODER · AWC1", e, y + 52); ctx.fillText(W < 640 ? "DECODE" : "DECODER · BYTE-EXACT", d, y + 52);
+    ctx.textAlign = "left"; ctx.fillStyle = "#55534d";
+    if (W > 700) { ctx.fillText("AGENT", 0, y + 52); ctx.textAlign = "right"; ctx.fillText("RECEIVER", W, y + 52); }
+    // speed
+    const target = mx >= 0 ? .3 : 1; speedK += (target - speedK) * Math.min(1, dt * 6);
+    const lead = pk.reduce((m, p) => Math.min(m, p.x), Infinity);
+    if (!RM && (lead > 34 + Math.random() * 6 || !pk.length)) spawn();
+    hover = null;
+    for (const p of pk) {
+      if (!RM) p.x += p.v * dt * speedK;
+      const cx = p.x + p.w / 2;
+      if (p.st === 0 && cx >= e) { p.st = 1; pulses[0] = 1; tIn += p.bytes; tWire += p.wire; }
+      if (p.st === 1 && p.x + pw(p) / 2 >= d) { p.st = 2; pulses[1] = 1; }
+      const w = pw(p), h = p.st === 1 ? 8 : 22, x = p.st === 1 ? cx - w / 2 : p.x, top = y - h / 2;
+      const hit = mx >= x - 4 && mx <= x + w + 4 && my >= top - 10 && my <= top + h + 10;
+      if (hit) hover = { p, x: x + w / 2, y: top };
+      ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, top, w, h, h / 2 > 6 ? 6 : h / 2) : ctx.rect(x, top, w, h);
+      if (p.st === 1) { ctx.fillStyle = hit ? "#fff3a8" : "#ffd60a"; ctx.shadowColor = "rgba(255,214,10,.6)"; ctx.shadowBlur = hit ? 18 : 10; ctx.fill(); ctx.shadowBlur = 0; }
+      else {
+        ctx.fillStyle = p.st === 2 ? "rgba(236,235,230,.06)" : "rgba(17,17,16,.95)"; ctx.fill();
+        ctx.strokeStyle = hit ? "#ffd60a" : (p.st === 2 ? "rgba(236,235,230,.32)" : "rgba(236,235,230,.2)"); ctx.stroke();
+        ctx.save(); ctx.clip(); ctx.fillStyle = p.st === 2 ? "#b9b7ae" : "#7f7d75"; ctx.font = "10px Geist Mono, monospace"; ctx.textAlign = "left";
+        ctx.fillText(p.txt, x + 8, top + 14.5); ctx.restore();
+      }
+    }
+    for (let i = pk.length - 1; i >= 0; i--) if (pk[i].x > W + 40) pk.splice(i, 1);
+    // nodes
+    [e, d].forEach((nx, i) => {
+      pulses[i] = Math.max(0, pulses[i] - dt * 1.8);
+      const pr = pulses[i];
+      if (pr > 0) { ctx.beginPath(); ctx.arc(nx, y, 20 + (1 - pr) * 26, 0, 7); ctx.strokeStyle = `rgba(255,214,10,${pr * .5})`; ctx.stroke(); }
+      ctx.beginPath(); ctx.arc(nx, y, 20, 0, 7); ctx.fillStyle = "#111110"; ctx.fill();
+      ctx.strokeStyle = i === 0 ? "rgba(255,214,10,.8)" : "rgba(236,235,230,.35)"; ctx.lineWidth = 1.2; ctx.stroke(); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(nx, y, 4 + pr * 2, 0, 7); ctx.fillStyle = i === 0 ? "#ffd60a" : "#ecebe6"; ctx.fill();
+    });
+    // tooltip
+    if (hover) {
+      const p = hover.p;
+      tip.innerHTML = `<span class="k">${p.kind}</span> &nbsp;${fmtN(p.bytes)} B <span class="k">→</span> <span class="y">${fmtN(p.wire)} B</span> <span class="k">(${p.ratio.toFixed(1)}×)</span>`;
+      tip.style.left = Math.max(110, Math.min(W - 110, hover.x)) + "px"; tip.style.top = hover.y - 4 + "px"; tip.style.opacity = 1; stage.style.cursor = "pointer";
+    } else { tip.style.opacity = 0; stage.style.cursor = "default"; }
+    $("#hudIn").textContent = fmtB(tIn); $("#hudWire").textContent = fmtB(tWire);
+    $("#hudRatio").textContent = tWire ? (tIn / tWire).toFixed(2) + "×" : "—";
+    if (!RM) requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+
+/* ---------------- LAYER ART ---------------- */
+function loopCanvas(cv, fn) {
+  const c = cv.getContext("2d"); let W, H, vis = false;
+  const rs = () => { const d = Math.min(2, devicePixelRatio || 1); W = cv.clientWidth; H = cv.clientHeight; cv.width = W * d; cv.height = H * d; c.setTransform(d, 0, 0, d, 0, 0); };
+  rs(); addEventListener("resize", rs);
+  new IntersectionObserver(es => { vis = es[0].isIntersecting; if (vis) requestAnimationFrame(tick); }).observe(cv);
+  function tick(t) { c.clearRect(0, 0, W, H); fn(c, W, H, t / 1000); if (vis && !RM) requestAnimationFrame(tick); }
+}
+// Transport: each row is a message. Yellow = literal bytes actually sent; dashed = matched from history
+loopCanvas($("#artT"), (c, W, H, t) => {
+  const rows = 5, rh = 14, gap = 8, y0 = (H - 16 - (rows * rh + (rows - 1) * gap)) / 2, LW = W * .82;
+  for (let r = 0; r < rows; r++) {
+    const y = y0 + r * (rh + gap), phase = (Math.sin(t * 1.1 - r * .7) + 1) / 2;
+    const fullW = LW * (.6 + ((r * 37) % 40) / 100);
+    const lit = r === 0 ? fullW : Math.max(16, fullW * (1 - (.55 + phase * .3)));
+    c.fillStyle = r === 0 ? "#3a3934" : "#ffd60a"; c.beginPath(); c.roundRect(0, y, lit, rh, 4); c.fill();
+    if (r > 0) {
+      c.strokeStyle = "rgba(236,235,230,.22)"; c.setLineDash([3, 3]); c.beginPath(); c.roundRect(lit + 4, y + .5, fullW - lit - 4, rh - 1, 4); c.stroke(); c.setLineDash([]);
+    }
+  }
+  c.font = "10px Geist Mono, monospace"; c.textAlign = "left";
+  c.fillStyle = "#ffd60a"; c.fillRect(0, H - 9, 8, 8); c.fillStyle = "#7f7d75"; c.fillText("sent", 13, H - 1);
+  c.strokeStyle = "rgba(236,235,230,.35)"; c.setLineDash([2, 2]); c.strokeRect(54.5, H - 8.5, 8, 7); c.setLineDash([]); c.fillText("matched from connection history", 68, H - 1);
+});
+// Reducer: blocks, eligible ones fold into small ref chips, archive on the right fills
+loopCanvas($("#artR"), (c, W, H, t) => {
+  const items = [[.9, 0], [.5, 0], [1.6, 1], [.6, 0], [2.2, 1], [.45, 0], [1.3, 1]];
+  const ph = (Math.sin(t * .9) + 1) / 2, unit = Math.min(52, (W * .62) / 7.5);
+  let x = 0; const y = H / 2 - 18, h = 36;
+  items.forEach(([s, el], i) => {
+    const w = el ? Math.max(16, s * unit * (1 - ph * .85)) : s * unit;
+    c.fillStyle = el ? (ph > .5 ? "#ffd60a" : "#35342f") : "#3a3934";
+    c.beginPath(); c.roundRect(x, y, w, h, 5); c.fill();
+    if (!el) { c.strokeStyle = "#55534d"; c.lineWidth = 1; c.beginPath(); c.arc(x + w / 2, y + h / 2 - 1, 3.5, Math.PI, 0); c.stroke(); c.fillStyle = "#55534d"; c.fillRect(x + w / 2 - 5, y + h / 2, 10, 7); }
+    x += w + 5;
+  });
+  const ax = W - 64; c.strokeStyle = "rgba(236,235,230,.18)"; c.setLineDash([3, 4]); c.strokeRect(ax, y - 14, 64, h + 28); c.setLineDash([]);
+  for (let i = 0; i < 3; i++) { c.fillStyle = `rgba(255,214,10,${Math.max(0, Math.min(1, ph * 3 - i)) * .7})`; c.fillRect(ax + 10, y - 4 + i * 18, 44, 12); }
+  c.font = "10px Geist Mono, monospace"; c.fillStyle = "#55534d"; c.textAlign = "right"; c.fillText("archive", W, H - 2);
+});
+
+/* ---------------- PLAYGROUND ---------------- */
+(function playground() {
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const pick = a => a[(rnd() * a.length) | 0];
+  const hex = n => Array.from({ length: n }, () => "0123456789abcdef"[(rnd() * 16) | 0]).join("");
+  const ts = i => new Date(Date.UTC(2026, 10, 4, 8, 0, 0) + i * 7413).toISOString();
+  let n = 0;
+  const files = ["agentwire/stream.py", "agentwire/transport.py", "tests/test_stream.py", "agentwire/context.py", "README.md", "agentwire/zstd.py"];
+  const G = {
+    tool() {
+      const items = Array.from({ length: 3 + ((rnd() * 4) | 0) }, () => ({ confidence: +rnd().toFixed(4), name: "asset-" + ((rnd() * 99) | 0), origin: pick(["observability", "planner", "retriever"]), timestamp: ts(n), type: pick(["dataset", "metric", "trace"]), value: +(rnd() * 100).toFixed(5) }));
+      return JSON.stringify({ id: n, jsonrpc: "2.0", method: "tools/call", result: { items, next_cursor: hex(12), truncated: false } });
+    },
+    trans() {
+      const f = pick(files), cmd = pick(["pytest -q tests/test_stream.py", "git diff --stat", "rg -n SessionPoisoned agentwire", "python3 -m agentwire bench"]);
+      const content = rnd() < .5 ? [{ type: "tool_use", id: "toolu_" + hex(20), name: pick(["Bash", "Read", "Edit", "Grep"]), input: rnd() < .5 ? { command: cmd, description: "Run the stream tests" } : { file_path: "/home/user/agentwire/" + f } }]
+        : [{ type: "text", text: pick(["The decoder rejects the RESET because window_log exceeds max_window_log.", "All 131 tests pass; the stream round-trips byte-for-byte.", "I'll read stream.py to check how flush is handled per message."]) }];
+      return JSON.stringify({ parentUuid: hex(8) + "-" + hex(4) + "-" + hex(4) + "-" + hex(12), isSidechain: false, userType: "external", cwd: "/home/user/agentwire", sessionId: "9f1c2b7e-41aa-4c0e-8d3e-5b8f0e6a2c11", version: "2.1.4", type: "assistant", message: { role: "assistant", model: "agent-model", content, usage: { input_tokens: (rnd() * 4000) | 0, output_tokens: (rnd() * 400) | 0, cache_read_input_tokens: (rnd() * 90000) | 0 } }, uuid: hex(8) + "-" + hex(4) + "-" + hex(4) + "-" + hex(12), timestamp: ts(n) });
+    },
+    logs() {
+      const lines = Array.from({ length: 4 + ((rnd() * 5) | 0) }, (_, j) => `${ts(n * 10 + j)} ${pick(["INFO", "INFO", "DEBUG", "WARN"])} [${pick(["gateway", "worker-3", "worker-7", "scheduler"])}] ${pick(["request completed", "flushed stream frame", "dictionary v1 loaded", "retrying upstream call", "cache hit for session"])} session=${hex(8)} bytes=${(rnd() * 90000) | 0} latency_ms=${(rnd() * 400) | 0}`);
+      if (rnd() < .35) lines.push(`diff --git a/${pick(files)} b/${pick(files)}\n@@ -${(rnd() * 200) | 0},7 +${(rnd() * 200) | 0},9 @@\n-        self._flush(ZSTD_e_continue)\n+        self._flush(ZSTD_e_flush)`);
+      return lines.join("\n");
+    },
+    chat() { return JSON.stringify({ role: pick(["user", "assistant"]), content: pick(["ok", "yes", "thanks!", "go ahead", "done", "looks good", "retry?"]) }); },
+    rand() { const b = new Uint8Array(420); crypto.getRandomValues(b); return btoa(String.fromCharCode(...b)); },
+  };
+  let wl = "tool";
+  const HAS_CS = typeof CompressionStream !== "undefined";
+  async function dsize(bytes) {
+    if (!HAS_CS) return Math.ceil(bytes.length * .4);
+    const s = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+    return (await new Response(s).arrayBuffer()).byteLength;
+  }
+  const WIN = 32768;
+  let hist = new Uint8Array(0), histSize = 0, raw = 0, wa = 0, wb = 0, count = 0, busy = false, auto = null;
+  const per = [];
+  const feed = $("#feed"), bars = $("#bars");
+  async function send() {
+    if (busy) return; busy = true;
+    const msg = G[wl](); const b = enc.encode(msg);
+    const indep = Math.min(await dsize(b), b.length) + 56; // AWF1: raw fallback if compression doesn't help
+    let cat = new Uint8Array(hist.length + b.length); cat.set(hist); cat.set(b, hist.length);
+    const catSize = await dsize(cat);
+    let streamCost = Math.max(2, catSize - histSize) + 5 + 10; // + sync-flush marker + AWC1 header
+    if (cat.length > WIN) { cat = cat.slice(cat.length - WIN); histSize = await dsize(cat); } else histSize = catSize;
+    hist = cat;
+    count++; n++; raw += b.length; wa += indep; wb += streamCost;
+    per.push([indep, streamCost]); if (per.length > 36) per.shift();
+    $("#feedEmpty")?.remove();
+    const row = document.createElement("div"); row.className = "feed-row";
+    row.innerHTML = `<span class="i">${String(count).padStart(3, "0")}</span><span class="t"></span><span class="s">${fmtN(b.length)} B → <b>${fmtN(streamCost)} B</b></span>`;
+    row.querySelector(".t").textContent = msg.replace(/\s+/g, " ");
+    feed.prepend(row); while (feed.children.length > 14) feed.lastChild.remove();
+    render(); busy = false;
+  }
+  function render() {
+    const ra = raw / wa, rb = raw / wb;
+    $("#mA").innerHTML = (wa ? ra.toFixed(2) : "—") + "<small>×</small>";
+    $("#mB").innerHTML = (wb ? rb.toFixed(2) : "—") + "<small>×</small>";
+    $("#mAs").textContent = fmtB(wa) + " on the wire";
+    $("#mBs").textContent = fmtB(wb) + " on the wire";
+    $("#connInfo").textContent = count ? `${count} msgs · ${fmtB(raw)} sent · history ${fmtB(hist.length)}` : "connection idle";
+    const mx = Math.max(1, ...per.flat());
+    bars.innerHTML = per.map(([a, b]) => `<div class="col"><div class="a" style="height:${a / mx * 100}%"></div><div class="b" style="height:${b / mx * 100}%"></div></div>`).join("") + Array.from({ length: 36 - per.length }, () => '<div class="col"></div>').join("");
+  }
+  function reset() { hist = new Uint8Array(0); histSize = 0; raw = wa = wb = count = 0; per.length = 0; feed.innerHTML = '<div class="feed-empty" id="feedEmpty">New connection, empty history. The first message pays full price.</div>'; render(); }
+  $("#pgSend").addEventListener("click", send);
+  $("#pgReset").addEventListener("click", reset);
+  const autoBtn = $("#pgAuto");
+  const stopAuto = () => { clearInterval(auto); auto = null; autoBtn.classList.remove("on"); autoBtn.innerHTML = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M4 3l9 5-9 5z"/></svg>Auto'; };
+  autoBtn.addEventListener("click", () => {
+    if (auto) return stopAuto();
+    autoBtn.classList.add("on"); autoBtn.innerHTML = '<svg viewBox="0 0 16 16" fill="currentColor"><rect x="4" y="3" width="3" height="10"/><rect x="9" y="3" width="3" height="10"/></svg>Pause';
+    send(); auto = setInterval(() => { send(); if (count >= 400) stopAuto(); }, 650);
+  });
+  $$("#wl button").forEach(b => b.addEventListener("click", () => {
+    $$("#wl button").forEach(x => x.setAttribute("aria-pressed", x === b)); wl = b.dataset.w; reset();
+  }));
+  render();
+  // auto-start a few messages when first seen, to show the effect
+  $("#playground .pg").addEventListener("reveal", async () => { if (count) return; for (let i = 0; i < 6; i++) { await send(); await new Promise(r => setTimeout(r, RM ? 0 : 260)); } });
+})();
+
+/* ---------------- BENCHMARKS ---------------- */
+(function bench() {
+  const rows = [
+    ["AWF1 one frame", 0, 2.28, 3.49], ["AWF1 one frame + dict", 0, 3.14, 4.17], ["AWF1 batch", 25, 2.67, 3.94], ["AWF1 batch + dict", 25, 3.53, 4.62],
+    ["AWC1 stream", 0, 6.02, 6.01], ["AWC1 stream + dict", 0, 6.24, 6.03], ["AWC1 + dict, 8 MiB window", 0, 6.42, 6.75],
+  ];
+  const off = { cc: 6.55, cx: 6.94 }, MAX = 7.4;
+  const host = $("#benchRows");
+  host.innerHTML = rows.map(([n, lat]) => `<div class="brow"><div class="name">${n}<span class="lat ${lat ? "w" : ""}">${lat ? "+" + lat + " ms" : "0 ms"}</span></div><div class="track"><div class="fill"></div><div class="ref"></div></div><div class="val">—</div></div>`).join("");
+  let corp = "cc", shown = false;
+  function set() {
+    const i = corp === "cc" ? 2 : 3, best = Math.max(...rows.map(r => r[i]));
+    $$(".brow", host).forEach((el, k) => {
+      const v = rows[k][i];
+      el.classList.toggle("best", v >= 6);
+      el.querySelector(".fill").style.width = shown ? (v / MAX * 100) + "%" : "0%";
+      el.querySelector(".ref").style.left = (off[corp] / MAX * 100) + "%";
+      el.querySelector(".val").textContent = v.toFixed(2) + "×";
+    });
+    $("#offv").textContent = off[corp].toFixed(2) + "×";
+    $("#gap").textContent = Math.round((1 - best / off[corp]) * 100) + "%";
+  }
+  $$("#corp button").forEach(b => b.addEventListener("click", () => { $$("#corp button").forEach(x => x.setAttribute("aria-pressed", x === b)); corp = b.dataset.c; set(); }));
+  set();
+  host.closest(".rv").addEventListener("reveal", () => { shown = true; setTimeout(set, 120); });
+
+  const logBars = (el, data) => {
+    const mx = Math.log10(Math.max(...data.map(d => d[1])) * 1.15);
+    el.innerHTML = data.map(([n, v, b]) => `<div class="lrow ${b ? "best" : ""}"><span class="nm">${n}</span><span class="tr"><span class="fl" data-w="${Math.max(2, Math.log10(v) / mx * 100)}"></span></span><span class="vv">${fmtN(v)}×</span></div>`).join("");
+    el.closest(".rv").addEventListener("reveal", () => setTimeout(() => $$(".fl", el).forEach(f => f.style.width = f.dataset.w + "%"), 150));
+  };
+  logBars($("#r1"), [["zstd frame per request", 3.8], ["AWC1 + dictionary", 59], ["AWD1 context delta", 63, 1]]);
+  logBars($("#r2"), [["AWC1, 1 MiB window", 10], ["AWC1, 8 MiB window", 342], ["zstd patch-from + LDM", 1727], ["AWD1 context delta", 2222, 1]]);
+})();
+
+/* ---------------- WIRE FORMATS ---------------- */
+(function formats() {
+  const F = {
+    awc: { size: "≈10", lbl: "bytes per message, typical", fields: [
+      ["type", 1, "0x00", "u8", "0x00 marks a DATA frame. 0x01 is RESET."],
+      ["message_count", 1, "01", "uleb128", "Usually 1. Checked against limits before buffering."],
+      ["original_length", 2, "a8 0f", "uleb128", "Uncompressed body length. Output is capped to exactly this."],
+      ["payload_length", 2, "e3 01", "uleb128", "Compressed length. Bounds-checked before decompression."],
+      ["crc32", 4, "9c 41 2e 07", "u32", "CRC32 of the uncompressed body. Catches accidental corruption."],
+      ["payload", 0, "zstd-flushed body…", "bytes", "Zstd output flushed with ZSTD_e_flush. Matches can reach back into the whole connection."],
+    ] },
+    awf: { size: "56", lbl: "byte fixed header per frame", fields: [
+      ["magic", 4, "41 57 46 31", "ASCII", "The literal bytes 'AWF1'."],
+      ["protocol_version", 1, "01", "u8", "Future versions are rejected, not guessed."],
+      ["flags", 1, "01", "u8", "Bit 0 = dictionary, bit 1 = raw (uncompressed). Unknown bits are rejected."],
+      ["message_count", 2, "00 20", "u16", "Number of records in the frame, 1 to 65535. The batcher defaults to 32."],
+      ["frame_sequence", 4, "00 00 00 2a", "u32", "Must be contiguous within a session. Gaps and replays raise SequenceError."],
+      ["dictionary_version", 4, "00 00 00 01", "u32", "Immutable version, nonzero when the dictionary flag is set."],
+      ["original_length", 4, "00 01 0f 3c", "u32", "Length of the uncompressed record body. Default maximum is 1 MiB."],
+      ["payload_length", 4, "00 00 2b 91", "u32", "Length of the compressed or raw body. Default maximum frame is 2 MiB."],
+      ["dictionary_fingerprint", 16, "", "sha256[:16]", "First 16 bytes of the SHA-256 of the dictionary. Must match exactly."],
+      ["body_fingerprint", 16, "", "sha256[:16]", "First 16 bytes of the SHA-256 of the uncompressed body, verified before records are returned."],
+      ["payload", 0, "zstd frame…", "bytes", "A self-contained Zstd frame with an optional dictionary, or the raw body."],
+    ] },
+    reset: { size: "24", lbl: "bytes, once per connection or rotation", fields: [
+      ["type", 1, "01", "u8", "0x01 starts a fresh Zstd stream with empty history."],
+      ["protocol", 1, "01", "u8", "Protocol version 1."],
+      ["flags", 1, "01", "u8", "Bit 0 = a shared dictionary is in use."],
+      ["dictionary_version", 4, "00 00 00 01", "u32", "Checked against the registry exactly as in AWF1."],
+      ["dictionary_fingerprint", 16, "", "sha256[:16]", "SHA-256 prefix of the dictionary. There's no fallback to another one."],
+      ["window_log", 1, "14", "u8", "log₂ of the match window (20 = 1 MiB). Rejected if it exceeds the receiver's max_window_log."],
+    ] },
+  };
+  const bytesEl = $("#bytes"), desc = $("#fmtDesc");
+  let seed = 3; const hx = () => ((seed = (seed * 9301 + 49297) % 233280) / 233280 * 256 | 0).toString(16).padStart(2, "0");
+  function show(k) {
+    const f = F[k];
+    $("#fmtSize").textContent = f.size; $("#fmtSizeL").textContent = f.lbl;
+    bytesEl.innerHTML = f.fields.map(([n, len, ex], i) => {
+      if (!len) return `<div class="field pl" data-i="${i}"><div class="byte">${ex}</div></div>`;
+      const v = ex ? ex.split(" ") : Array.from({ length: len }, hx);
+      return `<div class="field" data-i="${i}" title="${n}">${v.map(b => `<div class="byte">${b}</div>`).join("")}</div>`;
+    }).join("");
+    desc.innerHTML = f.fields.map(([n, len, , t, d], i) => `<div class="fd" data-i="${i}"><div class="h">${n}<span>${len ? len + " B · " : ""}${t}</span></div><div class="d">${d}</div></div>`).join("");
+    const hl = i => { $$(".field", bytesEl).forEach(e => e.classList.toggle("on", e.dataset.i == i)); $$(".fd", desc).forEach(e => e.classList.toggle("on", e.dataset.i == i)); };
+    [...$$(".field", bytesEl), ...$$(".fd", desc)].forEach(e => { e.addEventListener("mouseenter", () => hl(e.dataset.i)); e.addEventListener("mouseleave", () => hl(-1)); });
+  }
+  $$("#fmtSeg button").forEach(b => b.addEventListener("click", () => { $$("#fmtSeg button").forEach(x => x.setAttribute("aria-pressed", x === b)); show(b.dataset.f); }));
+  show("awc");
+})();
+
+/* ---------------- REDUCER ---------------- */
+(function reducer() {
+  // minimal SHA-256 fallback for non-secure contexts
+  function sha256Sync(bytes) {
+    const K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+    let h = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+    const l = bytes.length, nb = ((l + 9 + 63) >> 6) << 6, m = new Uint8Array(nb); m.set(bytes); m[l] = 0x80;
+    const dv = new DataView(m.buffer); dv.setUint32(nb - 4, l * 8); dv.setUint32(nb - 8, Math.floor(l / 0x20000000));
+    const w = new Uint32Array(64), r = (x, n) => (x >>> n) | (x << (32 - n));
+    for (let o = 0; o < nb; o += 64) {
+      for (let i = 0; i < 16; i++) w[i] = dv.getUint32(o + i * 4);
+      for (let i = 16; i < 64; i++) { const a = w[i - 15], b = w[i - 2]; w[i] = (w[i - 16] + (r(a, 7) ^ r(a, 18) ^ (a >>> 3)) + w[i - 7] + (r(b, 17) ^ r(b, 19) ^ (b >>> 10))) | 0; }
+      let [a, b, c, d, e, f, g, hh] = h;
+      for (let i = 0; i < 64; i++) {
+        const t1 = (hh + (r(e, 6) ^ r(e, 11) ^ r(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0, t2 = ((r(a, 2) ^ r(a, 13) ^ r(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+        hh = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      h = h.map((v, i) => (v + [a, b, c, d, e, f, g, hh][i]) | 0);
+    }
+    return h.map(v => (v >>> 0).toString(16).padStart(8, "0")).join("");
+  }
+  const sha256 = async bytes => {
+    if (crypto.subtle) { try { const d = await crypto.subtle.digest("SHA-256", bytes); return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join(""); } catch (_) {} }
+    return sha256Sync(bytes);
+  };
+  // build realistic events
+  const rows = n => Array.from({ length: n }, (_, i) => ({ ts: `2026-11-04T08:${String(i % 60).padStart(2, "0")}:00Z`, pod: `agent-${i % 12}`, level: i % 9 ? "info" : "warn", msg: i % 9 ? "frame flushed" : "slow upstream" }));
+  const EV = [
+    { id: "sys", role: "system", kind: "instruction", imp: "critical", payload: "Use deterministic and safe tool calls. Never modify production state without confirmation." },
+    { id: "user", role: "user", kind: "message", imp: "critical", payload: "Inspect the streaming pipeline and summarize failures from the last hour." },
+    { id: "call-1", role: "assistant", kind: "tool_call", imp: "critical", payload: { name: "logs", arguments: { cluster: "cluster-east", namespace: "agents", limit: 120 } } },
+    { id: "obs-logs", role: "tool", kind: "tool_result", imp: "low", payload: { status: 200, rows: rows(120) } },
+    { id: "call-2", role: "assistant", kind: "tool_call", imp: "critical", payload: { name: "metrics", arguments: { series: ["p99_latency", "error_rate"], window: "1h" } } },
+    { id: "obs-metrics", role: "tool", kind: "observation", imp: "low", payload: { status: 200, series: { p99_latency: Array.from({ length: 60 }, (_, i) => 120 + ((i * 37) % 90)), error_rate: Array.from({ length: 60 }, (_, i) => +((i * 13 % 7) / 1000).toFixed(4)) } } },
+    { id: "err", role: "tool", kind: "tool_result", imp: "normal", payload: { status: 504, error: "upstream timeout after 3500 ms", retryable: true } },
+    { id: "state", role: "assistant", kind: "state_patch", imp: "normal", payload: { op: "replace", path: "/findings/0", value: "worker-7 exceeds p99 SLO between 08:12 and 08:31" } },
+    { id: "obs-trace", role: "tool", kind: "tool_result", imp: "low", payload: { status: 200, spans: Array.from({ length: 40 }, (_, i) => ({ span: `s${i}`, parent: i ? `s${i - 1}` : null, svc: ["gateway", "worker-7", "zstd"][i % 3], dur_ms: (i * 17) % 230 })) } },
+    { id: "pinned", role: "tool", kind: "tool_result", imp: "low", pinned: true, payload: { status: 200, config: { window_log: 20, dictionary_version: 1, max_window_log: 23 } } },
+  ];
+  const canon = v => { // canonical JSON: sorted keys, compact
+    if (Array.isArray(v)) return "[" + v.map(canon).join(",") + "]";
+    if (v && typeof v === "object") return "{" + Object.keys(v).sort().map(k => JSON.stringify(k) + ":" + canon(v[k])).join(",") + "}";
+    return JSON.stringify(v);
+  };
+  const eventJSON = (e, payload, condensed) => canon({ condensed: !!condensed, id: e.id, importance: e.imp, kind: e.kind, payload, pinned: !!e.pinned, role: e.role });
+  const isEligible = e => (e.kind === "tool_result" || e.kind === "observation") && e.imp === "low" && !e.pinned && !(e.payload && e.payload.status >= 400);
+  const bl = s => enc.encode(s).length;
+  let ready = false;
+  const host = $("#events"), slider = $("#budget"), out = $("#budgetOut"), status = $("#rdStatus"), refJson = $("#refJson"), arch = $("#archive"), rh = $("#rehydrate");
+  const ICON_LOCK = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 015 0v2"/></svg>';
+  const ICON_PIN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 2h4l-.5 4 2.5 2.5H4L6.5 6z"/><path d="M8 8.5V14"/></svg>';
+  const ICON_DOC = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/></svg>';
+  (async () => {
+    for (const e of EV) {
+      e.data = canon(e.payload); e.bytes = bl(e.data); e.full = bl(eventJSON(e, e.payload));
+      e.elig = isEligible(e);
+      if (e.elig) {
+        e.sha = await sha256(enc.encode(e.data));
+        const preview = e.data.slice(0, 96);
+        e.summary = { _agentwire: "agentwire.observation_ref.v1", sha256: e.sha, original_bytes: e.bytes, preview, keys: Object.keys(e.payload).sort() };
+        e.small = bl(eventJSON(e, e.summary, true)); e.savings = e.full - e.small;
+      }
+    }
+    const total = EV.reduce((s, e) => s + e.full, 0) + EV.length + 1; // JSON array commas + brackets
+    const minimum = total - EV.filter(e => e.elig && e.savings > 0).reduce((s, e) => s + e.savings, 0);
+    slider.min = Math.floor(minimum * .82); slider.max = total; slider.value = total; slider.step = 1;
+    host.innerHTML = EV.map(e => `<div class="ev ${e.elig ? "elig" : "prot"}" data-id="${e.id}"><span class="ic">${e.pinned ? ICON_PIN : e.elig ? ICON_DOC : ICON_LOCK}</span><span class="nm">${e.id}<span>${e.kind} · ${e.imp}${e.pinned ? " · pinned" : ""}</span></span><span class="ebar"><i></i><em></em></span><span class="sz"></span></div>`).join("");
+    ready = true; update();
+    // gentle demo: animate the slider down once on reveal
+    host.closest(".rv").addEventListener("reveal", () => {
+      if (RM) return; const from = total, to = Math.round(minimum + (total - minimum) * .35), t0 = performance.now();
+      const step = t => { const k = Math.min(1, (t - t0) / 1800), ee = 1 - Math.pow(1 - k, 3); slider.value = Math.round(from + (to - from) * ee); update(); if (k < 1) requestAnimationFrame(step); };
+      setTimeout(() => requestAnimationFrame(step), 500);
+    });
+  })();
+  let lastCond = ""; const archived = new Map();
+  function update() {
+    if (!ready) return;
+    const budget = +slider.value, total = +slider.max;
+    slider.style.setProperty("--p", ((budget - slider.min) / (slider.max - slider.min) * 100) + "%");
+    out.textContent = fmtN(budget) + " B";
+    // the reducer's algorithm: largest savings first, stop once under budget
+    const cand = EV.filter(e => e.elig && e.savings > 0).sort((a, b) => b.savings - a.savings || EV.indexOf(b) - EV.indexOf(a));
+    let cur = total; const cond = new Set();
+    for (const e of cand) { if (cur <= budget) break; cond.add(e.id); cur -= e.savings; }
+    const exceeded = cur > budget;
+    const maxB = Math.max(...EV.map(e => e.full));
+    EV.forEach(e => {
+      const row = host.querySelector(`[data-id="${e.id}"]`), c = cond.has(e.id), sz = c ? e.small : e.full;
+      row.classList.toggle("cond", c);
+      row.querySelector("i").style.width = Math.max(1.5, sz / maxB * 100) + "%";
+      row.querySelector("em").textContent = c ? "ref " + e.sha.slice(0, 12) + "…" : "";
+      row.querySelector(".sz").textContent = fmtB(sz);
+    });
+    status.innerHTML = exceeded
+      ? `<span class="err">✗ BudgetExceeded(${fmtN(cur)}, ${fmtN(budget)})</span><span>protected events alone need more than this</span>`
+      : `<span>context <b>${fmtN(cur)} B</b> of ${fmtN(total)} B</span><span>${cond.size} condensed · ${EV.filter(e => !e.elig).length} protected</span><span class="ok">✓ within budget</span>`;
+    const key = [...cond].join(",");
+    if (key !== lastCond) {
+      lastCond = key;
+      const list = cand.filter(e => cond.has(e.id));
+      if (list.length) {
+        const s = list[list.length - 1].summary;
+        const esc = x => x.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+        refJson.innerHTML = `{\n  <span class="k">"_agentwire"</span>: <span class="s">"${s._agentwire}"</span>,\n  <span class="k">"sha256"</span>: <span class="s">"${s.sha256}"</span>,\n  <span class="k">"original_bytes"</span>: <span class="n">${s.original_bytes}</span>,\n  <span class="k">"keys"</span>: [${s.keys.map(k => `<span class="s">"${k}"</span>`).join(", ")}],\n  <span class="k">"preview"</span>: <span class="s">${esc(JSON.stringify(s.preview))}</span>\n}`;
+        rh.disabled = false; rh.style.opacity = 1;
+      } else {
+        refJson.innerHTML = '<span class="k">// lower the budget to condense an observation</span>';
+        rh.disabled = true; rh.style.opacity = .5;
+      }
+      // the archive is append-only: blobs stay after a restore
+      list.forEach(e => archived.set(e.id, e));
+      if (archived.size) arch.innerHTML = [...archived.values()].map(e => `<div class="blob" data-id="${e.id}"><span>${cond.has(e.id) ? "ref in context · " : "stored · "}${e.sha.slice(0, 12)}…</span>${fmtB(e.bytes)} · ${e.id}</div>`).join("");
+    }
+  }
+  slider.addEventListener("input", update);
+  rh.addEventListener("click", async () => {
+    const ids = lastCond.split(",").filter(Boolean);
+    for (const id of ids) {
+      const e = EV.find(x => x.id === id), blob = arch.querySelector(`[data-id="${id}"]`);
+      const ok = (await sha256(enc.encode(e.data))) === e.sha;
+      blob.classList.add("ok"); blob.querySelector("span").textContent = (ok ? "✓ sha256 verified · " : "✗ mismatch · ") + e.sha.slice(0, 8);
+      await new Promise(r => setTimeout(r, 260));
+    }
+    lastCond = "__restoring";
+    const t0 = performance.now(), from = +slider.value, to = +slider.max;
+    const step = t => { const k = Math.min(1, (t - t0) / 900), ee = 1 - Math.pow(1 - k, 3); slider.value = Math.round(from + (to - from) * ee); update(); if (k < 1) requestAnimationFrame(step); };
+    setTimeout(() => requestAnimationFrame(step), 900);
+  });
+})();
+
+/* ---------------- CHOOSER ---------------- */
+(function chooser() {
+  const S = [
+    ["An interactive agent or tool connection", "AWC1 stream", "One Zstd stream per connection, flushed per message. It adds no latency, costs 8–12 bytes of header per frame, and gives the best ratio on real traffic.", "enc = StreamEncoder(registry, dictionary_version=1, window_log=20)\nwire = enc.encode([Message(i, payload, kind=1)])"],
+    ["Long sessions that repeat big outputs", "AWC1, window_log=23", "Codex sessions repeat content more than 1 MiB back, and the 8 MiB window adds 12%. That costs about 9 MiB per side per connection.", "StreamEncoder(registry, dictionary_version=1, window_log=23)\nStreamSessionDecoder(registry, max_window_log=23)"],
+    ["The client re-sends the growing context", "AWD1 context delta", "Each request is encoded as a prefix and suffix against a recent message, plus a literal. It gives 63× on public-size contexts and 2,222× on 6 MB ones, where AWC1 drops to 10×.", "from agentwire import delta  # agentwire.delta"],
+    ["A gateway multiplexing many busy sessions", "AWF1 batches", "When real bursts arrive and 25 ms of slack is acceptable, bounded batches share history without holding per-connection stream state.", "BoundedBatcher(codec, dictionary_version=1,\n               max_messages=32, max_batch_bytes=65536, max_delay_ms=25)"],
+    ["Frames that are stored, fanned out or replayed", "AWF1", "Every frame is a self-contained Zstd frame with a sequence number, a dictionary fingerprint and a body hash, so any frame decodes on its own.", "codec = FrameCodec(registry)\nStreamDecoder(codec).feed(frames)"],
+    ["Stateless HTTP API requests", "zstd + prefix + LDM", "Compress each request with the previous request as a prefix and long-distance matching enabled. The frames stay stateless.", "agentwire.zstd.compress_advanced(\n    data, prefix=previous, long_distance=True)"],
+    ["SSE or token streams over HTTP", "deflate, flush per event", "For tiny events, plain deflate with a sync flush beats AWC1: 11.9 B per event against 29.0 B. Coalesce for 50 ms only when the consumer is a machine.", "Content-Encoding: deflate   # sync flush per event"],
+    ["A session-log archive", "Seekable zstd-19", "Pack sessions together in 1–4 MiB frames with a dictionary. That's 1.3–1.9× smaller than per-session files, with millisecond random access.", "from agentwire import seekable  # agentwire.seekable"],
+    ["The context window itself is too big", "Context reducer", "Cuts tokens, not bytes. Label low-value tool results and the reducer swaps them for references, which you can restore exactly. Evaluate the effect on task success.", "ContextReducer(archive, preview_chars=96).reduce(events, budget_bytes=1500)"],
+  ];
+  const sits = $("#sits"), ans = $("#answer");
+  sits.innerHTML = S.map((s, i) => `<button class="sit" aria-pressed="${i === 0}" data-i="${i}">${s[0]}<span class="arr">→</span></button>`).join("");
+  const esc = x => x.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const show = i => { const s = S[i]; ans.innerHTML = `<div class="swap"><div class="lab">Use</div><div class="mode">${s[1]}</div><p>${s[2]}</p><pre>${esc(s[3])}</pre></div>`; };
+  $$(".sit", sits).forEach(b => { const go = () => { $$(".sit", sits).forEach(x => x.setAttribute("aria-pressed", x === b)); show(+b.dataset.i); }; b.addEventListener("click", go); b.addEventListener("mouseenter", () => { if (matchMedia("(hover:hover)").matches) go(); }); });
+  show(0);
+})();
+
+/* ---------------- QUICK START ---------------- */
+(function qs() {
+  const C = {
+    cli: `<span class="c-c"># clone and run, no install needed</span>
+<span class="c-p">$</span> git clone https://github.com/aperiodic-io/agentwire.git && cd agentwire
+<span class="c-p">$</span> python3 -m agentwire demo              <span class="c-c"># in-memory transport + context round trip</span>
+<span class="c-p">$</span> python3 -m agentwire tcp-demo --stream <span class="c-c"># AWC1 over loopback TCP</span>
+
+<span class="c-c"># lossless pack / unpack, then prove it</span>
+<span class="c-p">$</span> python3 -m agentwire pack --stream --input examples/tool-output.jsonl \\
+      --output /tmp/a.awc --dictionary examples/agent-dict-v1.zdict
+<span class="c-p">$</span> python3 -m agentwire unpack --input /tmp/a.awc --output /tmp/b.jsonl \\
+      --dictionary examples/agent-dict-v1.zdict
+<span class="c-p">$</span> cmp examples/tool-output.jsonl /tmp/b.jsonl && echo identical
+
+<span class="c-c"># benchmark on your own Claude Code / Codex logs (aggregates only)</span>
+<span class="c-p">$</span> python3 -m agentwire bench-local`,
+    stream: `<span class="c-k">from</span> agentwire <span class="c-k">import</span> Message, StreamEncoder, StreamSessionDecoder
+
+enc = <span class="c-f">StreamEncoder</span>(registry, dictionary_version=<span class="c-s">1</span>, window_log=<span class="c-s">20</span>)   <span class="c-c"># one per connection</span>
+dec = <span class="c-f">StreamSessionDecoder</span>(registry, max_window_log=<span class="c-s">20</span>)              <span class="c-c"># one per connection</span>
+
+<span class="c-k">for</span> i, payload <span class="c-k">in</span> <span class="c-f">enumerate</span>([<span class="c-s">b'{"tool":"search","ok":true}'</span>, <span class="c-s">b'{"tool":"fetch","ok":true}'</span>]):
+    wire = enc.<span class="c-f">encode</span>([<span class="c-f">Message</span>(i, payload, kind=<span class="c-s">1</span>)])   <span class="c-c"># write these bytes immediately</span>
+    <span class="c-k">assert</span> dec.<span class="c-f">feed</span>(wire) == [<span class="c-f">Message</span>(i, payload, kind=<span class="c-s">1</span>)]
+
+enc.<span class="c-f">rotate</span>(<span class="c-s">1</span>)   <span class="c-c"># optional RESET: new dictionary, or drop history</span>
+dec.<span class="c-f">finish</span>(); enc.<span class="c-f">close</span>(); dec.<span class="c-f">close</span>()`,
+    tcp: `<span class="c-k">from</span> agentwire <span class="c-k">import</span> StreamEncoder, StreamSessionDecoder
+<span class="c-k">from</span> agentwire.asyncio_transport <span class="c-k">import</span> AsyncStreamSender, AsyncFramedReceiver
+
+<span class="c-k">async def</span> <span class="c-f">send</span>(writer, messages):
+    <span class="c-k">async with</span> <span class="c-f">AsyncStreamSender</span>(writer, <span class="c-f">StreamEncoder</span>(registry, dictionary_version=<span class="c-s">1</span>)) <span class="c-k">as</span> s:
+        <span class="c-k">for</span> m <span class="c-k">in</span> messages:
+            <span class="c-k">await</span> s.<span class="c-f">send</span>(m)            <span class="c-c"># compressed, written and drained immediately</span>
+
+<span class="c-k">async def</span> <span class="c-f">receive</span>(reader):
+    rx = <span class="c-f">AsyncFramedReceiver</span>(reader, decoder=<span class="c-f">StreamSessionDecoder</span>(registry))
+    <span class="c-k">while</span> (m := <span class="c-k">await</span> rx.<span class="c-f">recv</span>()) <span class="c-k">is not</span> <span class="c-k">None</span>:
+        <span class="c-f">print</span>(m.id, <span class="c-f">len</span>(m.payload))`,
+    ctx: `<span class="c-k">from</span> agentwire <span class="c-k">import</span> AgentEvent, ContentAddressedStore, ContextReducer, rehydrate
+
+events = [
+    <span class="c-f">AgentEvent</span>(<span class="c-s">"sys"</span>, <span class="c-s">"system"</span>, <span class="c-s">"instruction"</span>, <span class="c-s">"Be careful."</span>, <span class="c-s">"critical"</span>),
+    <span class="c-f">AgentEvent</span>(<span class="c-s">"call"</span>, <span class="c-s">"assistant"</span>, <span class="c-s">"tool_call"</span>, {<span class="c-s">"name"</span>: <span class="c-s">"logs"</span>, <span class="c-s">"arguments"</span>: {<span class="c-s">"n"</span>: <span class="c-s">500</span>}}, <span class="c-s">"critical"</span>),
+    <span class="c-f">AgentEvent</span>(<span class="c-s">"obs"</span>, <span class="c-s">"tool"</span>, <span class="c-s">"tool_result"</span>, {<span class="c-s">"status"</span>: <span class="c-s">200</span>, <span class="c-s">"rows"</span>: [<span class="c-s">"ok"</span>] * <span class="c-s">500</span>}, <span class="c-s">"low"</span>),
+]
+archive = <span class="c-f">ContentAddressedStore</span>(<span class="c-s">"/tmp/agentwire-archive"</span>)
+result = <span class="c-f">ContextReducer</span>(archive, preview_chars=<span class="c-s">96</span>).<span class="c-f">reduce</span>(events, budget_bytes=<span class="c-s">1500</span>)
+<span class="c-f">print</span>(result.original_bytes, <span class="c-s">"->"</span>, result.context_bytes, <span class="c-s">"bytes"</span>)
+<span class="c-k">assert</span> <span class="c-f">rehydrate</span>(result.events, archive) == events   <span class="c-c"># exact JSON values come back</span>`,
+  };
+  const code = $("#qsCode");
+  const show = t => { code.innerHTML = C[t]; };
+  $$("#qsTabs button").forEach(b => b.addEventListener("click", () => { $$("#qsTabs button").forEach(x => x.setAttribute("aria-selected", x === b)); show(b.dataset.t); }));
+  $("#qsCopy").addEventListener("click", e => copy(code.textContent, e.currentTarget));
+  show("cli");
+})();
+})();
+</script>
+</body>
+</html>
