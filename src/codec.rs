@@ -409,6 +409,16 @@ mod tests {
     }
 
     #[test]
+    fn a_target_copied_entirely_from_the_base_has_an_empty_literal() {
+        // a message removed from the middle: prefix + suffix is the whole target
+        let (base, target) = (&b"hello brave world"[..], &b"hello world"[..]);
+        let d = delta(base, target);
+        let (h, _) = parse(&d, 1 << 20).unwrap();
+        assert_eq!((h.prefix, h.suffix, h.target_len), (6, 5, 11));
+        assert_eq!(decode(base, &d).unwrap(), target);
+    }
+
+    #[test]
     fn the_wire_layout_is_the_spec() {
         let d = delta(b"hello world", b"hello brave world");
         assert_eq!(&d[..4], b"AWD1");

@@ -77,8 +77,7 @@ impl Store {
         while inner.bytes + body.len() > self.budget {
             inner.pop_oldest();
         }
-        inner.clock += 1;
-        let used = inner.clock;
+        let used = inner.clock; // `touch` ticked it for this lookup
         inner.bytes += body.len();
         inner.by_use.insert(used, key);
         inner.entries.insert(key, Entry { body, used, used_at: now });
@@ -92,7 +91,7 @@ impl Store {
 }
 
 impl Inner {
-    /// Marks an entry used now and returns its body.
+    /// Ticks the clock, then marks the entry (if any) used at that tick and returns its body.
     fn touch(&mut self, key: &Key, now: Instant) -> Option<Bytes> {
         self.clock += 1;
         let used = self.clock;
@@ -158,6 +157,15 @@ mod tests {
         assert_eq!(s.get(&A, &h(2)), None, "2 was the least recently used");
         assert!(s.get(&A, &h(1)).is_some() && s.get(&A, &h(3)).is_some() && s.get(&A, &h(4)).is_some());
         assert_eq!(s.bytes(), 30);
+    }
+
+    #[test]
+    fn a_body_the_size_of_the_budget_is_kept() {
+        let s = Store::new(30, Duration::from_secs(60));
+        s.put(&A, h(1), body(10));
+        s.put(&A, h(2), body(30));
+        assert!(s.get(&A, &h(2)).is_some());
+        assert_eq!((s.get(&A, &h(1)), s.bytes()), (None, 30), "evicting what it must");
     }
 
     #[test]

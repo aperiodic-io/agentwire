@@ -23,7 +23,11 @@ type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send
 #[derive(Clone, Default)]
 struct Upstream(Arc<Mutex<Vec<(HeaderMap, Bytes)>>>);
 
-impl Service<Request<InnerBody<Full<Bytes>>>> for Upstream {
+impl<B> Service<Request<InnerBody<B>>> for Upstream
+where
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
     type Response = Response<Full<Bytes>>;
     type Error = std::convert::Infallible;
     type Future = BoxFuture<Result<Self::Response, Self::Error>>;
@@ -32,7 +36,7 @@ impl Service<Request<InnerBody<Full<Bytes>>>> for Upstream {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, request: Request<InnerBody<Full<Bytes>>>) -> Self::Future {
+    fn call(&mut self, request: Request<InnerBody<B>>) -> Self::Future {
         let seen = self.0.clone();
         Box::pin(async move {
             let (parts, body) = request.into_parts();
@@ -168,4 +172,51 @@ async fn a_kept_body_over_the_limit_is_refused_unless_its_length_says_so_up_fron
     assert_eq!((r.status(), header(&r, ERROR)), (StatusCode::PAYLOAD_TOO_LARGE, Some("too-large")));
     assert_eq!(up.0.lock().unwrap().len(), 1);
     assert_eq!(store.bytes(), 0);
+    // exactly at the limit, declared: kept
+    let mut r = request(b"12345678", &[(KEEP, "?1")]);
+    r.headers_mut().insert(CONTENT_LENGTH, HeaderValue::from_static("8"));
+    let r = send(&mut s, r).await;
+    assert_eq!(header(&r, KEPT), Some(hex(&codec::hash(b"12345678")).as_str()));
+}
+
+/// An inner service that is never ready: the layer must not claim readiness it does not have.
+#[derive(Clone)]
+struct Busy;
+
+impl Service<Request<InnerBody<Full<Bytes>>>> for Busy {
+    type Response = Response<Full<Bytes>>;
+    type Error = std::convert::Infallible;
+    type Future = BoxFuture<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Pending
+    }
+
+    fn call(&mut self, _: Request<InnerBody<Full<Bytes>>>) -> Self::Future {
+        unreachable!("never ready")
+    }
+}
+
+#[test]
+fn the_layer_is_ready_only_when_the_inner_service_is() {
+    let store = Arc::new(Store::new(1 << 20, Duration::from_secs(60)));
+    let mut s = Awd1Layer::new(store, Config::default()).layer(Busy);
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    let ready = <Awd1<Busy> as Service<Request<Full<Bytes>>>>::poll_ready(&mut s, &mut cx);
+    assert!(ready.is_pending());
+}
+
+#[tokio::test]
+async fn a_body_that_fails_to_arrive_is_refused_as_malformed_not_too_large() {
+    let upstream = Upstream::default();
+    let store = Arc::new(Store::new(1 << 20, Duration::from_secs(60)));
+    let mut s = Awd1Layer::new(store, Config::default()).layer(upstream.clone());
+    let broken = futures_util::stream::iter([
+        Ok(http_body::Frame::data(Bytes::from_static(b"half a bo"))),
+        Err(std::io::Error::other("connection reset")),
+    ]);
+    let r = Request::post("/").header(KEEP, "?1").body(http_body_util::StreamBody::new(broken)).unwrap();
+    let r = s.call(r).await.unwrap();
+    assert_eq!((r.status(), header(&r, ERROR)), (StatusCode::BAD_REQUEST, Some("malformed")));
+    assert!(upstream.0.lock().unwrap().is_empty());
 }

@@ -20,4 +20,8 @@ exclude_re = [
   # Equivalent mutants: the window can only grow (to the 2^27 cap) under these, which changes no
   # output, only how much the encoder may allocate; a window that shrinks is caught.
   "codec.rs:.*replace - with [+/] in compress",
+  # Equivalent mutants: they make the two 64-byte slices unequal in length, so the stride loop stops
+  # and the byte loop finds the same answer, only slower. (A stride loop that skips unequal bytes is
+  # caught.)
+  "codec.rs:.*replace [+-] with [*/] in common_(prefix|suffix)_by",
 ]
