@@ -1,0 +1,50 @@
+name: release
+# A tag `vX.Y.Z` on main publishes that version: the crate to crates.io, the image to
+# ghcr.io/aperiodic-io/agentwire:X.Y.Z (and :latest), and a GitHub release with its CHANGELOG entry.
+# The tag's commit has passed ci.yml on main; this checks only that the tag and the version agree.
+on:
+  push:
+    tags: ["v*"]
+permissions: { contents: read }
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  crate:
+    runs-on: celesto-memory
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: |
+          v=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME is not the crate's version v$v"; exit 1; }
+      - run: cargo publish --locked
+        env: { CARGO_REGISTRY_TOKEN: "${{ secrets.CARGO_REGISTRY_TOKEN }}" }
+
+  image:
+    runs-on: celesto-memory
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/aperiodic-io/agentwire:${{ github.ref_name }}
+            ghcr.io/aperiodic-io/agentwire:latest
+          cache-from: type=gha,scope=image
+          cache-to: type=gha,scope=image,mode=max,ignore-error=true
+
+  github-release:
+    needs: [crate, image]
+    runs-on: celesto-memory
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # the CHANGELOG section under "## [X.Y.Z]", up to the next "## "
+      - run: |
+          awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## \\[" v "\\]" { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
+        env: { GH_TOKEN: "${{ github.token }}" }

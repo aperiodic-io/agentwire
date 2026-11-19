@@ -1,0 +1,61 @@
+name: nightly
+# What is too slow for every pull request: every mutant, not only those in a diff, and longer fuzzing.
+on:
+  # schedule disabled; run manually via workflow_dispatch
+  # schedule:
+  #   - cron: "17 2 * * *"
+  workflow_dispatch:
+permissions: { contents: read }
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+jobs:
+  mutants:
+    runs-on: celesto-memory
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix: { shard: [0, 1, 2, 3] }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { shared-key: mutants, cache-on-failure: true }
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with: { tool: cargo-mutants }
+      # the exit codes as in ci.yml's mutants job: survivors (2) fail the shard; timeouts only (3) pass
+      - env:
+          CARGO_INCREMENTAL: "1"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: "prlimit --as=4294967296"
+        run: |
+          c=0
+          cargo mutants --no-shuffle --shard ${{ matrix.shard }}/4 || c=$?
+          if [ "$c" -eq 3 ] && [ -s mutants.out/timeout.txt ] && ! [ -s mutants.out/missed.txt ]; then c=0; fi
+          exit "$c"
+      - if: always()
+        run: |
+          {
+            echo "### shard ${{ matrix.shard }}"
+            for o in caught missed timeout unviable; do echo "- $o: $(wc -l < mutants.out/$o.txt 2>/dev/null || echo 0)"; done
+            if [ -s mutants.out/missed.txt ]; then echo; echo '```'; cat mutants.out/missed.txt; echo '```'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  fuzz:
+    runs-on: celesto-memory
+    timeout-minutes: 60
+    env: { RUSTFLAGS: "" }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { workspaces: fuzz, key: "${{ steps.toolchain.outputs.cachekey }}" }
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with: { tool: cargo-fuzz }
+      - run: |
+          cd fuzz
+          for t in delta roundtrip; do
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$t" -- -max_total_time=1200 -rss_limit_mb=3000 -max_len=1048576
+          done
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: fuzz-artifacts, path: fuzz/artifacts }

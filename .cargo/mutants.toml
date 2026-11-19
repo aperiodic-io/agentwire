@@ -1,0 +1,27 @@
+# A mutant that hangs the suite is detected: keep such runs short. CI treats "only timeouts" (exit 3)
+# as caught.
+timeout_multiplier = 3.0
+minimum_test_timeout = 60
+# Cargo.toml's `mutants` profile: dev without debug info.
+profile = "mutants"
+# A mutant that leaves a variable unused must still build under CI's RUSTFLAGS=-D warnings, or it
+# is filed as unviable instead of tested.
+cap_lints = true
+# every test, the acceptance scenarios (the binary) included
+additional_cargo_args = ["--all-features"]
+exclude_re = [
+  # The Kani proofs (`#[cfg(kani)] mod proofs`): only Kani's build compiles them, so a mutant of one
+  # builds the same test binary and no test can catch it. The kani job checks them.
+  "( in | replace )(\\w+::)*proofs::",
+  # Equivalent mutant: the forwarder is always ready, and `Poll::from(Ok(()))` is `Poll::Ready(Ok(()))`.
+  "main.rs:.*for Forward>::poll_ready",
+  # Equivalent mutant: a delta exactly as long as the body costs the same bytes as the body.
+  "client.rs:.*replace < with <= in Client::prepare",
+  # Equivalent mutants: the window can only grow (to the 2^27 cap) under these, which changes no
+  # output, only how much the encoder may allocate; a window that shrinks is caught.
+  "codec.rs:.*replace - with [+/] in compress",
+  # Equivalent mutants: they make the two 64-byte slices unequal in length, so the stride loop stops
+  # and the byte loop finds the same answer, only slower. (A stride loop that skips unequal bytes is
+  # caught.)
+  "codec.rs:.*replace [+-] with [*/] in common_(prefix|suffix)_by",
+]
