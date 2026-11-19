@@ -321,7 +321,9 @@ class _BrotliDec:
                 if avail_in.value:
                     raise CodecError("trailing data after brotli stream")
                 return b"".join(parts)
-            if res == _BD_NEEDS_INPUT:
+            # NEEDS_MORE_INPUT is also reported when the output buffer filled up
+            # with output still pending, so only stop once output space remains.
+            if res == _BD_NEEDS_INPUT and avail_out.value > 0:
                 return b"".join(parts)
 
     def close(self):

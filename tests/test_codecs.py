@@ -99,3 +99,17 @@ def test_brotli_shared_dictionary_roundtrip_and_gain():
     blob = with_dict.compress(msg)
     assert with_dict.decompress(blob) == msg
     assert len(blob) < len(C.BrotliCodec(5, 22).compress(msg))
+
+
+@pytest.mark.parametrize("make", STREAMS)
+def test_stream_roundtrip_messages_larger_than_internal_buffers(make):
+    # Regression: brotli's decoder reports NEEDS_MORE_INPUT while it still holds
+    # output when the output buffer is full; messages > 64 KiB were truncated.
+    codec = make()
+    enc, dec = codec.encoder(), codec.decoder()
+    for n in (65535, 65536, 65537, 200_000, 1_500_000):
+        msg = (os.urandom(32).hex().encode() + b" repeated context " * 40) * (n // 784 + 1)
+        msg = msg[:n]
+        chunk = enc.push(msg)
+        got = dec.push(chunk, len(msg)) if dec.needs_size else dec.push(chunk)
+        assert got == msg, (codec.name, n)
