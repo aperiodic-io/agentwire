@@ -42,18 +42,19 @@ Encode MB/s and p99 per-message latency (encode + decode) on transcripts-cc:
 | awd1/w22+dict | 30.7 | 58.0 | 98 | 724 |
 | ref/offline-zstd19-long | 3.9 | – | 655 | 1227 |
 
-Memory per live connection (sender + receiver, RSS growth, transcripts-cc):
+Memory per live connection (sender + receiver), measured in a fresh process with 32 connections each fed 4 MiB (`memory.json`). libzstd's own accounting counts allocated buffers; RSS counts touched pages:
 
-| Variant | KiB per connection |
-|---|---:|
-| awc1/w20+dict | 970 |
-| awc1/w23+dict | 508 |
-| deflate6-stream | 0 |
-| brotli5-stream/w22 | 212 |
-| brotli5-stream/w24 | 1,305 |
-| lz4-stream | 176 |
-| zstd3-stream/w23-long | 2,237 |
-| awd1/w22+dict | 1,798 |
+| Variant | RSS KiB per connection | libzstd KiB per connection |
+|---|---:|---:|
+| zstd-3 stream w20 (AWC1 default) | 3,580 | 4,055 |
+| zstd-3 stream w23 | 9,489 | 18,391 |
+| zstd-3 stream w23 + long | 10,093 | 18,935 |
+| zstd-1 stream w20 | 3,064 | 3,351 |
+| deflate-6 stream (32 KiB window) | 280 | – |
+| brotli-5 stream w22 | 10,498 | – |
+| brotli-5 stream w24 | 10,630 | – |
+| lz4 stream | 489 | – |
+| AWD1 (4 refs) + zstd-3 w22 | 8,911 | 5,632 |
 
 ## Session-log storage and archive
 
@@ -270,60 +271,86 @@ Ratios are UTF-8 bytes / compressed bytes of each representation (higher is bett
 | 3 | 15,266,000 | 8,471,389 | 1.80× | 306,739 | 326,480 | 225,210 |
 | 10 | 15,266,000 | 12,135,578 | 1.26× | 306,739 | 321,628 | 144,251 |
 
+## Long contexts (re-sent context outgrowing the window)
+
+Real OpenHands runs chained into one conversation; one full request body per turn; each variant on its own connection.
+
+| Final context | Requests | Raw MB | AWC1 w20 (1 MiB) | AWC1 w23 (8 MiB) | AWC1 w25 (32 MiB) | zstd-3 stream w23 + long | brotli-5 stream w24 (16 MiB) | deflate-6 stream (32 KiB) | AWD1 w20 | AWD1 w22 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.25 MiB | 10 | 1 | 19× | 19× | 19× | 19× | 21× | 4× | 19× | 19× |
+| 1.15 MiB | 27 | 14 | 26× | 91× | 92× | 84× | 105× | 5× | 96× | 96× |
+| 3.04 MiB | 115 | 174 | 11× | 150× | 326× | 302× | 364× | 5× | 468× | 682× |
+| 6.01 MiB | 184 | 621 | 10× | 342× | 510× | 673× | 961× | 5× | 878× | 2,222× |
+
 ## Cost model
 
-Assumptions: AWS us-east-1 list prices on 2026-11-19: egress $0.09/GB (first 10 TB tier), S3 Standard $0.023/GB-month, Glacier Deep Archive $0.00099/GB-month; 1 TB of raw traffic per month; 12 months of logs retained (12 TB raw). CPU is excluded here: at the measured speeds it is under 1% of the transfer bill for every codec except xz/brotli-11 (see the report).
+Assumptions: AWS us-east-1 list prices on 2026-11-19: egress $0.09/GB (first 10 TB tier), S3 Standard $0.023/GB-month, Glacier Deep Archive $0.00099/GB-month; 1 TB of raw traffic per month; 12 months of logs retained (12 TB raw); compression CPU at $0.04/vCPU-hour (an assumption) and the single-core compress speed measured here. Each row applies its measured ratio to both columns, so read *wire* rows for egress and *store* rows for storage. Wire-row CPU uses the Python per-message speeds and so overstates native cost.
 
-| Corpus | Approach | Ratio | Egress $/month | S3 Standard $/month | Deep Archive $/month |
-|---|---|---:|---:|---:|---:|
-| transcripts-cc | raw (identity) | 1.00× | 90.00 | 276.00 | 11.88 |
-| transcripts-cc | wire: awf1/one | 2.64× | 34.13 | 104.66 | 4.50 |
-| transcripts-cc | wire: awc1/w20+dict | 10.49× | 8.58 | 26.30 | 1.13 |
-| transcripts-cc | wire: brotli5-stream/w22+dict | 11.07× | 8.13 | 24.92 | 1.07 |
-| transcripts-cc | wire: awd1/w22+dict | 10.64× | 8.46 | 25.95 | 1.12 |
-| transcripts-cc | store: gzip-6 | 8.61× | 10.46 | 32.06 | 1.38 |
-| transcripts-cc | store: zstd-3 | 9.59× | 9.39 | 28.79 | 1.24 |
-| transcripts-cc | store: zstd-19-long-w27 | 10.65× | 8.45 | 25.93 | 1.12 |
-| transcripts-cc | store: awd1-19 (context delta) | 9.22× | 9.76 | 29.94 | 1.29 |
-| transcripts-cc | store: corpus: zstd-19-long-w27 | 16.97× | 5.30 | 16.27 | 0.70 |
-| transcripts-oh | raw (identity) | 1.00× | 90.00 | 276.00 | 11.88 |
-| transcripts-oh | wire: awf1/one | 2.34× | 38.42 | 117.84 | 5.07 |
-| transcripts-oh | wire: awc1/w20+dict | 5.40× | 16.67 | 51.13 | 2.20 |
-| transcripts-oh | wire: brotli5-stream/w22+dict | 6.16× | 14.61 | 44.81 | 1.93 |
-| transcripts-oh | wire: awd1/w22+dict | 5.50× | 16.37 | 50.21 | 2.16 |
-| transcripts-oh | store: gzip-6 | 5.18× | 17.36 | 53.24 | 2.29 |
-| transcripts-oh | store: zstd-3 | 5.26× | 17.11 | 52.46 | 2.26 |
-| transcripts-oh | store: zstd-19-long-w27 | 6.08× | 14.80 | 45.40 | 1.95 |
-| transcripts-oh | store: awd1-19 (context delta) | 5.64× | 15.95 | 48.92 | 2.11 |
-| transcripts-oh | store: corpus: zstd-19-long-w27 | 9.78× | 9.21 | 28.23 | 1.22 |
-| api-requests | raw (identity) | 1.00× | 90.00 | 276.00 | 11.88 |
-| api-requests | wire: awf1/one | 3.82× | 23.56 | 72.24 | 3.11 |
-| api-requests | wire: awc1/w20+dict | 58.79× | 1.53 | 4.69 | 0.20 |
-| api-requests | wire: brotli5-stream/w22+dict | 68.96× | 1.31 | 4.00 | 0.17 |
-| api-requests | wire: awd1/w22+dict | 62.90× | 1.43 | 4.39 | 0.19 |
-| api-requests | store: gzip-6 | 5.19× | 17.34 | 53.19 | 2.29 |
-| api-requests | store: zstd-3 | 50.01× | 1.80 | 5.52 | 0.24 |
-| api-requests | store: zstd-19-long-w27 | 57.68× | 1.56 | 4.78 | 0.21 |
-| api-requests | store: awd1-19 (context delta) | 57.30× | 1.57 | 4.82 | 0.21 |
-| api-requests | store: corpus: zstd-19-long-w27 | 83.20× | 1.08 | 3.32 | 0.14 |
-| tool-outputs | raw (identity) | 1.00× | 90.00 | 276.00 | 11.88 |
-| tool-outputs | wire: awf1/one | 2.46× | 36.59 | 112.20 | 4.83 |
-| tool-outputs | wire: awc1/w20+dict | 3.48× | 25.86 | 79.30 | 3.41 |
-| tool-outputs | wire: brotli5-stream/w22+dict | 3.80× | 23.68 | 72.63 | 3.13 |
-| tool-outputs | wire: awd1/w22+dict | 3.52× | 25.55 | 78.35 | 3.37 |
-| tool-outputs | store: gzip-6 | 3.41× | 26.43 | 81.05 | 3.49 |
-| tool-outputs | store: zstd-3 | 3.46× | 25.98 | 79.67 | 3.43 |
-| tool-outputs | store: zstd-19-long-w27 | 3.82× | 23.59 | 72.34 | 3.11 |
-| tool-outputs | store: awd1-19 (context delta) | 3.73× | 24.15 | 74.05 | 3.19 |
-| tool-outputs | store: corpus: zstd-19-long-w27 | 5.14× | 17.50 | 53.67 | 2.31 |
-| collab | raw (identity) | 1.00× | 90.00 | 276.00 | 11.88 |
-| collab | wire: awf1/one | 1.58× | 56.98 | 174.74 | 7.52 |
-| collab | wire: awc1/w20+dict | 4.35× | 20.71 | 63.51 | 2.73 |
-| collab | wire: brotli5-stream/w22+dict | 4.82× | 18.68 | 57.28 | 2.47 |
-| collab | wire: awd1/w22+dict | 4.36× | 20.64 | 63.29 | 2.72 |
-| collab | store: gzip-6 | 4.27× | 21.06 | 64.60 | 2.78 |
-| collab | store: zstd-3 | 4.12× | 21.84 | 66.97 | 2.88 |
-| collab | store: zstd-19-long-w27 | 4.67× | 19.26 | 59.07 | 2.54 |
-| collab | store: awd1-19 (context delta) | 3.98× | 22.62 | 69.35 | 2.99 |
-| collab | store: corpus: zstd-19-long-w27 | 7.42× | 12.13 | 37.20 | 1.60 |
+| Corpus | Approach | Ratio | Egress $/month | S3 Standard $/month | Deep Archive $/month | Compress CPU $/TB |
+|---|---|---:|---:|---:|---:|---:|
+| transcripts-cc | raw (identity) | 1.00× | 90.00 | 276.00 | 11.88 | 0.00 |
+| transcripts-cc | wire: awf1/one | 2.64× | 34.13 | 104.66 | 4.50 | 0.31 |
+| transcripts-cc | wire: awc1/w20+dict | 10.49× | 8.58 | 26.30 | 1.13 | 0.28 |
+| transcripts-cc | wire: brotli5-stream/w22+dict | 11.07× | 8.13 | 24.92 | 1.07 | 0.35 |
+| transcripts-cc | wire: awd1/w22+dict | 10.64× | 8.46 | 25.95 | 1.12 | 0.36 |
+| transcripts-cc | store: gzip-6 | 8.61× | 10.46 | 32.06 | 1.38 | 0.11 |
+| transcripts-cc | store: zstd-3 | 9.59× | 9.39 | 28.79 | 1.24 | 0.03 |
+| transcripts-cc | store: zstd-19-long-w27 | 10.65× | 8.45 | 25.93 | 1.12 | 2.80 |
+| transcripts-cc | store: zstd-19+dict64k | 13.77× | 6.54 | 20.05 | 0.86 | 2.01 |
+| transcripts-cc | store: xz-9e | 10.94× | 8.22 | 25.22 | 1.09 | 5.42 |
+| transcripts-cc | store: brotli-11-w24 | 11.99× | 7.51 | 23.02 | 0.99 | 8.02 |
+| transcripts-cc | store: corpus: zstd-19-long-w27 | 16.97× | 5.30 | 16.27 | 0.70 | 3.10 |
+| transcripts-cc | store: corpus: xz-9e | 17.88× | 5.03 | 15.43 | 0.66 | 3.61 |
+| transcripts-oh | raw (identity) | 1.00× | 90.00 | 276.00 | 11.88 | 0.00 |
+| transcripts-oh | wire: awf1/one | 2.34× | 38.42 | 117.84 | 5.07 | 0.40 |
+| transcripts-oh | wire: awc1/w20+dict | 5.40× | 16.67 | 51.13 | 2.20 | 0.37 |
+| transcripts-oh | wire: brotli5-stream/w22+dict | 6.16× | 14.61 | 44.81 | 1.93 | 0.50 |
+| transcripts-oh | wire: awd1/w22+dict | 5.50× | 16.37 | 50.21 | 2.16 | 0.44 |
+| transcripts-oh | store: gzip-6 | 5.18× | 17.36 | 53.24 | 2.29 | 0.22 |
+| transcripts-oh | store: zstd-3 | 5.26× | 17.11 | 52.46 | 2.26 | 0.05 |
+| transcripts-oh | store: zstd-19-long-w27 | 6.08× | 14.80 | 45.40 | 1.95 | 3.93 |
+| transcripts-oh | store: zstd-19+dict64k | 7.22× | 12.47 | 38.24 | 1.65 | 2.80 |
+| transcripts-oh | store: xz-9e | 6.30× | 14.29 | 43.83 | 1.89 | 7.87 |
+| transcripts-oh | store: brotli-11-w24 | 6.75× | 13.34 | 40.90 | 1.76 | 14.37 |
+| transcripts-oh | store: corpus: zstd-19-long-w27 | 9.78× | 9.21 | 28.23 | 1.22 | 5.02 |
+| transcripts-oh | store: corpus: xz-9e | 10.32× | 8.72 | 26.74 | 1.15 | 5.91 |
+| api-requests | raw (identity) | 1.00× | 90.00 | 276.00 | 11.88 | 0.00 |
+| api-requests | wire: awf1/one | 3.82× | 23.56 | 72.24 | 3.11 | 0.08 |
+| api-requests | wire: awc1/w20+dict | 58.79× | 1.53 | 4.69 | 0.20 | 0.04 |
+| api-requests | wire: brotli5-stream/w22+dict | 68.96× | 1.31 | 4.00 | 0.17 | 0.08 |
+| api-requests | wire: awd1/w22+dict | 62.90× | 1.43 | 4.39 | 0.19 | 0.05 |
+| api-requests | store: gzip-6 | 5.19× | 17.34 | 53.19 | 2.29 | 0.26 |
+| api-requests | store: zstd-3 | 50.01× | 1.80 | 5.52 | 0.24 | 0.01 |
+| api-requests | store: zstd-19-long-w27 | 57.68× | 1.56 | 4.78 | 0.21 | 0.41 |
+| api-requests | store: zstd-19+dict64k | 72.76× | 1.24 | 3.79 | 0.16 | 0.29 |
+| api-requests | store: xz-9e | 60.03× | 1.50 | 4.60 | 0.20 | 2.49 |
+| api-requests | store: brotli-11-w24 | 63.48× | 1.42 | 4.35 | 0.19 | 1.85 |
+| api-requests | store: corpus: zstd-19-long-w27 | 83.20× | 1.08 | 3.32 | 0.14 | 0.38 |
+| api-requests | store: corpus: xz-9e | 89.48× | 1.01 | 3.08 | 0.13 | 1.88 |
+| tool-outputs | raw (identity) | 1.00× | 90.00 | 276.00 | 11.88 | 0.00 |
+| tool-outputs | wire: awf1/one | 2.46× | 36.59 | 112.20 | 4.83 | 0.30 |
+| tool-outputs | wire: awc1/w20+dict | 3.48× | 25.86 | 79.30 | 3.41 | 0.34 |
+| tool-outputs | wire: brotli5-stream/w22+dict | 3.80× | 23.68 | 72.63 | 3.13 | 0.52 |
+| tool-outputs | wire: awd1/w22+dict | 3.52× | 25.55 | 78.35 | 3.37 | 0.43 |
+| tool-outputs | store: gzip-6 | 3.41× | 26.43 | 81.05 | 3.49 | 0.29 |
+| tool-outputs | store: zstd-3 | 3.46× | 25.98 | 79.67 | 3.43 | 0.06 |
+| tool-outputs | store: zstd-19-long-w27 | 3.82× | 23.59 | 72.34 | 3.11 | 3.39 |
+| tool-outputs | store: zstd-19+dict64k | 4.02× | 22.39 | 68.67 | 2.96 | 2.82 |
+| tool-outputs | store: xz-9e | 3.95× | 22.81 | 69.96 | 3.01 | 10.25 |
+| tool-outputs | store: brotli-11-w24 | 4.16× | 21.65 | 66.39 | 2.86 | 13.52 |
+| tool-outputs | store: corpus: zstd-19-long-w27 | 5.14× | 17.50 | 53.67 | 2.31 | 5.01 |
+| tool-outputs | store: corpus: xz-9e | 5.35× | 16.83 | 51.61 | 2.22 | 5.97 |
+| collab | raw (identity) | 1.00× | 90.00 | 276.00 | 11.88 | 0.00 |
+| collab | wire: awf1/one | 1.58× | 56.98 | 174.74 | 7.52 | 0.96 |
+| collab | wire: awc1/w20+dict | 4.35× | 20.71 | 63.51 | 2.73 | 1.05 |
+| collab | wire: brotli5-stream/w22+dict | 4.82× | 18.68 | 57.28 | 2.47 | 0.96 |
+| collab | wire: awd1/w22+dict | 4.36× | 20.64 | 63.29 | 2.72 | 1.07 |
+| collab | store: gzip-6 | 4.27× | 21.06 | 64.60 | 2.78 | 0.24 |
+| collab | store: zstd-3 | 4.12× | 21.84 | 66.97 | 2.88 | 0.07 |
+| collab | store: zstd-19-long-w27 | 4.67× | 19.26 | 59.07 | 2.54 | 4.58 |
+| collab | store: zstd-19+dict64k | 6.20× | 14.53 | 44.55 | 1.92 | 3.52 |
+| collab | store: xz-9e | 4.82× | 18.66 | 57.22 | 2.46 | 7.20 |
+| collab | store: brotli-11-w24 | 5.25× | 17.15 | 52.58 | 2.26 | 15.45 |
+| collab | store: corpus: zstd-19-long-w27 | 7.42× | 12.13 | 37.20 | 1.60 | 4.72 |
+| collab | store: corpus: xz-9e | 7.70× | 11.68 | 35.83 | 1.54 | 4.55 |
 

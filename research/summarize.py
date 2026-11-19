@@ -40,10 +40,14 @@ def transport(L, t):
         r = by[ref].get(col)
         if r:
             L.append(f"| {col} | {r['encode_MBps']:.1f} | {f(r['decode_MBps'], '{:.1f}')} | {r['latency_us_p50']:.0f} | {r['latency_us_p99']:.0f} |")
-    L += ["", "Memory per live connection (sender + receiver, RSS growth, transcripts-cc):", "",
-          "| Variant | KiB per connection |", "|---|---:|"]
-    for k, v in t["corpora"][ref]["memory_per_connection_bytes"].items():
-        L.append(f"| {k} | {v / 1024:,.0f} |")
+    mem = j("memory.json")
+    if mem:
+        L += ["", f"Memory per live connection (sender + receiver), measured in a fresh process with "
+              f"{mem['connections_per_process']} connections each fed 4 MiB (`memory.json`). libzstd's own accounting "
+              "counts allocated buffers; RSS counts touched pages:", "",
+              "| Variant | RSS KiB per connection | libzstd KiB per connection |", "|---|---:|---:|"]
+        for r in mem["rows"]:
+            L.append(f"| {r['variant']} | {r['rss_per_connection'] / 1024:,.0f} | {f(r['libzstd_bytes_per_connection'] and r['libzstd_bytes_per_connection'] / 1024, '{:,.0f}')} |")
     L.append("")
 
 
@@ -123,30 +127,46 @@ def multiplex(L, m):
     L.append("")
 
 
+def longctx(L, x):
+    keys = [k for k in x["rows"][0] if isinstance(x["rows"][0][k], dict)]
+    L += ["## Long contexts (re-sent context outgrowing the window)", "",
+          "Real OpenHands runs chained into one conversation; one full request body per turn; each variant on its own connection.", "",
+          "| Final context | Requests | Raw MB | " + " | ".join(keys) + " |", "|---:|---:|---:|" + "---:|" * len(keys)]
+    for r in x["rows"]:
+        L.append(f"| {r['final_context_bytes'] / 2**20:.2f} MiB | {r['requests']} | {r['raw_bytes'] / 1e6:,.0f} | " +
+                 " | ".join(f"{r[k]['ratio']:,.0f}×" for k in keys) + " |")
+    L.append("")
+
+
 def costs(L, t, s):
     """$ per month per 1 TB/month of raw traffic (egress) and per 12 TB retained (storage)."""
     L += ["## Cost model", "",
           f"Assumptions: AWS us-east-1 list prices on 2026-11-19: egress ${PRICE['egress_gb']}/GB (first 10 TB tier), "
           f"S3 Standard ${PRICE['s3_standard_gb_month']}/GB-month, Glacier Deep Archive ${PRICE['deep_archive_gb_month']}/GB-month; "
-          "1 TB of raw traffic per month; 12 months of logs retained (12 TB raw). CPU is excluded here: at the measured "
-          "speeds it is under 1% of the transfer bill for every codec except xz/brotli-11 (see the report).", "",
-          "| Corpus | Approach | Ratio | Egress $/month | S3 Standard $/month | Deep Archive $/month |", "|---|---|---:|---:|---:|---:|"]
+          "1 TB of raw traffic per month; 12 months of logs retained (12 TB raw); compression CPU at "
+          f"${PRICE['vcpu_hour']}/vCPU-hour (an assumption) and the single-core compress speed measured here. Each row applies its "
+          "measured ratio to both columns, so read *wire* rows for egress and *store* rows for storage. Wire-row CPU uses the "
+          "Python per-message speeds and so overstates native cost.", "",
+          "| Corpus | Approach | Ratio | Egress $/month | S3 Standard $/month | Deep Archive $/month | Compress CPU $/TB |",
+          "|---|---|---:|---:|---:|---:|---:|"]
     for c in ["transcripts-cc", "transcripts-oh", "api-requests", "tool-outputs", "collab"]:
         rows = []
         if t and c in t["corpora"]:
             by = {r["variant"]: r for r in t["corpora"][c]["rows"]}
             for k in ["awf1/one", "awc1/w20+dict", "brotli5-stream/w22+dict", "awd1/w22+dict"]:
                 if k in by:
-                    rows.append(("wire: " + k, by[k]["ratio"]))
+                    rows.append(("wire: " + k, by[k]["ratio"], by[k]["encode_MBps"]))
         if s and c in s["corpora"]:
             by = {r["variant"]: r for r in s["corpora"][c]["rows"]}
-            for k in ["gzip-6", "zstd-3", "zstd-19-long-w27", "awd1-19 (context delta)", "corpus: zstd-19-long-w27"]:
+            for k in ["gzip-6", "zstd-3", "zstd-19-long-w27", "zstd-19+dict64k", "xz-9e", "brotli-11-w24",
+                      "corpus: zstd-19-long-w27", "corpus: xz-9e"]:
                 if k in by:
-                    rows.append(("store: " + k, by[k]["ratio"]))
-        L.append(f"| {c} | raw (identity) | 1.00× | {1000 * PRICE['egress_gb']:,.2f} | {12000 * PRICE['s3_standard_gb_month']:,.2f} | {12000 * PRICE['deep_archive_gb_month']:,.2f} |")
-        for name, ratio in rows:
+                    rows.append(("store: " + k, by[k]["ratio"], by[k]["compress_MBps"]))
+        L.append(f"| {c} | raw (identity) | 1.00× | {1000 * PRICE['egress_gb']:,.2f} | {12000 * PRICE['s3_standard_gb_month']:,.2f} | {12000 * PRICE['deep_archive_gb_month']:,.2f} | 0.00 |")
+        for name, ratio, mbps in rows:
+            cpu = 1e6 / mbps / 3600 * PRICE["vcpu_hour"] if mbps else None
             L.append(f"| {c} | {name} | {ratio:.2f}× | {1000 / ratio * PRICE['egress_gb']:,.2f} | "
-                     f"{12000 / ratio * PRICE['s3_standard_gb_month']:,.2f} | {12000 / ratio * PRICE['deep_archive_gb_month']:,.2f} |")
+                     f"{12000 / ratio * PRICE['s3_standard_gb_month']:,.2f} | {12000 / ratio * PRICE['deep_archive_gb_month']:,.2f} | {f(cpu)} |")
     L.append("")
 
 
@@ -161,7 +181,7 @@ def main():
         L += ["Machine: " + ", ".join(f"{k}={v}" for k, v in m.items()), ""]
     for name, fn in [("transport.json", transport), ("storage.json", storage), ("sse.json", sse),
                      ("dictionaries.json", dicts), ("multiplex.json", multiplex), ("tokens.json", tokens),
-                     ("reducer.json", reducer)]:
+                     ("reducer.json", reducer), ("longctx.json", longctx)]:
         data = j(name)
         if data:
             fn(L, data)
