@@ -1,0 +1,662 @@
+{
+  "transcripts-cc": {
+    "messages": 15132,
+    "sessions": 300,
+    "bytes": 37034500,
+    "message_bytes": {
+      "10": 839.0,
+      "50": 1202.0,
+      "90": 7260.099999999997,
+      "99": 10983.040000000008,
+      "max": 81714,
+      "mean": 2447.429288924134
+    },
+    "session_bytes": {
+      "10": 36713.9,
+      "50": 83626.0,
+      "90": 255186.00000000006,
+      "max": 599970
+    },
+    "share_messages_under_256B": 0.0,
+    "kinds": {
+      "tool_result": {
+        "messages": 7266,
+        "bytes_share": 0.7060496834033131,
+        "p50_bytes": 1767.5,
+        "entropy0_bits_per_byte": 5.189,
+        "zstd19_long_bits_per_byte": 0.445,
+        "zstd3_one_msg_bits_per_byte": 2.263
+      },
+      "assistant": {
+        "messages": 7566,
+        "bytes_share": 0.2565759764543871,
+        "p50_bytes": 1119.0,
+        "entropy0_bits_per_byte": 5.145,
+        "zstd19_long_bits_per_byte": 1.063,
+        "zstd3_one_msg_bits_per_byte": 4.812
+      },
+      "user": {
+        "messages": 300,
+        "bytes_share": 0.03737434014229975,
+        "p50_bytes": 4156.0,
+        "entropy0_bits_per_byte": 4.91,
+        "zstd19_long_bits_per_byte": 0.492,
+        "zstd3_one_msg_bits_per_byte": 3.798
+      }
+    },
+    "resend": {
+      "copied_from_previous_share": 0.006441966274689816,
+      "per_message_share_p50": 0.013513513513513514,
+      "per_message_share_p10": 0.0021969572291732353
+    },
+    "chunk_dedup": {
+      "chunk_avg": 1024,
+      "dup_bytes_within_session": 0.19673326222846266,
+      "dup_bytes_anywhere": 0.23811373179062767
+    },
+    "near_duplicates": {
+      "exact_session": 0.0,
+      "exact_global": 0.0,
+      "near_session": 0.08412635474491145,
+      "near_global": 0.11161776367961936,
+      "exact_session_bytes": 0.0,
+      "exact_global_bytes": 0.0,
+      "near_session_bytes": 0.21453890291484967,
+      "near_global_bytes": 0.29104786077846334,
+      "messages_considered": 15132
+    },
+    "json": {
+      "json_messages": 15132,
+      "json_share": 1.0,
+      "key_bytes_share": 0.12156324508228813,
+      "punctuation_bytes_share": 0.029640902401814523,
+      "distinct_key_paths": 40,
+      "distinct_schemas": 3,
+      "top10_schema_message_share": 1.0
+    }
+  },
+  "transcripts-oh": {
+    "messages": 10357,
+    "sessions": 300,
+    "bytes": 18338768,
+    "message_bytes": {
+      "10": 374.0,
+      "50": 585.0,
+      "90": 2982.199999999999,
+      "99": 21167.0,
+      "max": 36135,
+      "mean": 1770.6640919185093
+    },
+    "session_bytes": {
+      "10": 5352.8,
+      "50": 48612.0,
+      "90": 144617.2,
+      "max": 291796
+    },
+    "share_messages_under_256B": 0.0,
+    "kinds": {
+      "tool_result": {
+        "messages": 4462,
+        "bytes_share": 0.7129734123906252,
+        "p50_bytes": 1036.0,
+        "entropy0_bits_per_byte": 5.053,
+        "zstd19_long_bits_per_byte": 0.805,
+        "zstd3_one_msg_bits_per_byte": 2.936
+      },
+      "assistant": {
+        "messages": 4996,
+        "bytes_share": 0.21869053580916667,
+        "p50_bytes": 439.0,
+        "entropy0_bits_per_byte": 5.173,
+        "zstd19_long_bits_per_byte": 0.881,
+        "zstd3_one_msg_bits_per_byte": 5.047
+      },
+      "user": {
+        "messages": 599,
+        "bytes_share": 0.06075309966296536,
+        "p50_bytes": 1586.0,
+        "entropy0_bits_per_byte": 5.072,
+        "zstd19_long_bits_per_byte": 0.679,
+        "zstd3_one_msg_bits_per_byte": 3.823
+      },
+      "system": {
+        "messages": 300,
+        "bytes_share": 0.007582952137242807,
+        "p50_bytes": 464.0,
+        "entropy0_bits_per_byte": 5.105,
+        "zstd19_long_bits_per_byte": 0.171,
+        "zstd3_one_msg_bits_per_byte": 5.777
+      }
+    },
+    "resend": {
+      "copied_from_previous_share": 0.004800486052280066,
+      "per_message_share_p50": 0.014035087719298246,
+      "per_message_share_p10": 0.002942137953579601
+    },
+    "chunk_dedup": {
+      "chunk_avg": 1024,
+      "dup_bytes_within_session": 0.036998177849242656,
+      "dup_bytes_anywhere": 0.1440348664643121
+    },
+    "near_duplicates": {
+      "exact_session": 0.0,
+      "exact_global": 0.0,
+      "near_session": 0.04721444433716327,
+      "near_global": 0.10398764120884425,
+      "exact_session_bytes": 0.0,
+      "exact_global_bytes": 0.0,
+      "near_session_bytes": 0.07108672730905369,
+      "near_global_bytes": 0.20377175827732813,
+      "messages_considered": 10357
+    },
+    "json": {
+      "json_messages": 10357,
+      "json_share": 1.0,
+      "key_bytes_share": 0.054473070382917765,
+      "punctuation_bytes_share": 0.016817978176069406,
+      "distinct_key_paths": 15,
+      "distinct_schemas": 4,
+      "top10_schema_message_share": 1.0
+    }
+  },
+  "api-requests": {
+    "messages": 1209,
+    "sessions": 80,
+    "bytes": 46423921,
+    "message_bytes": {
+      "10": 8452.0,
+      "50": 30321.0,
+      "90": 83041.20000000001,
+      "99": 141320.52000000014,
+      "max": 180063,
+      "mean": 38398.61124896609
+    },
+    "session_bytes": {
+      "10": 32977.4,
+      "50": 277333.5,
+      "90": 1403706.5999999996,
+      "max": 4698298
+    },
+    "share_messages_under_256B": 0.0,
+    "kinds": {
+      "request": {
+        "messages": 1209,
+        "bytes_share": 1.0,
+        "p50_bytes": 30321.0,
+        "entropy0_bits_per_byte": 5.017,
+        "zstd19_long_bits_per_byte": 0.06,
+        "zstd3_one_msg_bits_per_byte": 1.833
+      }
+    },
+    "resend": {
+      "copied_from_previous_share": 0.9209803282234605,
+      "per_message_share_p50": 0.9490925188136343,
+      "per_message_share_p10": 0.796346709127995
+    },
+    "chunk_dedup": {
+      "chunk_avg": 1024,
+      "dup_bytes_within_session": 0.8963603268237511,
+      "dup_bytes_anywhere": 0.9095822173228323
+    },
+    "near_duplicates": {
+      "exact_session": 0.0,
+      "exact_global": 0.018196856906534328,
+      "near_session": 0.858560794044665,
+      "near_global": 0.9057071960297767,
+      "exact_session_bytes": 0.0,
+      "exact_global_bytes": 0.004366132709901863,
+      "near_session_bytes": 0.935658579980782,
+      "near_global_bytes": 0.9500008411611763,
+      "messages_considered": 1209
+    },
+    "json": {
+      "json_messages": 1209,
+      "json_share": 1.0,
+      "key_bytes_share": 0.025480161402135767,
+      "punctuation_bytes_share": 0.00954578998185009,
+      "distinct_key_paths": 49,
+      "distinct_schemas": 3,
+      "top10_schema_message_share": 1.0
+    }
+  },
+  "tool-outputs": {
+    "messages": 13005,
+    "sessions": 620,
+    "bytes": 31376773,
+    "message_bytes": {
+      "10": 127.0,
+      "50": 794.0,
+      "90": 4885.4000000000015,
+      "99": 20051.639999999992,
+      "max": 1283743,
+      "mean": 2412.6699730872742
+    },
+    "session_bytes": {
+      "10": 459.0,
+      "50": 27672.0,
+      "90": 97151.60000000002,
+      "max": 1318956
+    },
+    "share_messages_under_256B": 0.28988850442137637,
+    "kinds": {
+      "file-read": {
+        "messages": 4477,
+        "bytes_share": 0.4093349242766297,
+        "p50_bytes": 1723.0,
+        "entropy0_bits_per_byte": 4.959,
+        "zstd19_long_bits_per_byte": 0.729,
+        "zstd3_one_msg_bits_per_byte": 3.284
+      },
+      "test-run": {
+        "messages": 1398,
+        "bytes_share": 0.11042155291112951,
+        "p50_bytes": 2088.0,
+        "entropy0_bits_per_byte": 4.976,
+        "zstd19_long_bits_per_byte": 0.476,
+        "zstd3_one_msg_bits_per_byte": 2.986
+      },
+      "base64-blob": {
+        "messages": 200,
+        "bytes_share": 0.0937265282188197,
+        "p50_bytes": 14706.0,
+        "entropy0_bits_per_byte": 6.014,
+        "zstd19_long_bits_per_byte": 5.975,
+        "zstd3_one_msg_bits_per_byte": 6.042
+      },
+      "diff": {
+        "messages": 278,
+        "bytes_share": 0.07745952714767704,
+        "p50_bytes": 867.0,
+        "entropy0_bits_per_byte": 4.954,
+        "zstd19_long_bits_per_byte": 1.434,
+        "zstd3_one_msg_bits_per_byte": 2.021
+      },
+      "shell-other": {
+        "messages": 1977,
+        "bytes_share": 0.06461869102982642,
+        "p50_bytes": 153.0,
+        "entropy0_bits_per_byte": 5.104,
+        "zstd19_long_bits_per_byte": 0.697,
+        "zstd3_one_msg_bits_per_byte": 2.706
+      },
+      "listing": {
+        "messages": 2145,
+        "bytes_share": 0.05954771065845427,
+        "p50_bytes": 159.0,
+        "entropy0_bits_per_byte": 5.028,
+        "zstd19_long_bits_per_byte": 0.416,
+        "zstd3_one_msg_bits_per_byte": 2.185
+      },
+      "stack-trace": {
+        "messages": 1028,
+        "bytes_share": 0.05372604760852877,
+        "p50_bytes": 950.5,
+        "entropy0_bits_per_byte": 5.222,
+        "zstd19_long_bits_per_byte": 0.703,
+        "zstd3_one_msg_bits_per_byte": 2.824
+      },
+      "json-api": {
+        "messages": 200,
+        "bytes_share": 0.046268556680446396,
+        "p50_bytes": 7258.5,
+        "entropy0_bits_per_byte": 4.715,
+        "zstd19_long_bits_per_byte": 2.036,
+        "zstd3_one_msg_bits_per_byte": 3.592
+      },
+      "html": {
+        "messages": 200,
+        "bytes_share": 0.035688851750305874,
+        "p50_bytes": 5623.0,
+        "entropy0_bits_per_byte": 4.619,
+        "zstd19_long_bits_per_byte": 2.039,
+        "zstd3_one_msg_bits_per_byte": 3.752
+      },
+      "hexdump": {
+        "messages": 200,
+        "bytes_share": 0.026113839049031588,
+        "p50_bytes": 4194.5,
+        "entropy0_bits_per_byte": 3.632,
+        "zstd19_long_bits_per_byte": 3.091,
+        "zstd3_one_msg_bits_per_byte": 3.695
+      },
+      "search": {
+        "messages": 865,
+        "bytes_share": 0.02112680612502758,
+        "p50_bytes": 326.0,
+        "entropy0_bits_per_byte": 5.324,
+        "zstd19_long_bits_per_byte": 0.837,
+        "zstd3_one_msg_bits_per_byte": 2.909
+      },
+      "compiler-error": {
+        "messages": 37,
+        "bytes_share": 0.0019669645441231323,
+        "p50_bytes": 503.0,
+        "entropy0_bits_per_byte": 5.105,
+        "zstd19_long_bits_per_byte": 2.069,
+        "zstd3_one_msg_bits_per_byte": 3.316
+      }
+    },
+    "resend": {
+      "copied_from_previous_share": 0.08302169888535064,
+      "per_message_share_p50": 0.07900432900432901,
+      "per_message_share_p10": 0.0
+    },
+    "chunk_dedup": {
+      "chunk_avg": 1024,
+      "dup_bytes_within_session": 0.15283388129174405,
+      "dup_bytes_anywhere": 0.24405199349212872
+    },
+    "near_duplicates": {
+      "exact_session": 0.2335614858109667,
+      "exact_global": 0.3110820579866185,
+      "near_session": 0.2891640390679074,
+      "near_global": 0.3768361147427517,
+      "exact_session_bytes": 0.11838438313692345,
+      "exact_global_bytes": 0.18713510082833262,
+      "near_session_bytes": 0.17592893211310948,
+      "near_global_bytes": 0.2683285438370773,
+      "messages_considered": 13003
+    },
+    "json": {
+      "json_messages": 400,
+      "json_share": 0.030757400999615533,
+      "key_bytes_share": 0.050391636468109735,
+      "punctuation_bytes_share": 0.015064902424398886,
+      "distinct_key_paths": 20,
+      "distinct_schemas": 2,
+      "top10_schema_message_share": 1.0
+    }
+  },
+  "ci-logs": {
+    "messages": 44822,
+    "sessions": 286,
+    "bytes": 4167000,
+    "message_bytes": {
+      "10": 24.0,
+      "50": 84.0,
+      "90": 160.0,
+      "99": 252.79000000000087,
+      "max": 2521,
+      "mean": 92.96773905671323
+    },
+    "session_bytes": {
+      "10": 1966.5,
+      "50": 3652.5,
+      "90": 13165.0,
+      "max": 382949
+    },
+    "share_messages_under_256B": 0.990228013029316,
+    "kinds": {
+      "swebench-eval": {
+        "messages": 24822,
+        "bytes_share": 0.3622407007439405,
+        "p50_bytes": 61.0,
+        "entropy0_bits_per_byte": 5.137,
+        "zstd19_long_bits_per_byte": 0.54,
+        "zstd3_one_msg_bits_per_byte": 7.942
+      },
+      "loghub-Hadoop": {
+        "messages": 2000,
+        "bytes_share": 0.09190040796736261,
+        "p50_bytes": 187.0,
+        "entropy0_bits_per_byte": 5.332,
+        "zstd19_long_bits_per_byte": 0.28,
+        "zstd3_one_msg_bits_per_byte": 6.904
+      },
+      "loghub-Mac": {
+        "messages": 2000,
+        "bytes_share": 0.07617350611951045,
+        "p50_bytes": 138.0,
+        "entropy0_bits_per_byte": 5.413,
+        "zstd19_long_bits_per_byte": 0.913,
+        "zstd3_one_msg_bits_per_byte": 6.941
+      },
+      "loghub-BGL": {
+        "messages": 2000,
+        "bytes_share": 0.07563018958483321,
+        "p50_bytes": 140.0,
+        "entropy0_bits_per_byte": 5.104,
+        "zstd19_long_bits_per_byte": 1.107,
+        "zstd3_one_msg_bits_per_byte": 6.501
+      },
+      "loghub-HDFS": {
+        "messages": 2000,
+        "bytes_share": 0.06859803215742741,
+        "p50_bytes": 141.0,
+        "entropy0_bits_per_byte": 5.193,
+        "zstd19_long_bits_per_byte": 1.197,
+        "zstd3_one_msg_bits_per_byte": 7.249
+      },
+      "loghub-Zookeeper": {
+        "messages": 2000,
+        "bytes_share": 0.06668874490040796,
+        "p50_bytes": 139.0,
+        "entropy0_bits_per_byte": 5.32,
+        "zstd19_long_bits_per_byte": 0.477,
+        "zstd3_one_msg_bits_per_byte": 7.455
+      },
+      "loghub-Android": {
+        "messages": 2000,
+        "bytes_share": 0.06649316054715623,
+        "p50_bytes": 113.0,
+        "entropy0_bits_per_byte": 5.329,
+        "zstd19_long_bits_per_byte": 0.475,
+        "zstd3_one_msg_bits_per_byte": 6.982
+      },
+      "loghub-OpenSSH": {
+        "messages": 2000,
+        "bytes_share": 0.05356779457643389,
+        "p50_bytes": 98.0,
+        "entropy0_bits_per_byte": 5.184,
+        "zstd19_long_bits_per_byte": 0.392,
+        "zstd3_one_msg_bits_per_byte": 8.075
+      },
+      "loghub-Linux": {
+        "messages": 2000,
+        "bytes_share": 0.051472522198224145,
+        "p50_bytes": 98.0,
+        "entropy0_bits_per_byte": 5.142,
+        "zstd19_long_bits_per_byte": 0.421,
+        "zstd3_one_msg_bits_per_byte": 7.772
+      },
+      "loghub-Spark": {
+        "messages": 2000,
+        "bytes_share": 0.04662059035277178,
+        "p50_bytes": 91.0,
+        "entropy0_bits_per_byte": 5.204,
+        "zstd19_long_bits_per_byte": 0.412,
+        "zstd3_one_msg_bits_per_byte": 8.281
+      },
+      "loghub-Apache": {
+        "messages": 2000,
+        "bytes_share": 0.040614350851931845,
+        "p50_bytes": 85.0,
+        "entropy0_bits_per_byte": 4.936,
+        "zstd19_long_bits_per_byte": 0.34,
+        "zstd3_one_msg_bits_per_byte": 8.587
+      }
+    },
+    "resend": {
+      "copied_from_previous_share": 0.3479584833213343,
+      "per_message_share_p50": 0.20652173913043478,
+      "per_message_share_p10": 0.02564102564102564
+    },
+    "chunk_dedup": {
+      "chunk_avg": 1024,
+      "dup_bytes_within_session": 0.04241252699784017,
+      "dup_bytes_anywhere": 0.1973102951763859
+    },
+    "near_duplicates": {
+      "exact_session": 0.030676389238119186,
+      "exact_global": 0.1986736233341715,
+      "near_session": 0.05522378677395021,
+      "near_global": 0.21960648730198642,
+      "exact_session_bytes": 0.024980882250707222,
+      "exact_global_bytes": 0.15191124016705973,
+      "near_session_bytes": 0.04532350440376687,
+      "near_global_bytes": 0.1692094610131605,
+      "messages_considered": 31816
+    },
+    "json": null
+  },
+  "collab": {
+    "messages": 3601,
+    "sessions": 40,
+    "bytes": 3204360,
+    "message_bytes": {
+      "10": 193.0,
+      "50": 546.0,
+      "90": 1837.0,
+      "99": 5397.0,
+      "max": 7007,
+      "mean": 889.852818661483
+    },
+    "session_bytes": {
+      "10": 56061.5,
+      "50": 79925.0,
+      "90": 103974.5,
+      "max": 112740
+    },
+    "share_messages_under_256B": 0.17078589280755346,
+    "kinds": {
+      "handback": {
+        "messages": 615,
+        "bytes_share": 0.4238899499432024,
+        "p50_bytes": 1414.0,
+        "entropy0_bits_per_byte": 5.096,
+        "zstd19_long_bits_per_byte": 1.189,
+        "zstd3_one_msg_bits_per_byte": 3.632
+      },
+      "github.check_run": {
+        "messages": 353,
+        "bytes_share": 0.14314714950879426,
+        "p50_bytes": 1232.0,
+        "entropy0_bits_per_byte": 5.254,
+        "zstd19_long_bits_per_byte": 1.07,
+        "zstd3_one_msg_bits_per_byte": 4.401
+      },
+      "progress": {
+        "messages": 878,
+        "bytes_share": 0.12775530839231547,
+        "p50_bytes": 505.0,
+        "entropy0_bits_per_byte": 4.985,
+        "zstd19_long_bits_per_byte": 1.116,
+        "zstd3_one_msg_bits_per_byte": 5.649
+      },
+      "github.pull_request_review_comment": {
+        "messages": 408,
+        "bytes_share": 0.10191957208303687,
+        "p50_bytes": 779.5,
+        "entropy0_bits_per_byte": 5.002,
+        "zstd19_long_bits_per_byte": 1.083,
+        "zstd3_one_msg_bits_per_byte": 5.061
+      },
+      "state_snapshot": {
+        "messages": 236,
+        "bytes_share": 0.08029684554794093,
+        "p50_bytes": 1039.0,
+        "entropy0_bits_per_byte": 4.798,
+        "zstd19_long_bits_per_byte": 0.331,
+        "zstd3_one_msg_bits_per_byte": 4.005
+      },
+      "task_assign": {
+        "messages": 248,
+        "bytes_share": 0.06197930319939083,
+        "p50_bytes": 702.0,
+        "entropy0_bits_per_byte": 5.077,
+        "zstd19_long_bits_per_byte": 1.707,
+        "zstd3_one_msg_bits_per_byte": 5.038
+      },
+      "state_patch": {
+        "messages": 863,
+        "bytes_share": 0.06101187132531925,
+        "p50_bytes": 193.0,
+        "entropy0_bits_per_byte": 4.774,
+        "zstd19_long_bits_per_byte": 0.601,
+        "zstd3_one_msg_bits_per_byte": 6.567
+      }
+    },
+    "resend": {
+      "copied_from_previous_share": 0.028669375475914066,
+      "per_message_share_p50": 0.03131115459882583,
+      "per_message_share_p10": 0.008743169398907104
+    },
+    "chunk_dedup": {
+      "chunk_avg": 1024,
+      "dup_bytes_within_session": 0.006007751937984496,
+      "dup_bytes_anywhere": 0.03832122483116753
+    },
+    "near_duplicates": {
+      "exact_session": 0.0,
+      "exact_global": 0.0,
+      "near_session": 0.044432102193835046,
+      "near_global": 0.045265204109969454,
+      "exact_session_bytes": 0.0,
+      "exact_global_bytes": 0.0,
+      "near_session_bytes": 0.05562015503875969,
+      "near_global_bytes": 0.059742975196295046,
+      "messages_considered": 3601
+    },
+    "json": {
+      "json_messages": 3601,
+      "json_share": 1.0,
+      "key_bytes_share": 0.15667371955710344,
+      "punctuation_bytes_share": 0.050796414884719567,
+      "distinct_key_paths": 100,
+      "distinct_schemas": 13,
+      "top10_schema_message_share": 0.9741738405998334
+    }
+  },
+  "sse": {
+    "messages": 9762,
+    "sessions": 80,
+    "bytes": 1791584,
+    "message_bytes": {
+      "10": 117.0,
+      "50": 144.0,
+      "90": 250.0,
+      "99": 257.0,
+      "max": 307,
+      "mean": 183.52632657242367
+    },
+    "session_bytes": {
+      "10": 7577.3,
+      "50": 14328.5,
+      "90": 33454.99999999998,
+      "max": 229356
+    },
+    "share_messages_under_256B": 0.9887318172505634,
+    "kinds": {
+      "sse": {
+        "messages": 9762,
+        "bytes_share": 1.0,
+        "p50_bytes": 144.0,
+        "entropy0_bits_per_byte": 5.099,
+        "zstd19_long_bits_per_byte": 0.137,
+        "zstd3_one_msg_bits_per_byte": 6.604
+      }
+    },
+    "resend": {
+      "copied_from_previous_share": 0.9472210066622608,
+      "per_message_share_p50": 0.976,
+      "per_message_share_p10": 0.9148936170212766
+    },
+    "chunk_dedup": {
+      "chunk_avg": 1024,
+      "dup_bytes_within_session": 0.4143807937556933,
+      "dup_bytes_anywhere": 0.5300454793076964
+    },
+    "near_duplicates": {
+      "exact_session": 0.39640570130138403,
+      "exact_global": 0.5737450939888453,
+      "near_session": 0.6776492460235488,
+      "near_global": 0.7517041933484817,
+      "exact_session_bytes": 0.41498302947371246,
+      "exact_global_bytes": 0.5293988096036633,
+      "near_session_bytes": 0.6369861329111943,
+      "near_global_bytes": 0.6903426749484624,
+      "messages_considered": 9682
+    },
+    "json": null
+  }
+}

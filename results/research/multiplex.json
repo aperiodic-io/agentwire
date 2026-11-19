@@ -1,0 +1,50 @@
+{
+  "machine": {
+    "python": "3.13.18",
+    "platform": "Linux-6.18.44-fc-v653-x86_64-with-glibc2.39",
+    "cpu_count": 4,
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "mem_gib": 15.7,
+    "libzstd": "1.5.5",
+    "zlib": "1.3",
+    "libbrotli": "1.1.0",
+    "liblz4": "1.9.4",
+    "liblzma": "stdlib",
+    "git_commit": "d242732"
+  },
+  "rows": [
+    {
+      "corpus": "collab",
+      "sessions": 16,
+      "raw_bytes": 1251901,
+      "awc1_per_session_w20+dict": 4.345822195994029,
+      "awc1_shared_w20+dict": 4.78721956032106,
+      "awc1_shared_w23+dict": 4.802112022340026,
+      "awc1_shared_w25+dict": 4.802112022340026,
+      "awf1_shared_batch25ms+dict": 3.3570949714677996,
+      "awf1_shared_msgs_per_frame": 1.4263959390862944
+    },
+    {
+      "corpus": "transcripts-cc",
+      "sessions": 60,
+      "raw_bytes": 7324995,
+      "awc1_per_session_w20+dict": 10.475367496163797,
+      "awc1_shared_w20+dict": 9.56659069983087,
+      "awc1_shared_w23+dict": 10.556147212598788,
+      "awc1_shared_w25+dict": 10.556147212598788,
+      "awf1_shared_batch25ms+dict": 4.562614688328045,
+      "awf1_shared_msgs_per_frame": 1.2015470562956596
+    },
+    {
+      "corpus": "transcripts-oh",
+      "sessions": 60,
+      "raw_bytes": 3557468,
+      "awc1_per_session_w20+dict": 5.63367407536443,
+      "awc1_shared_w20+dict": 5.60363550444987,
+      "awc1_shared_w23+dict": 5.7580605479877764,
+      "awc1_shared_w25+dict": 5.7580605479877764,
+      "awf1_shared_batch25ms+dict": 3.6813224112024967,
+      "awf1_shared_msgs_per_frame": 1.2577197149643706
+    }
+  ]
+}

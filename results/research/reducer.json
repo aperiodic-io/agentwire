@@ -1,0 +1,37 @@
+{
+  "machine": {
+    "python": "3.13.18",
+    "platform": "Linux-6.18.44-fc-v653-x86_64-with-glibc2.39",
+    "cpu_count": 4,
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "mem_gib": 15.7,
+    "libzstd": "1.5.5",
+    "zlib": "1.3",
+    "libbrotli": "1.1.0",
+    "liblz4": "1.9.4",
+    "liblzma": "stdlib",
+    "git_commit": "d242732"
+  },
+  "rows": [
+    {
+      "keep_last_model_turns": 3,
+      "request_bytes": 15266000,
+      "reduced_request_bytes": 8471389,
+      "context_reduction_x": 1.8020657533256943,
+      "awd1_wire_original": 306739,
+      "awd1_wire_reduced": 326480,
+      "archive_bytes": 225210,
+      "rehydration_exact": true
+    },
+    {
+      "keep_last_model_turns": 10,
+      "request_bytes": 15266000,
+      "reduced_request_bytes": 12135578,
+      "context_reduction_x": 1.2579540916798524,
+      "awd1_wire_original": 306739,
+      "awd1_wire_reduced": 321628,
+      "archive_bytes": 144251,
+      "rehydration_exact": true
+    }
+  ]
+}

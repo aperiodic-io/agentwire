@@ -100,7 +100,7 @@ _ACTION = re.compile(r"```\n?(.*?)```", re.S)
 def load_swe(n: int, seed: int):
     import pyarrow.parquet as pq
     t = pq.read_table(RAW / "swe_agent_0.parquet",
-                      columns=["instance_id", "model_name", "trajectory", "eval_logs"])
+                      columns=["instance_id", "model_name", "trajectory", "eval_logs", "generated_patch"])
     idx = sorted(random.Random(seed).sample(range(t.num_rows), n))
     return [t.slice(i, 1).to_pylist()[0] for i in idx]
 
@@ -477,6 +477,9 @@ def main(argv=None):
             for text in msgs:
                 t += _gap(r, "model")
                 rows.append({"s": s, "t": t, "k": classify(text), "b": text})
+            if row.get("generated_patch"):   # the run's final `git diff`, a real diff tool output
+                t += _gap(r, "tool")
+                rows.append({"s": s, "t": t, "k": "diff", "b": row["generated_patch"]})
             s += 1
     words = sorted({w for row in swe[:50] for m in row["trajectory"] for w in re.findall(r"[a-z]{4,10}", m["text"] or "")})
     t = 0

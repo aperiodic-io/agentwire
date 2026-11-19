@@ -43,7 +43,7 @@ def test_layout_matches_seekable_spec_footer_and_is_plain_zstd_concat():
     blob = w.finish()
     nframes, desc, magic = struct.unpack("<IBI", blob[-9:])
     assert magic == SEEKABLE_MAGIC and desc & 0x7C == 0
-    assert nframes == len(SeekableReader(blob).frames) > 1
+    assert nframes == len(SeekableReader(blob).frames) + 1 > 2   # + the message-index frame
     # The archive is also valid as a sequence of zstd frames + skippable frames:
     rd = SeekableReader(blob)
     joined = b"".join(Zstd().decompress(blob[f.offset:f.offset + f.csize], f.dsize) for f in rd.frames)
@@ -67,3 +67,22 @@ def test_corruption_and_truncation_fail_closed():
 def test_empty_archive():
     rd = SeekableReader(SeekableWriter().finish())
     assert rd.message_count == 0 and rd.read_all() == b""
+
+
+def test_interoperates_with_independent_seekable_reader():
+    pyzstd = pytest.importorskip("pyzstd")
+    import io
+    msgs = _messages(300)
+    whole = b"".join(msgs)
+    w = SeekableWriter(frame_bytes=4096)
+    for m in msgs:
+        w.add(m)
+    blob = w.finish()
+    assert pyzstd.decompress(blob) == whole
+    f = pyzstd.SeekableZstdFile(io.BytesIO(blob))
+    f.seek(len(whole) // 3)
+    assert f.read(2000) == whole[len(whole) // 3:len(whole) // 3 + 2000]
+    out = io.BytesIO()
+    with pyzstd.SeekableZstdFile(out, "w", max_frame_content_size=4096) as g:
+        g.write(whole)
+    assert SeekableReader(out.getvalue()).read_all() == whole

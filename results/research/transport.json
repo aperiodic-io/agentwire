@@ -1,0 +1,225 @@
+{
+  "machine": {
+    "python": "3.13.18",
+    "platform": "Linux-6.18.44-fc-v653-x86_64-with-glibc2.39",
+    "cpu_count": 4,
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "mem_gib": 15.7,
+    "libzstd": "1.5.5",
+    "zlib": "1.3",
+    "libbrotli": "1.1.0",
+    "liblz4": "1.9.4",
+    "liblzma": "stdlib",
+    "git_commit": "d242732"
+  },
+  "repeats": 3,
+  "dictionary_bytes": 65536,
+  "corpora": {
+    "transcripts-cc": {
+      "test_sessions": 99,
+      "test_messages": 4594,
+      "test_bytes": 12183476,
+      "train_sessions": 180,
+      "dictionary_train_seconds": 1.298955703000047,
+      "rows": [
+        {
+          "variant": "awf1/one",
+          "description": "AWF1 baseline: one zstd-3 frame per message",
+          "raw_bytes": 12183476,
+          "wire_bytes": 4620056,
+          "ratio": 2.6370840526608337,
+          "encode_MBps": 33.49541239099069,
+          "decode_MBps": 37.37557041150445,
+          "latency_us_p50": 139.8161304347826,
+          "latency_us_p99": 285.98765789473686
+        },
+        {
+          "variant": "awf1/one+dict",
+          "description": "AWF1 one frame per message + 64 KiB dictionary",
+          "raw_bytes": 12183476,
+          "wire_bytes": 2730733,
+          "ratio": 4.4616137864815055,
+          "encode_MBps": 13.032923325825491,
+          "decode_MBps": 20.389405391386116,
+          "latency_us_p50": 311.31658620689655,
+          "latency_us_p99": 586.6715
+        },
+        {
+          "variant": "awf1/batch25ms+dict",
+          "description": "AWF1 25 ms / 32 msg / 64 KiB batches + dictionary",
+          "raw_bytes": 12183476,
+          "wire_bytes": 2730733,
+          "ratio": 4.4616137864815055,
+          "encode_MBps": 13.483761864328274,
+          "decode_MBps": 21.452825838573528,
+          "latency_us_p50": 297.04836363636366,
+          "latency_us_p99": 652.5435769230769
+        },
+        {
+          "variant": "awc1/w20",
+          "description": "AWC1 zstd-3 stream, 1 MiB window",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1513090,
+          "ratio": 8.052049778929211,
+          "encode_MBps": 45.1567746900188,
+          "decode_MBps": 58.17185322348548,
+          "latency_us_p50": 80.968,
+          "latency_us_p99": 642.6492299999999
+        },
+        {
+          "variant": "awc1/w20+dict",
+          "description": "AWC1 stream + dictionary, 1 MiB window",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1161035,
+          "ratio": 10.493633697519885,
+          "encode_MBps": 42.39418882343133,
+          "decode_MBps": 59.63767652623045,
+          "latency_us_p50": 78.048,
+          "latency_us_p99": 646.4941799999999
+        },
+        {
+          "variant": "awc1/w23+dict",
+          "description": "AWC1 stream + dictionary, 8 MiB window",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1161035,
+          "ratio": 10.493633697519885,
+          "encode_MBps": 41.3588868831893,
+          "decode_MBps": 57.114501983086825,
+          "latency_us_p50": 78.6555,
+          "latency_us_p99": 739.286409999999
+        },
+        {
+          "variant": "zstd1-stream/w23",
+          "description": "zstd-1 stream, 8 MiB window",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1520821,
+          "ratio": 8.011117679200906,
+          "encode_MBps": 62.9521284534524,
+          "decode_MBps": 86.39936995527847,
+          "latency_us_p50": 58.5455,
+          "latency_us_p99": 537.6356499999993
+        },
+        {
+          "variant": "zstd6-stream/w23",
+          "description": "zstd-6 stream, 8 MiB window",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1390635,
+          "ratio": 8.761088279814617,
+          "encode_MBps": 39.86097814004407,
+          "decode_MBps": 75.75734314634587,
+          "latency_us_p50": 74.967,
+          "latency_us_p99": 669.900419999999
+        },
+        {
+          "variant": "zstd3-stream/w23-long",
+          "description": "zstd-3 stream, 8 MiB window, long-distance matching",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1464672,
+          "ratio": 8.318228244958599,
+          "encode_MBps": 49.28694711630621,
+          "decode_MBps": 86.03948472617645,
+          "latency_us_p50": 65.943,
+          "latency_us_p99": 605.6136799999999
+        },
+        {
+          "variant": "deflate6-stream",
+          "description": "deflate-6 sync-flush stream (permessage-deflate / HTTP gzip), 32 KiB window",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1556204,
+          "ratio": 7.828971008942272,
+          "encode_MBps": 63.975765122724965,
+          "decode_MBps": 307.1931961949874,
+          "latency_us_p50": 32.594,
+          "latency_us_p99": 242.7258899999999
+        },
+        {
+          "variant": "brotli5-stream/w22",
+          "description": "brotli-5 flushed stream, 4 MiB window",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1325398,
+          "ratio": 9.192315063098027,
+          "encode_MBps": 36.74798110413793,
+          "decode_MBps": 91.19694210627662,
+          "latency_us_p50": 73.885,
+          "latency_us_p99": 522.9542799999966
+        },
+        {
+          "variant": "brotli5-stream/w24",
+          "description": "brotli-5 flushed stream, 16 MiB window",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1325398,
+          "ratio": 9.192315063098027,
+          "encode_MBps": 40.7575639577377,
+          "decode_MBps": 101.54308623280735,
+          "latency_us_p50": 66.739,
+          "latency_us_p99": 488.196919999992
+        },
+        {
+          "variant": "brotli5-stream/w22+dict",
+          "description": "brotli-5 stream + same 64 KiB raw dictionary",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1100254,
+          "ratio": 11.073330340085107,
+          "encode_MBps": 30.66346105286294,
+          "decode_MBps": 88.40393244337181,
+          "latency_us_p50": 79.4655,
+          "latency_us_p99": 681.5968599999946
+        },
+        {
+          "variant": "lz4-stream",
+          "description": "LZ4 frame, linked blocks, flushed (64 KiB window)",
+          "raw_bytes": 12183476,
+          "wire_bytes": 2107782,
+          "ratio": 5.780235337430531,
+          "encode_MBps": 227.3151030496853,
+          "decode_MBps": 109.2463314465353,
+          "latency_us_p50": 31.067,
+          "latency_us_p99": 88.39887999999937
+        },
+        {
+          "variant": "awd1/w22",
+          "description": "AWD1 context delta (4 refs) + zstd-3 stream, 4 MiB window",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1476898,
+          "ratio": 8.249368609071174,
+          "encode_MBps": 30.719238756223366,
+          "decode_MBps": 55.29907449178775,
+          "latency_us_p50": 104.8045,
+          "latency_us_p99": 741.8235699999973
+        },
+        {
+          "variant": "awd1/w22+dict",
+          "description": "AWD1 context delta + dictionary",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1145342,
+          "ratio": 10.637413104557416,
+          "encode_MBps": 32.09555292879143,
+          "decode_MBps": 61.64286629738418,
+          "latency_us_p50": 94.826,
+          "latency_us_p99": 684.4384399999999
+        },
+        {
+          "variant": "ref/offline-zstd19-long",
+          "description": "Reference: whole session, one zstd-19 --long frame (not live)",
+          "raw_bytes": 12183476,
+          "wire_bytes": 1144702,
+          "ratio": 10.643360455384896,
+          "encode_MBps": 3.9861384788531034,
+          "decode_MBps": null,
+          "latency_us_p50": 654.991803030303,
+          "latency_us_p99": 1313.5594954574992
+        }
+      ],
+      "memory_per_connection_bytes": {
+        "awc1/w20+dict": 927232.0,
+        "awc1/w23+dict": 837120.0,
+        "deflate6-stream": 0.0,
+        "brotli5-stream/w22": 611840.0,
+        "brotli5-stream/w24": 1312256.0,
+        "lz4-stream": 180224.0,
+        "zstd3-stream/w23-long": 2296320.0,
+        "awd1/w22+dict": 1844480.0
+      }
+    }
+  }
+}

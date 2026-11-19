@@ -17,7 +17,9 @@ spec's optional per-entry checksum is not used, descriptor bit 7 = 0).
 
 AgentWire adds an optional message index in its own skippable frame
 (magic 0x184D2A5B): message lengths as uleb128, zstd-compressed, so a reader
-can fetch message i with one frame decompression. Frames may use a shared zstd
+can fetch message i with one frame decompression. The index frame is listed in
+the seek table with decompressed size 0, which keeps the archive valid for
+independent seekable readers (checked against pyzstd's SeekableZstdFile). Frames may use a shared zstd
 dictionary (its id is in each frame header; the reader must be given it).
 """
 from __future__ import annotations
@@ -78,9 +80,13 @@ class SeekableWriter:
         self._cut()
         out = self._out
         if self.message_index:
+            # Listed in the seek table as a frame with decompressed size 0, so
+            # seekable readers that check cumulative sizes accept the archive.
             idx = b"".join(_varint(n) for n in self._lengths)
             body = _varint(len(self._lengths)) + _varint(len(idx)) + compress_advanced(idx, 19)
-            out += struct.pack("<II", SKIPPABLE_INDEX, len(body)) + body
+            frame = struct.pack("<II", SKIPPABLE_INDEX, len(body)) + body
+            out += frame
+            self._entries.append((len(frame), 0))
         table = b"".join(struct.pack("<II", c, d) for c, d in self._entries)
         footer = struct.pack("<IBI", len(self._entries), 0, SEEKABLE_MAGIC)
         out += struct.pack("<II", SKIPPABLE_SEEK, len(table) + len(footer)) + table + footer
@@ -105,24 +111,28 @@ class SeekableReader:
         if skip != SKIPPABLE_SEEK or size != table_len:
             raise ValueError("bad seek table header")
         self.frames: list[FrameEntry] = []
+        self._msg_offsets: list[int] | None = None
+        index_body = None
         off = dpos = 0
         for i in range(n):
             c, d = struct.unpack_from("<II", blob, start + 8 + i * entry)
-            self.frames.append(FrameEntry(off, c, dpos, d))
+            if off + c > start:
+                raise ValueError("seek table does not match frame sizes")
+            if d == 0 and c >= 8 and struct.unpack_from("<I", blob, off)[0] == SKIPPABLE_INDEX:
+                (size,) = struct.unpack_from("<I", blob, off + 4)
+                if size + 8 != c:
+                    raise ValueError("bad message index frame")
+                index_body = blob[off + 8:off + c]
+            else:
+                self.frames.append(FrameEntry(off, c, dpos, d))
             off += c
             dpos += d
-        self.size = dpos
-        self._data_end = off
-        self._starts = [f.dstart for f in self.frames]
-        self._msg_offsets: list[int] | None = None
-        if off < start:   # optional message index between frames and seek table
-            skip, size = struct.unpack_from("<II", blob, off)
-            if skip == SKIPPABLE_INDEX and off + 8 + size == start:
-                self._load_index(blob[off + 8:off + 8 + size])
-            else:
-                raise ValueError("unexpected bytes before seek table")
-        elif off != start:
+        if off != start:
             raise ValueError("seek table does not match frame sizes")
+        self.size = dpos
+        self._starts = [f.dstart for f in self.frames]
+        if index_body is not None:
+            self._load_index(index_body)
         self._cache: tuple[int, bytes] | None = None
 
     def _load_index(self, body: bytes):
