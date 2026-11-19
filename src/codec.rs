@@ -488,6 +488,7 @@ mod tests {
         bad[4] = 2;
         assert_eq!(parse(&bad, 1 << 20).unwrap_err(), Error::UnsupportedVersion(2));
         assert_eq!(parse(&d, 16).unwrap_err(), Error::TooLarge, "a 17-byte target over a 16-byte cap");
+        assert!(parse(&d, 17).is_ok(), "a 17-byte target at a 17-byte cap");
         let mut bad = d.clone();
         bad[69] = 13; // prefix 13 + suffix 5 > target 17
         assert_eq!(parse(&bad, 1 << 20).unwrap_err(), Error::Malformed("prefix and suffix exceed the target"));
