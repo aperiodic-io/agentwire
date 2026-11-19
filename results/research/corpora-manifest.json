@@ -1,0 +1,116 @@
+{
+  "seed": 20261119,
+  "sources": {
+    "swe_agent_0.parquet": {
+      "url": "https://huggingface.co/datasets/nebius/SWE-agent-trajectories/resolve/68195a1450865274106246d0d0296a1d6807b88e/data/train-00000-of-00012.parquet",
+      "bytes": 89182938,
+      "sha256": "5a395e8c7bb8ddc4b8f4d268506b3a0e2cf9b5ec3922600117322fe788067a13"
+    },
+    "openhands_0.parquet": {
+      "url": "https://huggingface.co/datasets/SWE-Gym/OpenHands-Sampled-Trajectories/resolve/baf3a4e4bff514d48ddc08a93a2ade5c126212c7/data/train.raw-00000-of-00003.parquet",
+      "bytes": 70817777,
+      "sha256": "29d038b0c34eb0e50a19730f3cf3daa5a156c2d7e9c871c01b568acbab6aae07"
+    },
+    "loghub_HDFS_2k.log": {
+      "url": "https://raw.githubusercontent.com/logpai/loghub/master/HDFS/HDFS_2k.log",
+      "bytes": 287848,
+      "sha256": "7c967000980c086ed55fa6544ba4f05fe66d44622795e890c68caf8bbb635035"
+    },
+    "loghub_Apache_2k.log": {
+      "url": "https://raw.githubusercontent.com/logpai/loghub/master/Apache/Apache_2k.log",
+      "bytes": 171239,
+      "sha256": "c7efa3eb686e3a96bd2f8f4457b2a7887e9cf2f3649327f1b4e87af841363ce8"
+    },
+    "loghub_Linux_2k.log": {
+      "url": "https://raw.githubusercontent.com/logpai/loghub/master/Linux/Linux_2k.log",
+      "bytes": 216485,
+      "sha256": "b3e20bc1afe732ab1bf3ed1de4bf9c809e4194e02f7dea911d918e5342e8e173"
+    },
+    "loghub_Spark_2k.log": {
+      "url": "https://raw.githubusercontent.com/logpai/loghub/master/Spark/Spark_2k.log",
+      "bytes": 196268,
+      "sha256": "2e8b9a37fc5c238253e0b8e18a8bd5e489671def91767ae1192d28c8e1f95901"
+    },
+    "loghub_OpenSSH_2k.log": {
+      "url": "https://raw.githubusercontent.com/logpai/loghub/master/OpenSSH/OpenSSH_2k.log",
+      "bytes": 225216,
+      "sha256": "1e4912727fa88245113d41b16a0cd25ceadba7f931e1c406542885b91254264f"
+    },
+    "loghub_Hadoop_2k.log": {
+      "url": "https://raw.githubusercontent.com/logpai/loghub/master/Hadoop/Hadoop_2k.log",
+      "bytes": 384948,
+      "sha256": "9ecaeb807d50d5fb5a20982ea66f1c8d32545259a51ce7456c1ab78db0509732"
+    },
+    "loghub_Android_2k.log": {
+      "url": "https://raw.githubusercontent.com/logpai/loghub/master/Android/Android_2k.log",
+      "bytes": 279076,
+      "sha256": "47641549915e662ff590291df266a45f635eedca7c5f1b41a4fa853fe5d2f409"
+    },
+    "loghub_Zookeeper_2k.log": {
+      "url": "https://raw.githubusercontent.com/logpai/loghub/master/Zookeeper/Zookeeper_2k.log",
+      "bytes": 279891,
+      "sha256": "e40e0af5ef9eb6e4097200f260b9d1f626b3676f861a432e87977242e75543d8"
+    },
+    "loghub_BGL_2k.log": {
+      "url": "https://raw.githubusercontent.com/logpai/loghub/master/BGL/BGL_2k.log",
+      "bytes": 317150,
+      "sha256": "2a819ea540909db682005c9cf948387a40729b5c2e9f19d430e29ce704825496"
+    },
+    "loghub_Mac_2k.log": {
+      "url": "https://raw.githubusercontent.com/logpai/loghub/master/Mac/Mac_2k.log",
+      "bytes": 319414,
+      "sha256": "d9ea495488728d8c989dc942fca3324a3cc7b19b0a6f409a5fd568ad547fd931"
+    }
+  },
+  "corpora": [
+    {
+      "corpus": "transcripts-cc",
+      "messages": 15132,
+      "sessions": 300,
+      "payload_bytes": 37034500,
+      "file_sha256": "0c50c6f4c0cee9155f89e02ea7d896e0e2a75aafbbbe113bcfa58d662751bb28"
+    },
+    {
+      "corpus": "transcripts-oh",
+      "messages": 10357,
+      "sessions": 300,
+      "payload_bytes": 18338768,
+      "file_sha256": "0fc7de4c33dc58cb611fa99021235a757a5c04b139defa55d55b077f6784a141"
+    },
+    {
+      "corpus": "api-requests",
+      "messages": 1209,
+      "sessions": 80,
+      "payload_bytes": 46423921,
+      "file_sha256": "fc22ae8453d3f915e91938ecbbe9e3ba0e9fdc26838e1f9345b93d774c541ca1"
+    },
+    {
+      "corpus": "tool-outputs",
+      "messages": 12728,
+      "sessions": 620,
+      "payload_bytes": 28950147,
+      "file_sha256": "c3575378eb54ccd1e23bf9f6aef638cc803b6d23f62cf8162145401902f55f90"
+    },
+    {
+      "corpus": "ci-logs",
+      "messages": 44822,
+      "sessions": 286,
+      "payload_bytes": 4167000,
+      "file_sha256": "b87d3ab0ad57f59b5a09331df62b00eee27b22921f068e7f9c4df2816eda8fdd"
+    },
+    {
+      "corpus": "collab",
+      "messages": 3406,
+      "sessions": 40,
+      "payload_bytes": 3034768,
+      "file_sha256": "1f414dc54b5a99cdb6adca56b959eaccc93b030975131a697ee2dddf740d5728"
+    },
+    {
+      "corpus": "sse",
+      "messages": 9867,
+      "sessions": 80,
+      "payload_bytes": 1852580,
+      "file_sha256": "7f6bc17d3bca8fa69caeca751babb57564e7962c48488c48e7cf9c60d635c44b"
+    }
+  ]
+}

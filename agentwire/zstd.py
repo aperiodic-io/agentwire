@@ -119,6 +119,9 @@ class _OutBuffer(ct.Structure):
 
 _C_COMPRESSION_LEVEL = 100
 _C_WINDOW_LOG = 101
+_C_ENABLE_LDM = 160
+_C_CONTENT_SIZE = 200
+_C_CHECKSUM = 201
 _D_WINDOW_LOG_MAX = 100
 _E_FLUSH = 1
 MIN_WINDOW_LOG = 10
@@ -148,7 +151,7 @@ class ZstdStreamCompressor:
     """
 
     def __init__(self, level: int = 3, dictionary: bytes | None = None,
-                 window_log: int = 20):
+                 window_log: int = 20, long_distance: bool = False):
         _check_window_log(window_log)
         self._ctx = _cctx()
         if not self._ctx:
@@ -156,6 +159,8 @@ class ZstdStreamCompressor:
         try:
             _checked(_cctx_set(self._ctx, _C_COMPRESSION_LEVEL, level))
             _checked(_cctx_set(self._ctx, _C_WINDOW_LOG, window_log))
+            if long_distance:
+                _checked(_cctx_set(self._ctx, _C_ENABLE_LDM, 1))
             if dictionary:
                 _checked(_cctx_load_dict(self._ctx, dictionary, len(dictionary)))
         except Exception:
@@ -180,6 +185,10 @@ class ZstdStreamCompressor:
             out_parts.append(dst.raw[:out.pos])
             if remaining == 0 and inp.pos == inp.size:
                 return b"".join(out_parts)
+
+    def memory_bytes(self) -> int:
+        """libzstd's own accounting of this context (window, tables, buffers)."""
+        return int(_sizeof_cctx(self._ctx)) if self._ctx else 0
 
     def close(self):
         if getattr(self, "_ctx", None):
@@ -229,6 +238,9 @@ class ZstdStreamDecompressor:
             raise ZstdError(f"size mismatch: expected {expected_size}, decoded {out.pos}")
         return dst.raw[:out.pos]
 
+    def memory_bytes(self) -> int:
+        return int(_sizeof_dctx(self._ctx)) if self._ctx else 0
+
     def close(self):
         if getattr(self, "_ctx", None):
             _freed(self._ctx)
@@ -236,6 +248,93 @@ class ZstdStreamDecompressor:
 
     def __del__(self):
         self.close()
+
+
+_sizeof_cctx = _bind("ZSTD_sizeof_CCtx", _size, _ptr)
+_sizeof_dctx = _bind("ZSTD_sizeof_DCtx", _size, _ptr)
+_compress2 = _bind("ZSTD_compress2", _size, _ptr, _ptr, _size, _ptr, _size)
+_decompress_dctx = _bind("ZSTD_decompressDCtx", _size, _ptr, _ptr, _size, _ptr, _size)
+_cctx_ref_prefix = _bind("ZSTD_CCtx_refPrefix", _size, _ptr, _ptr, _size)
+_dctx_ref_prefix = _bind("ZSTD_DCtx_refPrefix", _size, _ptr, _ptr, _size)
+_frame_content_size = _bind("ZSTD_getFrameContentSize", ct.c_ulonglong, _ptr, _size)
+_CONTENTSIZE_UNKNOWN = 2**64 - 1
+_CONTENTSIZE_ERROR = 2**64 - 2
+
+
+def frame_content_size(frame: bytes) -> int | None:
+    """Declared decompressed size of a single zstd frame, or None if absent."""
+    n = int(_frame_content_size(frame, len(frame)))
+    if n == _CONTENTSIZE_ERROR:
+        raise ZstdError("not a zstd frame")
+    return None if n == _CONTENTSIZE_UNKNOWN else n
+
+
+def compress_advanced(data: bytes, level: int = 3, window_log: int | None = None,
+                      long_distance: bool = False, prefix: bytes | None = None,
+                      dictionary: bytes | None = None, checksum: bool = False) -> bytes:
+    """One zstd frame with the advanced parameters exposed.
+
+    prefix: raw-content reference (``zstd --patch-from``): matches may point into
+    it, and the decoder must supply the identical prefix. window_log must then be
+    large enough to cover prefix + data (it is raised automatically).
+    """
+    if not isinstance(data, bytes):
+        raise TypeError("input must be bytes")
+    if prefix is not None and dictionary is not None:
+        raise ValueError("use either a prefix or a dictionary, not both")
+    need = (len(data) + len(prefix or b"")).bit_length() + 1
+    if prefix is not None:
+        window_log = max(window_log or 0, need, MIN_WINDOW_LOG)
+    ctx = _cctx()
+    if not ctx:
+        raise MemoryError("ZSTD_createCCtx failed")
+    try:
+        _checked(_cctx_set(ctx, _C_COMPRESSION_LEVEL, level))
+        _checked(_cctx_set(ctx, _C_CHECKSUM, int(checksum)))
+        if window_log is not None:
+            _check_window_log(min(window_log, MAX_WINDOW_LOG))
+            _checked(_cctx_set(ctx, _C_WINDOW_LOG, min(window_log, MAX_WINDOW_LOG)))
+        if long_distance:
+            _checked(_cctx_set(ctx, _C_ENABLE_LDM, 1))
+        if dictionary:
+            _checked(_cctx_load_dict(ctx, dictionary, len(dictionary)))
+        keep = None
+        if prefix:
+            keep = ct.create_string_buffer(prefix, len(prefix))
+            _checked(_cctx_ref_prefix(ctx, keep, len(prefix)))
+        dst = ct.create_string_buffer(int(_bound(len(data))))
+        n = _checked(_compress2(ctx, dst, len(dst), data, len(data)))
+        return dst.raw[:n]
+    finally:
+        _freec(ctx)
+
+
+def decompress_advanced(frame: bytes, max_size: int, prefix: bytes | None = None,
+                        dictionary: bytes | None = None,
+                        window_log_max: int = MAX_WINDOW_LOG) -> bytes:
+    """Inverse of compress_advanced; output is capped at max_size bytes."""
+    if max_size < 0:
+        raise ValueError("negative max_size")
+    declared = frame_content_size(frame)
+    if declared is not None and declared > max_size:
+        raise ZstdError(f"frame declares {declared} bytes, limit is {max_size}")
+    ctx = _dctx()
+    if not ctx:
+        raise MemoryError("ZSTD_createDCtx failed")
+    try:
+        _checked(_dctx_set(ctx, _D_WINDOW_LOG_MAX, window_log_max))
+        if dictionary:
+            _checked(_dctx_load_dict(ctx, dictionary, len(dictionary)))
+        keep = None
+        if prefix:
+            keep = ct.create_string_buffer(prefix, len(prefix))
+            _checked(_dctx_ref_prefix(ctx, keep, len(prefix)))
+        cap = declared if declared is not None else max_size
+        dst = ct.create_string_buffer(max(1, cap))
+        n = _checked(_decompress_dctx(ctx, dst, cap, frame, len(frame)))
+        return dst.raw[:n]
+    finally:
+        _freed(ctx)
 
 
 def train_dictionary(samples: list[bytes], capacity: int = 8192) -> bytes:
