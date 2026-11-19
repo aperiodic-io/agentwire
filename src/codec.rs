@@ -466,7 +466,11 @@ mod tests {
             assert_eq!(parse(&d[..cut], 1 << 20).unwrap_err(), Error::Malformed("truncated header"), "{cut} bytes");
         }
         assert_eq!(parse(&d[..69], 1 << 20).unwrap_err(), Error::Malformed("truncated varint"));
-        assert_eq!(parse(b"AWD1\x07", 1 << 20).unwrap_err(), Error::UnsupportedVersion(7), "the version, before the length");
+        assert_eq!(
+            parse(b"AWD1\x07", 1 << 20).unwrap_err(),
+            Error::UnsupportedVersion(7),
+            "the version, before the length"
+        );
         let mut bad = d.clone();
         bad[0] = b'X';
         assert_eq!(parse(&bad, 1 << 20).unwrap_err(), Error::Malformed("not an AWD1 body"));
