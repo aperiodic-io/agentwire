@@ -10,3 +10,5 @@ venv/
 # Trained on private transcripts; never commit
 *.local.zdict
 local-dictionaries/
+# Downloaded public datasets and derived corpora (rebuild with research/build_corpora.py)
+corpora/

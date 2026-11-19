@@ -1,0 +1,203 @@
+{
+  "machine": {
+    "python": "3.13.18",
+    "platform": "Linux-6.18.44-fc-v653-x86_64-with-glibc2.39",
+    "cpu_count": 4,
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "mem_gib": 15.7,
+    "libzstd": "1.5.5",
+    "zlib": "1.3",
+    "libbrotli": "1.1.0",
+    "liblz4": "1.9.4",
+    "liblzma": "stdlib",
+    "git_commit": "9d39822"
+  },
+  "repeats": 5,
+  "test_streams": 32,
+  "events": 3365,
+  "raw_bytes": 618129,
+  "mean_event_bytes": 183.69361069836552,
+  "mean_event_gap_ms": 16.64026402640264,
+  "rows": [
+    {
+      "variant": "identity",
+      "bytes": 618129,
+      "ratio": 1.0,
+      "bytes_per_event": 183.69361069836552,
+      "codec_us_p50": 0.0,
+      "codec_us_p99": 0.0,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "deflate-6 (HTTP gzip, flush/event)",
+      "bytes": 40146,
+      "ratio": 15.397025855626962,
+      "bytes_per_event": 11.930460624071323,
+      "codec_us_p50": 2.718,
+      "codec_us_p99": 18.74456000000002,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "deflate-1 (flush/event)",
+      "bytes": 42945,
+      "ratio": 14.393503318197695,
+      "bytes_per_event": 12.762258543833582,
+      "codec_us_p50": 2.283,
+      "codec_us_p99": 18.916960000000007,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "brotli-5 w22 (flush/event)",
+      "bytes": 58813,
+      "ratio": 10.510074303300291,
+      "bytes_per_event": 17.4778603268945,
+      "codec_us_p50": 19.478,
+      "codec_us_p99": 88.91828000000021,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "brotli-5 w22 + 16 KiB dict (flush/event)",
+      "bytes": 51126,
+      "ratio": 12.09030630207722,
+      "bytes_per_event": 15.193462109955423,
+      "codec_us_p50": 19.379,
+      "codec_us_p99": 84.9139200000001,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "zstd-3 w20 (flush/event)",
+      "bytes": 64450,
+      "ratio": 9.590830100853374,
+      "bytes_per_event": 19.15304606240713,
+      "codec_us_p50": 29.439,
+      "codec_us_p99": 164.27840000000003,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "zstd-1 w20 (flush/event)",
+      "bytes": 66636,
+      "ratio": 9.276202052944354,
+      "bytes_per_event": 19.802674591381873,
+      "codec_us_p50": 30.567,
+      "codec_us_p99": 121.18340000000003,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "zstd-3 w20 + 16 KiB dict (flush/event)",
+      "bytes": 55366,
+      "ratio": 11.164414983925152,
+      "bytes_per_event": 16.453491827637443,
+      "codec_us_p50": 28.367,
+      "codec_us_p99": 182.93564000000026,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "lz4 (flush/event)",
+      "bytes": 75436,
+      "ratio": 8.194085052229704,
+      "bytes_per_event": 22.41783060921248,
+      "codec_us_p50": 19.632,
+      "codec_us_p99": 39.34620000000002,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "AWC1 w20",
+      "bytes": 97602,
+      "ratio": 6.33315915657466,
+      "bytes_per_event": 29.005052005943536,
+      "codec_us_p50": 42.794,
+      "codec_us_p99": 218.46116000000063,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "AWC1 w20 + dict",
+      "bytes": 88611,
+      "ratio": 6.975759217252937,
+      "bytes_per_event": 26.333135215453193,
+      "codec_us_p50": 44.1,
+      "codec_us_p99": 317.6014800000001,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "AWD1 (1 ref) + zstd-3",
+      "bytes": 66025,
+      "ratio": 9.362044680045438,
+      "bytes_per_event": 19.62109955423477,
+      "codec_us_p50": 40.476,
+      "codec_us_p99": 214.11076000000025,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "AWD1 (4 refs) + zstd-3",
+      "bytes": 64959,
+      "ratio": 9.515679120676118,
+      "bytes_per_event": 19.304309063893015,
+      "codec_us_p50": 48.933,
+      "codec_us_p99": 203.79364000000018,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "AWD1 (4 refs) + zstd-3 + dict",
+      "bytes": 58746,
+      "ratio": 10.522061076498826,
+      "bytes_per_event": 17.457949479940563,
+      "codec_us_p50": 48.896,
+      "codec_us_p99": 306.2952800000001,
+      "added_wait_ms_p50": 0.0,
+      "added_wait_ms_p99": 0.0
+    },
+    {
+      "variant": "deflate-6, coalesce 50 ms",
+      "bytes": 29577,
+      "ratio": 20.898975555330153,
+      "bytes_per_event": 8.78959881129272,
+      "codec_us_p50": 1.4647999999999999,
+      "codec_us_p99": 10.587140000000112,
+      "added_wait_ms_p50": 33.0,
+      "added_wait_ms_p99": 50.0
+    },
+    {
+      "variant": "zstd-3, coalesce 50 ms",
+      "bytes": 36370,
+      "ratio": 16.995573274676932,
+      "bytes_per_event": 10.808320950965825,
+      "codec_us_p50": 9.526399999999999,
+      "codec_us_p99": 92.9442320000003,
+      "added_wait_ms_p50": 33.0,
+      "added_wait_ms_p99": 50.0
+    },
+    {
+      "variant": "zstd-3 + dict, coalesce 50 ms",
+      "bytes": 29143,
+      "ratio": 21.210204851937,
+      "bytes_per_event": 8.660624071322436,
+      "codec_us_p50": 9.6616,
+      "codec_us_p99": 102.0204,
+      "added_wait_ms_p50": 33.0,
+      "added_wait_ms_p99": 50.0
+    },
+    {
+      "variant": "zstd-3, coalesce 200 ms",
+      "bytes": 29536,
+      "ratio": 20.927986186348864,
+      "bytes_per_event": 8.777414561664191,
+      "codec_us_p50": 3.8207272727272725,
+      "codec_us_p99": 38.292928571428575,
+      "added_wait_ms_p50": 109.0,
+      "added_wait_ms_p99": 200.0
+    }
+  ]
+}

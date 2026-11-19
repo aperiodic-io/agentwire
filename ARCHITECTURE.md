@@ -24,6 +24,18 @@ The transport codec does *not* need to know what is inside a message. The wire f
 
 AWF1 has to *wait* to collect cross-message history; AWC1 *remembers* it instead. Use AWC1 for interactive, low-rate streams (one agent session, one tool connection) where every message should leave immediately. Use AWF1 batching for high-rate bursts or delay-tolerant traffic (log shipping), or where frames must be decodable independently (storage, fan-out, replay). Invariant 1 holds for both. AWC1 adds one more: a DATA frame is decoded only with the exact Zstd state produced by every earlier frame since the last RESET, and any failure ends the session.
 
+### Layer A″ — AWD1 context delta (re-sent context)
+
+`Message` -> best of the last *k* sent messages (longest common prefix + suffix) -> `ref, prefix, suffix, literal` -> per-connection zstd stream (flush per message) -> `body_len, payload_len, CRC32(message)` -> ordered TCP/TLS -> decompress -> rebuild from the reference -> CRC check -> `Message`.
+
+LLM traffic re-sends the whole conversation every turn. AWC1 only removes that redundancy while the previous request is inside its window. Measured on chained public trajectories, a 1 MiB window falls to ~10× once the context passes ~2 MB, while AWD1 reaches 682× at 3 MB and 2,222× at 6 MB. AWD1 keeps *k* messages plus a small window, so its ratio no longer depends on the window size. Its memory is O(*k* × message size). Invariant 1 holds, and any inconsistency poisons the session as in AWC1.
+
+For stateless HTTP APIs, the same effect comes from compressing each request as a standard zstd frame with the previous request as a raw prefix (`--patch-from`) **and long-distance matching** (1,727× at 6 MB; 46× without LDM).
+
+### Layer C — archives
+
+Session logs are compacted into **zstd seekable-format** archives (`agentwire/seekable.py`): independent frames of 1–4 MiB packed *across* sessions, a seek table, and a message index listed in the seek table so independent seekable readers accept the file. Packing sessions together is 1.3–1.9× smaller than per-session files. Archive manifests must record the dictionary id.
+
 ### Layer B — task-specific active context
 
 `AgentEvent` -> priority gate -> preserve critical/instructions/user/tool-call/state/error events -> greedily replace large explicitly low-priority observations with:
@@ -42,6 +54,17 @@ AWF1 has to *wait* to collect cross-message history; AWC1 *remembers* it instead
 The exact canonical JSON payload is written to a content-addressed Zstd blob before the summary can be emitted. To rehydrate, load by SHA-256, decompress with a bounded output allocation, validate digest and size, parse JSON, and replace the summary with the exact original JSON value. No other event is edited.
 
 **Note:** An agent viewing just the active prompt sees the summary, not the full omitted observation. This could degrade performance if the classification was wrong. In production, context reduction needs task-based end-to-end evaluations and a retrieval tool for references.
+
+## Findings from the compression research that change this design
+
+Measured on public corpora; see [reports/compression-research.md](reports/compression-research.md).
+
+1. **Batching does not pay at agent timing** (confirmed): 25 ms windows hold 1.0–1.4 messages even at a gateway. AWF1 remains for storage/fan-out frames and log shipping only.
+2. **Window size is a correctness-of-ratio issue, not a tuning knob**, for any channel carrying re-sent context: use AWD1, or patch-from with LDM. HTTP zstd is capped at an 8 MB window (RFC 9659).
+3. **Dictionaries:** on short sessions a matching dictionary adds 8–30% even on the AWC1 stream. One from another harness keeps only ~⅓ of that, and a mixed dictionary is within 2–5% of a specialised one. Drift follows harness, tool and prompt changes, not time. Retrain on those changes and alert on ratio drops.
+4. **SSE and tiny messages:** per-flush overhead dominates. Deflate with sync flush beats zstd and AWC1 per event, so do not use AWC1 framing for token streams.
+5. **Lossy context reduction rewrites history**, which defeats wire deltas and provider prefix caching. It reduces tokens, not bytes, and should be evaluated on task success only.
+6. **Storage:** pack across sessions, use seekable frames, and attach dictionaries to small frames. CDC dedup, columnar JSON and xz/brotli-11 did not pay on these workloads.
 
 ## Why batch before Zstd?
 
@@ -69,13 +92,14 @@ These are architecture suggestions, **not measurements**. Adaptive policy should
 
 ## Practical production roadmap
 
-1. Add a documented **HELLO/ACK handshake** (protocol version range, AWF1 vs AWC1 mode and AWC1 window, dictionary version + full SHA-256, max frame sizes, supported modes). Implement immutable dictionary publishing, registry TTL, and in-band explicit no-dictionary fallback during upgrade.
+1. Add a documented **HELLO/ACK handshake** (protocol version range, AWF1 vs AWC1 vs AWD1 mode, window, AWD1 reference count, dictionary version + full SHA-256, max frame sizes, supported modes). Implement immutable dictionary publishing, registry TTL, and in-band explicit no-dictionary fallback during upgrade.
 2. Replace Python orchestration with Rust or Go and cache prepared CDicts/DDicts and compression contexts; pool `bytes::Bytes` buffers to avoid copies.
 3. Add durable sequence IDs plus acknowledgment only after downstream commit, journal/spool on sender, idempotent receiver deduplication, replay windows, connection resume and exactly-once application semantics where warranted. TCP alone is not enough.
 4. Add TLS, authentication/authorization, per-tenant quotas, timeouts, and audit logs; fuzz parser with libFuzzer/AFL and run a network fault injector.
 5. Benchmark 10K+ **real** messages with redacted/consented traces across agent/tool/model types; partition training/evaluation chronologically to avoid leakage. Report throughput, CPU, p50/p95/p99 enqueue-to-receive latency, allocations and trained dictionary rollout churn.
 6. Add token-aware context budgeting and a **rehydrate tool**; measure downstream task correctness and tool-call accuracy when summaries replace observations. Preserve signed proof/reference anchors, failures, and any state dependencies.
-7. Only after these gates, consider stronger adaptive codecs or neural compressors for cold storage; preserve the fast Zstd path for interactive traffic.
+7. Only after these gates, consider stronger adaptive codecs or neural compressors for cold storage; preserve the fast Zstd path for interactive traffic. (The research measured token-ID storage as 4–16% worse than UTF-8 + zstd, and found LLM-based coding orders of magnitude too slow.)
+8. Ship **previous-request-as-prefix** compression for LLM API clients and gateways (zstd + LDM; RFC 9842 `dcz` shape), and an **archive compactor** (JSONL → seekable zstd-19, packed across sessions, with dictionary manifest).
 
 ## Known gaps
 

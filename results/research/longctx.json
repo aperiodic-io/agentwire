@@ -1,0 +1,165 @@
+{
+  "machine": {
+    "python": "3.13.18",
+    "platform": "Linux-6.18.44-fc-v653-x86_64-with-glibc2.39",
+    "cpu_count": 4,
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "mem_gib": 15.7,
+    "libzstd": "1.5.5",
+    "zlib": "1.3",
+    "libbrotli": "1.1.0",
+    "liblz4": "1.9.4",
+    "liblzma": "stdlib",
+    "git_commit": "bb4dbbf"
+  },
+  "rows": [
+    {
+      "final_context_bytes": 264334,
+      "requests": 10,
+      "raw_bytes": 1151003,
+      "AWC1 w20 (1 MiB)": {
+        "ratio": 18.64093220613481,
+        "seconds": 0.007573732999844651
+      },
+      "AWC1 w23 (8 MiB)": {
+        "ratio": 18.656644082082536,
+        "seconds": 0.0089351080000597
+      },
+      "AWC1 w25 (32 MiB)": {
+        "ratio": 18.656644082082536,
+        "seconds": 0.0076735189995815745
+      },
+      "zstd-3 stream w23 + long": {
+        "ratio": 18.70697893641919,
+        "seconds": 0.007533402999797545
+      },
+      "brotli-5 stream w24 (16 MiB)": {
+        "ratio": 20.860573437726547,
+        "seconds": 0.015372217999811255
+      },
+      "deflate-6 stream (32 KiB)": {
+        "ratio": 4.4837925540410515,
+        "seconds": 0.039604057999895304
+      },
+      "AWD1 w20": {
+        "ratio": 19.052555783619148,
+        "seconds": 0.005771982000169373
+      },
+      "AWD1 w22": {
+        "ratio": 19.052555783619148,
+        "seconds": 0.005321741999978258
+      }
+    },
+    {
+      "final_context_bytes": 1204518,
+      "requests": 27,
+      "raw_bytes": 13812615,
+      "AWC1 w20 (1 MiB)": {
+        "ratio": 25.946297012889918,
+        "seconds": 0.04371950100039612
+      },
+      "AWC1 w23 (8 MiB)": {
+        "ratio": 90.81093075087276,
+        "seconds": 0.042997768000077485
+      },
+      "AWC1 w25 (32 MiB)": {
+        "ratio": 92.0485079102747,
+        "seconds": 0.04851371799986737
+      },
+      "zstd-3 stream w23 + long": {
+        "ratio": 84.07152334810343,
+        "seconds": 0.053049621999889496
+      },
+      "brotli-5 stream w24 (16 MiB)": {
+        "ratio": 104.68860845839018,
+        "seconds": 0.06325990699997419
+      },
+      "deflate-6 stream (32 KiB)": {
+        "ratio": 4.780564816651075,
+        "seconds": 0.3738792750000357
+      },
+      "AWD1 w20": {
+        "ratio": 96.18812674094707,
+        "seconds": 0.037453632000051584
+      },
+      "AWD1 w22": {
+        "ratio": 96.18812674094707,
+        "seconds": 0.037678386000152386
+      }
+    },
+    {
+      "final_context_bytes": 3191685,
+      "requests": 115,
+      "raw_bytes": 173704603,
+      "AWC1 w20 (1 MiB)": {
+        "ratio": 10.502599430286867,
+        "seconds": 0.9348233209998398
+      },
+      "AWC1 w23 (8 MiB)": {
+        "ratio": 149.74212021292644,
+        "seconds": 0.5354487049999079
+      },
+      "AWC1 w25 (32 MiB)": {
+        "ratio": 325.7329791682684,
+        "seconds": 0.49479765399973985
+      },
+      "zstd-3 stream w23 + long": {
+        "ratio": 302.0450586424852,
+        "seconds": 0.31799857899977724
+      },
+      "brotli-5 stream w24 (16 MiB)": {
+        "ratio": 364.1980056651522,
+        "seconds": 0.5363483599999199
+      },
+      "deflate-6 stream (32 KiB)": {
+        "ratio": 4.714782182156713,
+        "seconds": 5.0283378530002665
+      },
+      "AWD1 w20": {
+        "ratio": 467.95925333247123,
+        "seconds": 0.5757189649998509
+      },
+      "AWD1 w22": {
+        "ratio": 681.8228681333778,
+        "seconds": 0.5592370150002353
+      }
+    },
+    {
+      "final_context_bytes": 6296866,
+      "requests": 184,
+      "raw_bytes": 620612908,
+      "AWC1 w20 (1 MiB)": {
+        "ratio": 9.72337766444344,
+        "seconds": 4.323974069000087
+      },
+      "AWC1 w23 (8 MiB)": {
+        "ratio": 342.0907938369816,
+        "seconds": 1.8287002790002589
+      },
+      "AWC1 w25 (32 MiB)": {
+        "ratio": 510.4345824985278,
+        "seconds": 1.7846196280002005
+      },
+      "zstd-3 stream w23 + long": {
+        "ratio": 672.6745551996792,
+        "seconds": 1.068090833000042
+      },
+      "brotli-5 stream w24 (16 MiB)": {
+        "ratio": 961.2040169624355,
+        "seconds": 2.0652412470003583
+      },
+      "deflate-6 stream (32 KiB)": {
+        "ratio": 4.616838069104401,
+        "seconds": 18.591371381000044
+      },
+      "AWD1 w20": {
+        "ratio": 878.3472074206483,
+        "seconds": 2.3946453409998867
+      },
+      "AWD1 w22": {
+        "ratio": 2221.950191543446,
+        "seconds": 2.059665705000043
+      }
+    }
+  ]
+}

@@ -5,7 +5,10 @@ from .transport import (BoundedBatcher, DictionaryRegistry, FrameCodec,
 from .stream import StreamEncoder, StreamSessionDecoder
 from .context import (AgentEvent, ContextReducer, ContentAddressedStore,
                       BudgetExceeded, rehydrate)
+from .delta import DeltaDecoder, DeltaEncoder
+from .seekable import SeekableReader, SeekableWriter
 
 __all__ = ["Zstd", "train_dictionary", "BoundedBatcher", "DictionaryRegistry",
            "FrameCodec", "Message", "StreamDecoder", "StreamEncoder", "StreamSessionDecoder", "AgentEvent", "ContextReducer",
-           "ContentAddressedStore", "BudgetExceeded", "rehydrate"]
+           "ContentAddressedStore", "BudgetExceeded", "rehydrate",
+           "DeltaEncoder", "DeltaDecoder", "SeekableWriter", "SeekableReader"]

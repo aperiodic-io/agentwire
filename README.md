@@ -51,6 +51,20 @@ It has two independent layers that can be combined:
 
 **The takeaway:** on real traffic, the AWC1 stream is 1.3–1.8× smaller on the wire than batching, adds no delay, and gets within 2–3% of compressing each finished session in one go. Batching barely helps in practice. Real agents emit messages seconds apart, so a 25 ms window averages only 1.8–2.8 messages. Details are in [Benchmarks](#benchmarks).
 
+### Independent re-test on public corpora (compression research)
+
+A separate study re-tested these findings on public agent trajectories (SWE-agent, OpenHands, SWE-bench logs, Loghub) plus synthetic multi-agent and SSE traffic, and benchmarked alternatives. The report is [reports/compression-research.md](reports/compression-research.md), with every number in [results/research/SUMMARY.md](results/research/SUMMARY.md). Findings that change the design:
+
+| Finding | Evidence (held-out data, framing included) |
+|---|---|
+| **The re-sent context is the dominant redundancy.** 92% of each LLM request copies the previous one. | One zstd frame per request: 3.8×. AWC1 + dictionary: 59×. **AWD1 context delta: 63×** |
+| **AWC1 collapses once the context outgrows its window.** | 6 MB contexts: AWC1 1 MiB window **10×**, 8 MiB window 342×, **AWD1 2,222×**, zstd `--patch-from` + LDM (stateless frames) 1,727× |
+| **Dictionaries matter more than "0–4%" on short sessions.** | A matching 64 KiB dictionary adds +8–30% to AWC1 (cc logs 8.0× → 10.5×). The gain is concentrated in each session's first messages, and a dictionary from another harness keeps only ~⅓ of it. |
+| **History beats batching** (confirmed, also at a gateway multiplexing 60 sessions). | 25 ms batches hold 1.0–1.4 messages; a shared gateway stream adds only 0–10% |
+| **For SSE and tiny log lines, plain deflate with sync flush beats AWC1.** | SSE: deflate 11.9 B/event vs zstd 19.2 vs AWC1 29.0 |
+| **For storage, pack sessions together.** | Corpus-packed zstd-19 --long is 1.3–1.9× smaller than per-session files; seekable zstd with 4 MiB frames keeps 81–99% of that with ms random access |
+| **Not worth it here:** CDC dedup, columnar JSON as a format, token-ID storage, xz/brotli-11, and lossy masking as a bandwidth tool. | See the report, §5–§8 |
+
 ---
 
 ## How it works
@@ -133,7 +147,13 @@ The reducer is opt-in and deterministic, and it never touches protected events.
 | Gateway multiplexing many busy sessions, or real bursts with 25 ms of slack | AWF1 batches |
 | Frames must be stored, fanned out or replayed independently | AWF1 |
 | Log or trace shipping that can wait 250–1000 ms | AWF1 with larger batches |
-| Context window too large and you can label low-value tool results | Context reducer (either transport) |
+| Context window too large and you can label low-value tool results | Context reducer (either transport). It cuts tokens, not bytes: after a delta codec it makes the wire slightly *larger* |
+| Connection re-sends the growing conversation context (LLM proxying, full-context hand-backs) | **AWD1 context delta** (`agentwire.delta`); stays efficient at any context size |
+| Stateless HTTP API requests | zstd frame with the previous request as prefix + long-distance matching (`agentwire.zstd.compress_advanced(prefix=..., long_distance=True)`) |
+| SSE / token streams over HTTP | gzip/deflate with a flush per event; coalesce 50 ms only for machine consumers |
+| Session-log archive | Seekable zstd-19, 1–4 MiB frames packed across sessions, with a dictionary (`agentwire.seekable`) |
+
+See [reports/compression-research.md §9](reports/compression-research.md#9-recommendation) for the measured recommendation per use case.
 
 ---
 
@@ -164,7 +184,7 @@ python3 -m agentwire tcp-demo --stream     # AWC1 stream over loopback TCP
 python3 -m agentwire pipeline-demo         # context reduction -> TCP -> archive restore
 python3 -m agentwire bench                 # synthetic benchmark -> results/RESULTS.md
 python3 -m agentwire bench-local           # benchmark on your own Claude Code / Codex logs
-python3 -m pytest -q                       # 69 tests
+python3 -m pytest -q                       # 131 tests
 ```
 
 Lossless pack and unpack of a JSONL file, in both modes:
@@ -382,8 +402,15 @@ agentwire/
   benchmark.py          synthetic benchmark
   localbench.py         real-session benchmark (bench-local)
   fixtures.py           deterministic synthetic workloads
+  codecs.py             zstd/brotli/lz4/deflate/xz behind one interface (one-shot + per-message streams)
+  delta.py              AWD1 context-delta stream for re-sent conversation context
+  seekable.py           zstd seekable-format archives with a message index
+  jsoncol.py            AWJ1 columnar JSON blocks (research; byte-exact with verbatim fallback)
+  cdc.py                FastCDC chunking + deduplicating chunk store (research)
   __main__.py           CLI
-tests/                  69 tests: transport, stream, context, CLI, local benchmark
+tests/                  131 tests: transport, stream, context, CLI, local benchmark, codecs, AWD1, seekable, AWJ1, CDC
+research/               corpus builder (public datasets), characterisation, benchmarks, summary + cost model
+reports/                compression research report, design-space survey, verified references
 examples/               sample JSONL inputs, an 8 KiB example dictionary + manifest
 results/                benchmark outputs, chart, example archives, build manifest
 PROTOCOL.md             AWF1, AWC1 and AWB1 wire and archive formats
@@ -398,13 +425,20 @@ reproduce.sh            runs every verification gate end to end
 
 ```bash
 pip install -r requirements-dev.txt
-python3 -m pytest -q            # 69 tests, about 1.5 s
+python3 -m pytest -q            # 131 tests, a few seconds
 ./reproduce.sh                  # tests, demos, benchmark, chart, pack/unpack checks (needs matplotlib)
 ```
 
 The tests cover byte-exact round trips of arbitrary binary data, one-byte fragmentation, dictionary rotation, missing or mismatched dictionaries, frame corruption, truncation, non-canonical varints, size limits enforced before decompression, sequence gaps, reordering, session poisoning, AWC1 window limits, real loopback TCP, CLI round trips, context protection and rehydration, and the local benchmark on synthetic session files. The test suite never reads real user logs.
 
-The last verified run is recorded in [results/build-manifest.json](results/build-manifest.json): macOS arm64, Python 3.14, libzstd 1.5.7, 69 tests passing.
+The last verified run is recorded in [results/build-manifest.json](results/build-manifest.json): macOS arm64, Python 3.14, libzstd 1.5.7, 69 tests passing (before the research modules were added).
+
+To rebuild the research corpora and rerun every research benchmark (downloads ~165 MB of public data; optional extras `pyarrow`, `tiktoken`, `pyzstd`, `matplotlib` for corpus building, Parquet, token and interop checks and plots; about 2 hours on 4 vCPUs):
+
+```bash
+pip install pyarrow tiktoken pyzstd matplotlib
+research/run_all.sh
+```
 
 ---
 
@@ -427,3 +461,6 @@ The last verified run is recorded in [results/build-manifest.json](results/build
 - [ARCHITECTURE.md](ARCHITECTURE.md): invariants, data flow, operational safety model, production roadmap
 - [results/RESULTS.md](results/RESULTS.md): every synthetic measurement
 - [results/local/RESULTS.md](results/local/RESULTS.md): real-session benchmark report
+- [reports/compression-research.md](reports/compression-research.md): compression research, recommendations per use case
+- [reports/design-space.md](reports/design-space.md): survey of codecs, delta/dedup, structure-aware and streaming approaches
+- [results/research/SUMMARY.md](results/research/SUMMARY.md): every research measurement
