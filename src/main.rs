@@ -1,16 +1,23 @@
 //! `agentwire server`: the AWD1 layer as a reverse proxy in front of an HTTP API.
 //! `agentwire client`: a local proxy that sends what a tool posts to it as AWD1 deltas.
+//! `agentwire collect`: a log sink (OTLP/HTTP, a gateway's HTTP log plugin) that stores every
+//! request body in AWL1, and forwards it unchanged when given a backend.
+//! `agentwire log`: pack, list and read AWL1 files (what `--record-dir` and `collect` write).
 
 use std::convert::Infallible;
+use std::fs::File;
 use std::future::Future;
+use std::io::{self, BufRead, BufWriter, Read, Write};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use agentwire::client::Client;
+use agentwire::log;
 use agentwire::server::{Awd1Layer, Config, InnerBody, Stats};
 use agentwire::store::Store;
 use agentwire::{ERROR, KEPT};
@@ -62,6 +69,43 @@ enum Mode {
         /// Serve Prometheus metrics at http://<addr>/metrics.
         #[arg(long, env = "AGENTWIRE_METRICS")]
         metrics: Option<SocketAddr>,
+        /// Store every request body forwarded, with its time, method and path (never its headers),
+        /// in a new AWL1 file in this directory; read it with `agentwire log`.
+        #[arg(long, env = "AGENTWIRE_RECORD_DIR")]
+        record_dir: Option<PathBuf>,
+        /// Records a new one may delta against: about one per conversation in flight.
+        #[arg(long, env = "AGENTWIRE_RECORD_WINDOW", default_value_t = 16)]
+        record_window: usize,
+        /// Start a new AWL1 file once one reaches this size; every file reads on its own.
+        #[arg(long, env = "AGENTWIRE_ROTATE_BYTES", default_value_t = 1 << 30)]
+        rotate_bytes: u64,
+    },
+    /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
+    /// AWL1, gzip decoded; forward each request as received when given a backend. Also accepts
+    /// AWD1 deltas from `agentwire client`.
+    Collect {
+        /// Loopback by default: anyone who can reach it can fill the disk. In a container, give
+        /// 0.0.0.0:4318 and put it on a private network.
+        #[arg(long, env = "AGENTWIRE_LISTEN", default_value = "127.0.0.1:4318")]
+        listen: SocketAddr,
+        /// The new AWL1 file goes in this directory; read it with `agentwire log`.
+        #[arg(long, env = "AGENTWIRE_RECORD_DIR")]
+        record_dir: PathBuf,
+        /// The backend each request is forwarded to, as received, e.g.
+        /// https://cloud.langfuse.com/api/public/otel. Without one, each request is answered 200.
+        #[arg(long, env = "AGENTWIRE_FORWARD")]
+        forward: Option<reqwest::Url>,
+        /// Records a new one may delta against: about one per trace or exporter interleaved.
+        #[arg(long, env = "AGENTWIRE_RECORD_WINDOW", default_value_t = 16)]
+        record_window: usize,
+        /// Start a new AWL1 file once one reaches this size; every file reads on its own.
+        #[arg(long, env = "AGENTWIRE_ROTATE_BYTES", default_value_t = 1 << 30)]
+        rotate_bytes: u64,
+        /// The largest body stored, after gzip decoding.
+        #[arg(long, env = "AGENTWIRE_MAX_BODY", default_value_t = 64 << 20)]
+        max_body: usize,
+        #[arg(long, env = "AGENTWIRE_METRICS")]
+        metrics: Option<SocketAddr>,
     },
     /// Accept plain requests from a local tool and send them to an `agentwire server` as deltas.
     Client {
@@ -79,10 +123,43 @@ enum Mode {
         #[arg(long, env = "AGENTWIRE_METRICS")]
         metrics: Option<SocketAddr>,
     },
+    /// Read and write AWL1 files: bodies stored as deltas against earlier ones.
+    #[command(subcommand)]
+    Log(LogCmd),
+}
+
+#[derive(Subcommand)]
+enum LogCmd {
+    /// Store each line of stdin (JSON lines: spans, requests) as a record of a new AWL1 file.
+    Pack {
+        file: PathBuf,
+        /// Records a new one may delta against: about one per trace or conversation interleaved.
+        #[arg(long, default_value_t = 16)]
+        window: usize,
+    },
+    /// Write every record's body to stdout, one per line: `pack`'s input back.
+    Unpack {
+        file: PathBuf,
+        #[arg(long, default_value_t = 64 << 20)]
+        max_body: usize,
+    },
+    /// Write one record's body to stdout, byte for byte.
+    Get {
+        file: PathBuf,
+        index: usize,
+        #[arg(long, default_value_t = 64 << 20)]
+        max_body: usize,
+    },
+    /// List the records: index, records back to its base (0: stored whole), bytes stored, meta.
+    Ls { file: PathBuf },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
+    let cli = Cli::parse();
+    if let Mode::Log(cmd) = cli.mode {
+        return run_log(cmd);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "agentwire=info".into()),
@@ -92,18 +169,35 @@ async fn main() -> Result<(), BoxError> {
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .build()?;
-    match Cli::parse().mode {
-        Mode::Server { listen, upstream, store_bytes, ttl_seconds, max_body, scope_headers, metrics } => {
-            let store = Arc::new(Store::new(store_bytes, Duration::from_secs(ttl_seconds)));
+    match cli.mode {
+        Mode::Log(_) => unreachable!("handled above"),
+        Mode::Server {
+            listen,
+            upstream,
+            store_bytes,
+            ttl_seconds,
+            max_body,
+            scope_headers,
+            metrics,
+            record_dir,
+            record_window,
+            rotate_bytes,
+        } => {
+            let record = match record_dir {
+                Some(dir) => Some(Arc::new(Mutex::new(Recording::open(dir, record_window, rotate_bytes)?))),
+                None => None,
+            };
+            let store = Store::new(store_bytes, Duration::from_secs(ttl_seconds));
             let scope_headers =
                 scope_headers.iter().map(|h| HeaderName::try_from(h.as_str())).collect::<Result<_, _>>()?;
-            let layer = Awd1Layer::new(store.clone(), Config { max_body, scope_headers });
-            if let Some(addr) = metrics {
-                let (stats, store) = (layer.stats().clone(), store.clone());
-                serve_metrics(addr, move || server_metrics(&stats, &store)).await?;
-            }
-            let service = layer.layer(Forward { http, upstream: Arc::new(upstream) });
-            serve(listen, move || TowerToHyperService::new(service.clone())).await
+            let forward = Forward { http, upstream: Some(Arc::new(upstream)), record, max_body };
+            run_server(listen, store, Config { max_body, scope_headers }, metrics, forward).await
+        }
+        Mode::Collect { listen, record_dir, forward, record_window, rotate_bytes, max_body, metrics } => {
+            let record = Some(Arc::new(Mutex::new(Recording::open(record_dir, record_window, rotate_bytes)?)));
+            let forward = Forward { http, upstream: forward.map(Arc::new), record, max_body };
+            let config = Config { max_body, ..Config::default() };
+            run_server(listen, Store::new(1 << 30, Duration::from_secs(1800)), config, metrics, forward).await
         }
         Mode::Client { listen, upstream, bases, max_body, metrics } => {
             let proxy = Arc::new(ClientProxy {
@@ -127,6 +221,27 @@ async fn main() -> Result<(), BoxError> {
             .await
         }
     }
+}
+
+/// The AWD1 layer in front of `forward`, until shutdown.
+async fn run_server(
+    listen: SocketAddr,
+    store: Store,
+    config: Config,
+    metrics: Option<SocketAddr>,
+    forward: Forward,
+) -> Result<(), BoxError> {
+    let store = Arc::new(store);
+    let layer = Awd1Layer::new(store.clone(), config);
+    if let Some(addr) = metrics {
+        let (stats, store, record) = (layer.stats().clone(), store.clone(), forward.record.clone());
+        serve_metrics(addr, move || {
+            server_metrics(&stats, &store) + &record.as_ref().map_or_else(String::new, |r| lock(r).metrics())
+        })
+        .await?;
+    }
+    let service = layer.layer(forward.clone());
+    serve(listen, move || TowerToHyperService::new(service.clone())).await
 }
 
 /// Accepts connections until SIGTERM or Ctrl-C, then lets requests in flight finish.
@@ -174,11 +289,107 @@ async fn shutdown_signal() {
     }
 }
 
-/// The inner service of `agentwire server`: sends the request on to the upstream API.
+type Recorder = Arc<Mutex<Recording>>;
+
+fn lock(r: &Recorder) -> std::sync::MutexGuard<'_, Recording> {
+    // every append completes, or fails and moves to a new file, under the lock
+    r.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// AWL1 files in `dir`, named by when each was opened, so a restart never appends to or replaces
+/// one, and in order by name. Each is self-contained: a new one starts without bases.
+struct Recording {
+    dir: PathBuf,
+    window: usize,
+    rotate_bytes: u64,
+    path: PathBuf,
+    writer: log::Writer<BufWriter<File>>,
+    seq: u64,
+    /// bytes of the files already closed
+    closed: u64,
+    recorded: u64,
+    body_bytes: u64,
+    failures: u64,
+}
+
+impl Recording {
+    fn open(dir: PathBuf, window: usize, rotate_bytes: u64) -> io::Result<Self> {
+        std::fs::create_dir_all(&dir)?;
+        let (path, writer) = Self::create(&dir, window, 0)?;
+        Ok(Recording {
+            dir,
+            window,
+            rotate_bytes,
+            path,
+            writer,
+            seq: 0,
+            closed: 0,
+            recorded: 0,
+            body_bytes: 0,
+            failures: 0,
+        })
+    }
+
+    fn create(dir: &std::path::Path, window: usize, seq: u64) -> io::Result<(PathBuf, log::Writer<BufWriter<File>>)> {
+        let path = dir.join(format!("{}-{}-{seq:06}.awl", unix_ms(), std::process::id()));
+        let file = File::options().write(true).create_new(true).open(&path)?;
+        tracing::info!(path = %path.display(), "recording");
+        let mut w = log::Writer::new(BufWriter::new(file), window)?;
+        w.flush()?; // a valid, empty AWL1 file before the first record
+        Ok((path, w))
+    }
+
+    fn next_file(&mut self) -> io::Result<()> {
+        let len = std::fs::metadata(&self.path).map_or(0, |m| m.len());
+        let (path, writer) = Self::create(&self.dir, self.window, self.seq + 1)?;
+        (self.closed, self.seq, self.path, self.writer) = (self.closed + len, self.seq + 1, path, writer);
+        Ok(())
+    }
+
+    /// Appends and flushes one record, then starts a new file if this one is full. A failed write
+    /// may leave a part of a record at the end of the file: readers keep the records before it, and
+    /// the next record goes to a new file.
+    fn append(&mut self, meta: &[u8], body: Bytes) -> io::Result<()> {
+        let n = body.len() as u64;
+        let appended = self.writer.append(meta, body).and_then(|_| self.writer.flush());
+        if let Err(e) = appended {
+            tracing::error!(error = %e, path = %self.path.display(), "recording failed; forwarding the request unrecorded");
+            self.failures += 1;
+            let _ = self.next_file();
+            return Err(e);
+        }
+        self.recorded += 1;
+        self.body_bytes += n;
+        if std::fs::metadata(&self.path)?.len() >= self.rotate_bytes {
+            self.next_file()?;
+        }
+        Ok(())
+    }
+
+    fn metrics(&self) -> String {
+        let on_disk = self.closed + std::fs::metadata(&self.path).map_or(0, |m| m.len());
+        format!(
+            "# TYPE agentwire_recorded_total counter\nagentwire_recorded_total {}\n\
+             # TYPE agentwire_recorded_body_bytes_total counter\nagentwire_recorded_body_bytes_total {}\n\
+             # TYPE agentwire_recorded_file_bytes_total counter\nagentwire_recorded_file_bytes_total {on_disk}\n\
+             # TYPE agentwire_record_failures_total counter\nagentwire_record_failures_total {}\n",
+            self.recorded, self.body_bytes, self.failures,
+        )
+    }
+}
+
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())
+}
+
+/// The inner service of `agentwire server` and `collect`: records the request (if recording), then
+/// sends it on to the upstream, or answers it (a collector without a backend).
 #[derive(Clone)]
 struct Forward {
     http: reqwest::Client,
-    upstream: Arc<reqwest::Url>,
+    upstream: Option<Arc<reqwest::Url>>,
+    record: Option<Recorder>,
+    max_body: usize,
 }
 
 impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
@@ -191,13 +402,74 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
     }
 
     fn call(&mut self, request: Request<InnerBody<Incoming>>) -> Self::Future {
-        let (http, upstream) = (self.http.clone(), self.upstream.clone());
+        let (http, upstream, record, max_body) =
+            (self.http.clone(), self.upstream.clone(), self.record.clone(), self.max_body);
         Box::pin(async move {
             let (parts, body) = request.into_parts();
-            let body = reqwest::Body::wrap(body);
-            Ok(forward(&http, &upstream, &parts, body).await)
+            let (Some(record), upstream) = (record, &upstream) else {
+                let upstream = upstream.as_ref().expect("a server without a recorder has an upstream");
+                return Ok(forward(&http, upstream, &parts, reqwest::Body::wrap(body)).await);
+            };
+            let body = match Limited::new(body, max_body).collect().await {
+                Ok(b) => b.to_bytes(),
+                Err(_) => return Ok(status(StatusCode::PAYLOAD_TOO_LARGE)),
+            };
+            let (stored, encoding) = match decoded(&parts.headers, body.clone(), max_body) {
+                Ok(d) => d,
+                Err(code) => return Ok(status(code)),
+            };
+            let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
+            let ct = parts.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|v| v.replace(' ', ""));
+            let meta = format!("{} {} {path} {} {encoding}", unix_ms(), parts.method, ct.as_deref().unwrap_or("-"));
+            // stored and flushed before it is forwarded: what the upstream saw is on disk
+            // ponytail: one writer behind a lock; a writer per shard if recording limits throughput
+            // a failed write is logged and counted where it happens; it never stops the request
+            if let Err(e) = tokio::task::spawn_blocking(move || lock(&record).append(meta.as_bytes(), stored)).await {
+                tracing::error!(error = %e, "recording panicked; forwarding the request unrecorded");
+            }
+            Ok(match upstream {
+                Some(upstream) => forward(&http, upstream, &parts, body).await,
+                None => ack(&parts.headers),
+            })
         })
     }
+}
+
+fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
+    let mut out = BufWriter::new(io::stdout().lock());
+    match cmd {
+        LogCmd::Pack { file, window } => {
+            let file = File::options().write(true).create_new(true).open(file)?;
+            let mut w = log::Writer::new(BufWriter::new(file), window)?;
+            for line in io::stdin().lock().split(b'\n') {
+                w.append(b"", Bytes::from(line?))?;
+            }
+            w.flush()?;
+        }
+        LogCmd::Unpack { file, max_body } => {
+            let mut r = open_log(&file, max_body)?;
+            r.scan(|_, body| {
+                out.write_all(body)?;
+                out.write_all(b"\n")
+            })?;
+        }
+        LogCmd::Get { file, index, max_body } => out.write_all(&open_log(&file, max_body)?.get(index)?)?,
+        LogCmd::Ls { file } => {
+            for (i, r) in open_log(&file, 0)?.records().iter().enumerate() {
+                writeln!(out, "{i} {} {} {}", r.back, r.stored, String::from_utf8_lossy(&r.meta))?;
+            }
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+fn open_log(path: &std::path::Path, max_body: usize) -> io::Result<log::Reader<File>> {
+    let r = log::Reader::open(File::open(path)?, max_body)?;
+    if r.truncated {
+        eprintln!("{}: the file ends inside a record; reading the records before it", path.display());
+    }
+    Ok(r)
 }
 
 /// One request to the upstream, its response streamed back; a failure to reach it is a 502.
@@ -260,6 +532,39 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
     }
 }
 
+/// The body as stored and delta'd: gzip decoded (at most `max` bytes), with "-" for its encoding;
+/// any other encoding kept as sent, and named.
+fn decoded(headers: &HeaderMap, body: Bytes, max: usize) -> Result<(Bytes, String), StatusCode> {
+    let encoding = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).unwrap_or("").trim();
+    if encoding.is_empty() || encoding.eq_ignore_ascii_case("identity") {
+        return Ok((body, "-".to_owned()));
+    }
+    if !encoding.eq_ignore_ascii_case("gzip") && !encoding.eq_ignore_ascii_case("x-gzip") {
+        return Ok((body, encoding.replace(' ', "")));
+    }
+    let mut out = Vec::new();
+    flate2::read::MultiGzDecoder::new(&body[..])
+        .take(max as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if out.len() > max {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    Ok((Bytes::from(out), "-".to_owned()))
+}
+
+/// A collector's answer: OTLP/HTTP's empty success, in the request's content type.
+fn ack(headers: &HeaderMap) -> Response<ResBody> {
+    let content_type = headers.get(header::CONTENT_TYPE).cloned();
+    let json = content_type.as_ref().is_some_and(|v| v.as_bytes().starts_with(b"application/json"));
+    let body = Full::new(Bytes::from_static(if json { b"{}" } else { b"" }));
+    let mut r = Response::new(body.map_err(|never| match never {}).boxed_unsync());
+    if let Some(v) = content_type {
+        r.headers_mut().insert(header::CONTENT_TYPE, v);
+    }
+    r
+}
+
 fn status(code: StatusCode) -> Response<ResBody> {
     let mut r = Response::new(ResBody::default());
     *r.status_mut() = code;
@@ -289,6 +594,16 @@ impl ClientProxy {
         let body = match Limited::new(body, self.max_body).collect().await {
             Ok(b) => b.to_bytes(),
             Err(_) => return status(StatusCode::PAYLOAD_TOO_LARGE),
+        };
+        // a delta of gzip bytes finds nothing: decode first. A body in another encoding goes as is
+        // (`awd1` must be its only content coding)
+        let body = match decoded(&parts.headers, body, self.max_body) {
+            Ok((body, encoding)) if encoding == "-" => {
+                parts.headers.remove(header::CONTENT_ENCODING);
+                body
+            }
+            Ok((body, _)) => return forward(&self.http, &self.upstream, &parts, body).await,
+            Err(code) => return status(code),
         };
         if body.is_empty() {
             return forward(&self.http, &self.upstream, &parts, body).await;
@@ -406,6 +721,88 @@ mod tests {
             "https://gw.example.com/anthropic/v1/messages"
         );
         assert_eq!(at("http://127.0.0.1:8080", "/"), "http://127.0.0.1:8080/");
+    }
+
+    #[test]
+    fn gzip_is_decoded_within_the_limit_and_other_encodings_are_kept() {
+        let gz = |b: &[u8]| {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(b).unwrap();
+            Bytes::from(e.finish().unwrap())
+        };
+        let with = |enc: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::CONTENT_ENCODING, enc.parse().unwrap());
+            h
+        };
+        let plain = Bytes::from_static(b"hello");
+        assert_eq!(decoded(&HeaderMap::new(), plain.clone(), 5), Ok((plain.clone(), "-".into())));
+        assert_eq!(decoded(&with("identity"), plain.clone(), 5), Ok((plain.clone(), "-".into())));
+        for enc in ["gzip", "GZIP", "x-gzip"] {
+            assert_eq!(decoded(&with(enc), gz(b"hello"), 5), Ok((plain.clone(), "-".into())), "{enc}");
+        }
+        let two_members = [gz(b"hel"), gz(b"lo")].concat();
+        assert_eq!(decoded(&with("gzip"), two_members.into(), 5), Ok((plain.clone(), "-".into())));
+        assert_eq!(decoded(&with("gzip"), gz(b"hello!"), 5), Err(StatusCode::PAYLOAD_TOO_LARGE));
+        assert_eq!(decoded(&with("gzip"), plain.clone(), 5), Err(StatusCode::BAD_REQUEST), "not gzip");
+        assert_eq!(decoded(&with("br"), plain.clone(), 5), Ok((plain, "br".into())));
+    }
+
+    #[test]
+    fn a_collector_acknowledges_in_the_requests_content_type() {
+        let with = |ct: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::CONTENT_TYPE, ct.parse().unwrap());
+            h
+        };
+        let r = ack(&with("application/json"));
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "application/json");
+        let r = ack(&with("application/x-protobuf"));
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "application/x-protobuf");
+        assert!(ack(&HeaderMap::new()).headers().get(header::CONTENT_TYPE).is_none());
+    }
+
+    #[test]
+    fn a_failed_write_moves_recording_to_a_new_file_and_loses_nothing_after_it() {
+        let dir = std::env::temp_dir().join(format!("agentwire-recording-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = Recording::open(dir.clone(), 4, 1 << 30).unwrap();
+        r.append(b"m", Bytes::from_static(b"before")).unwrap();
+        // the disk fills up: /dev/full fails every write with ENOSPC
+        let full = File::options().write(true).open("/dev/full").unwrap();
+        r.writer = log::Writer::new(BufWriter::new(full), 4).unwrap(); // the header waits in the buffer
+        assert!(r.append(b"m", Bytes::from_static(b"lost")).is_err());
+        r.append(b"m", Bytes::from_static(b"after")).unwrap();
+        assert_eq!((r.recorded, r.failures), (2, 1));
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        let bodies: Vec<Vec<u8>> = files
+            .iter()
+            .flat_map(|f| {
+                let mut reader = log::Reader::open(File::open(f).unwrap(), 1 << 20).unwrap();
+                (0..reader.records().len()).map(|i| reader.get(i).unwrap()).collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(bodies, [&b"before"[..], b"after"]);
+        assert!(r.metrics().contains("agentwire_record_failures_total 1\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn files_rotated_within_a_millisecond_get_their_own_names_in_order() {
+        let dir = std::env::temp_dir().join(format!("agentwire-rotation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = Recording::open(dir.clone(), 1, 1).unwrap(); // every record fills its file
+        for body in ["a", "b", "c"] {
+            r.append(b"", Bytes::from(body)).unwrap();
+        }
+        let mut names: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        names.sort();
+        let seqs: Vec<&str> = names.iter().map(|n| &n[n.len() - 10..n.len() - 4]).collect();
+        assert_eq!(seqs, ["000000", "000001", "000002", "000003"], "{names:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

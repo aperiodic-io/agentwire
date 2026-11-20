@@ -1,5 +1,6 @@
 pub mod client;
 pub mod codec;
+pub mod log;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod store;

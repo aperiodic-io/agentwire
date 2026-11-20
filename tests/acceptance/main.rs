@@ -37,6 +37,14 @@ struct Proxies {
     sent: Vec<Sent>,
     turns: HashMap<String, usize>,
     last: Option<(u16, HeaderMap)>,
+    /// where the server records requests (`--record-dir`), when it does
+    record_dir: Option<std::path::PathBuf>,
+    /// JSON lines to pack, and the packed file
+    lines: Vec<Bytes>,
+    packed: Option<std::path::PathBuf>,
+    /// what an exporter posted: the gzip bytes, and the status of the last post
+    gzipped: Vec<Bytes>,
+    posted: Option<(u16, HeaderMap, Bytes)>,
 }
 
 #[derive(Debug)]
@@ -175,7 +183,12 @@ impl Proxies {
 
     async fn start_server(&mut self) {
         let upstream = format!("http://{}", self.upstream.as_ref().unwrap().0);
-        let server = spawn(&["server", "--upstream", &upstream]).await;
+        let mut args = vec!["server", "--upstream", &upstream];
+        let dir = self.record_dir.as_ref().map(|d| d.to_str().unwrap().to_owned());
+        if let Some(dir) = &dir {
+            args.extend(["--record-dir", dir]);
+        }
+        let server = spawn(&args).await;
         if let Some((_, target, _)) = &self.relay {
             *target.lock().unwrap() = server.addr;
         }
@@ -387,6 +400,347 @@ async fn only_the_base(w: &mut Proxies) {
     let recorded = w.recorded();
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].1, "base");
+}
+
+/// A fresh directory under the system's temp dir, for this scenario only (they run concurrently).
+fn scratch(name: &str) -> std::path::PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("agentwire-acceptance-{}-{name}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// `agentwire log <args>`, its stdout; it must succeed.
+async fn log(args: &[&str], stdin: &[u8]) -> Vec<u8> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentwire"))
+        .arg("log")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(stdin).await.unwrap();
+    drop(input);
+    let out = child.wait_with_output().await.unwrap();
+    assert!(out.status.success(), "agentwire log {args:?}: {}", out.status);
+    out.stdout
+}
+
+#[given("an agentwire server in front of it, recording to a directory")]
+async fn a_recording_server(w: &mut Proxies) {
+    w.record_dir = Some(scratch("record"));
+    w.start_server().await;
+}
+
+/// The one file the server records to.
+fn recording(w: &Proxies) -> String {
+    let files: Vec<_> = std::fs::read_dir(w.record_dir.as_ref().unwrap()).unwrap().map(|e| e.unwrap().path()).collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(files[0].extension().unwrap(), "awl");
+    files[0].to_str().unwrap().to_owned()
+}
+
+#[then("the recording holds every request byte for byte, with its method and path")]
+async fn recording_holds(w: &mut Proxies) {
+    let file = recording(w);
+    let listed = String::from_utf8(log(&["ls", &file], b"").await).unwrap();
+    assert_eq!(listed.lines().count(), w.sent.len(), "{listed}");
+    for (i, line) in listed.lines().enumerate() {
+        // index, back, stored bytes, then the meta: a timestamp, the method and the path
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields[0], i.to_string());
+        assert!(fields[3].parse::<u64>().unwrap() > 1_700_000_000_000, "{line}");
+        // then the content type and encoding as stored ("-": none)
+        assert_eq!(fields[4..], ["POST", "/v1/messages", "-", "-"], "{line}");
+        assert_eq!(log(&["get", &file, &i.to_string()], b"").await, w.sent[i].body, "request {i}");
+    }
+}
+
+#[then(expr = "the recording takes under {int}% of the requests' bytes")]
+async fn recording_ratio(w: &mut Proxies, percent: u64) {
+    let stored = std::fs::metadata(recording(w)).unwrap().len();
+    let body: u64 = w.sent.iter().map(|s| s.body.len() as u64).sum();
+    assert!(stored * 100 < body * percent, "{stored} bytes stored for {body}");
+}
+
+#[given(expr = "{int} traces of {int} spans, each span carrying the whole prompt, as JSON lines")]
+async fn spans_as_json_lines(w: &mut Proxies, traces: usize, spans: usize) {
+    // trace by trace, as a collector exports them: the span's ids come first, the prompt after
+    for span in 0..spans {
+        for trace in 0..traces {
+            let prompt = String::from_utf8(conversation(&format!("t{trace}"), span + 1).to_vec()).unwrap();
+            let prompt = prompt.replace('"', "\\\"");
+            w.lines.push(Bytes::from(format!(
+                r#"{{"trace_id":"t{trace}","span_id":"s{span}","name":"chat","attributes":{{"gen_ai.prompt":"{prompt}"}}}}"#
+            )));
+        }
+    }
+}
+
+#[when("they are packed with `agentwire log pack`")]
+async fn pack(w: &mut Proxies) {
+    let file = scratch("pack").join("spans.awl");
+    log(&["pack", file.to_str().unwrap()], &jsonl(&w.lines)).await;
+    w.packed = Some(file);
+}
+
+fn jsonl(lines: &[Bytes]) -> Vec<u8> {
+    lines.iter().flat_map(|l| [&l[..], b"\n"].concat()).collect()
+}
+
+#[then("`agentwire log unpack` gives back the same lines")]
+async fn unpack(w: &mut Proxies) {
+    let file = w.packed.as_ref().unwrap().to_str().unwrap();
+    assert!(log(&["unpack", file], b"").await == jsonl(&w.lines));
+}
+
+#[then(expr = "`agentwire log get` gives back span {int} alone")]
+async fn get_one(w: &mut Proxies, i: usize) {
+    let file = w.packed.as_ref().unwrap().to_str().unwrap();
+    assert_eq!(log(&["get", file, &i.to_string()], b"").await, w.lines[i]);
+}
+
+#[then(expr = "the packed file takes under {int}% of the lines' bytes")]
+async fn packed_ratio(w: &mut Proxies, percent: u64) {
+    let stored = std::fs::metadata(w.packed.as_ref().unwrap()).unwrap().len();
+    let raw = jsonl(&w.lines).len() as u64;
+    assert!(stored * 100 < raw * percent, "{stored} bytes stored for {raw}");
+}
+
+fn gzip(body: &[u8]) -> Bytes {
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut e, body).unwrap();
+    Bytes::from(e.finish().unwrap())
+}
+
+/// The batch an OTLP exporter posts after turn `turn`: one span per trace, each with the whole prompt.
+fn batch(turn: usize) -> Bytes {
+    let spans: Vec<String> = (0..3)
+        .map(|t| {
+            let prompt = String::from_utf8(conversation(&format!("t{t}"), turn).to_vec()).unwrap();
+            format!(
+                r#"{{"traceId":"{t:032x}","spanId":"{turn:016x}","name":"chat","attributes":[{{"key":"gen_ai.input.messages","value":{{"stringValue":{prompt:?}}}}}]}}"#
+            )
+        })
+        .collect();
+    Bytes::from(format!(r#"{{"resourceSpans":[{{"scopeSpans":[{{"spans":[{}]}}]}}]}}"#, spans.join(",")))
+}
+
+impl Proxies {
+    async fn start_collector(&mut self, extra: &[&str]) {
+        self.record_dir = Some(scratch("collect"));
+        let dir = self.record_dir.as_ref().unwrap().to_str().unwrap().to_owned();
+        let mut args = vec!["collect".to_owned(), "--record-dir".to_owned(), dir];
+        args.extend(extra.iter().map(|a| a.to_string()));
+        if let Some((addr, ..)) = &self.upstream {
+            args.extend(["--forward".to_owned(), format!("http://{addr}")]);
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.server = Some(spawn(&args).await);
+    }
+
+    /// Posts `body` to the collector (or through the client), as an exporter would.
+    async fn post_batch(&mut self, to: SocketAddr, path: &str, body: Bytes, headers: &[(&str, &str)]) {
+        let mut r = self.http.post(format!("http://{to}{path}")).body(body);
+        for (k, v) in headers {
+            r = r.header(*k, *v);
+        }
+        let r = r.send().await.unwrap();
+        let (status, headers) = (r.status().as_u16(), r.headers().clone());
+        self.posted = Some((status, headers, r.bytes().await.unwrap()));
+    }
+
+    async fn export(&mut self, batches: usize, path: &str, through_client: bool) {
+        for turn in 1..=batches {
+            let body = batch(turn);
+            let gz = gzip(&body);
+            let to =
+                if through_client { self.client.as_ref().unwrap().addr } else { self.server.as_ref().unwrap().addr };
+            let before = self.relay.as_ref().map_or(0, |(_, _, c)| c.load(Ordering::SeqCst));
+            self.post_batch(
+                to,
+                path,
+                gz.clone(),
+                &[("content-type", "application/json"), ("content-encoding", "gzip")],
+            )
+            .await;
+            let (status, _, response) = self.posted.clone().unwrap();
+            assert_eq!(status, 200, "batch {turn}");
+            let relayed = self.relay.as_ref().map_or(0, |(_, _, c)| c.load(Ordering::SeqCst)) - before;
+            self.sent.push(Sent { body, response, first_of_conversation: turn == 1, relayed });
+            self.gzipped.push(gz);
+        }
+    }
+}
+
+#[given("an agentwire collector recording to a directory")]
+async fn a_collector(w: &mut Proxies) {
+    w.start_collector(&[]).await;
+}
+
+#[given("an agentwire collector in front of it, recording to a directory")]
+async fn a_forwarding_collector(w: &mut Proxies) {
+    w.start_collector(&[]).await;
+}
+
+#[given(expr = "an agentwire collector recording to a directory, starting a new file every {int} bytes")]
+async fn a_rotating_collector(w: &mut Proxies, bytes: u64) {
+    w.start_collector(&["--rotate-bytes", &bytes.to_string()]).await;
+}
+
+#[then("the recording spans several files, each readable on its own, holding every batch in order")]
+async fn recording_spans_files(w: &mut Proxies) {
+    let mut files: Vec<_> =
+        std::fs::read_dir(w.record_dir.as_ref().unwrap()).unwrap().map(|e| e.unwrap().path()).collect();
+    files.sort();
+    assert!(files.len() > 1, "{files:?}");
+    let mut bodies = Vec::new();
+    for (k, f) in files.iter().enumerate() {
+        let f = f.to_str().unwrap();
+        let n = String::from_utf8(log(&["ls", f], b"").await).unwrap().lines().count();
+        // the newest is the one the next record goes to: it may hold none yet
+        assert!(n > 0 || k == files.len() - 1, "{f} is empty");
+        for i in 0..n {
+            bodies.push(Bytes::from(log(&["get", f, &i.to_string()], b"").await));
+        }
+    }
+    assert!(bodies.iter().eq(w.sent.iter().map(|s| &s.body)), "every batch, in order, once");
+}
+
+#[then(expr = "the collector reports {int} records stored in under {int}% of their bytes, and no failures")]
+async fn collector_reports(w: &mut Proxies, records: u64, percent: u64) {
+    assert_eq!(w.metric(&w.server, "agentwire_recorded_total").await, records);
+    assert_eq!(w.metric(&w.server, "agentwire_record_failures_total").await, 0);
+    let body = w.metric(&w.server, "agentwire_recorded_body_bytes_total").await;
+    let stored = w.metric(&w.server, "agentwire_recorded_file_bytes_total").await;
+    assert_eq!(body, w.sent.iter().map(|s| s.body.len() as u64).sum::<u64>());
+    let on_disk: u64 =
+        std::fs::read_dir(w.record_dir.as_ref().unwrap()).unwrap().map(|e| e.unwrap().metadata().unwrap().len()).sum();
+    assert_eq!(stored, on_disk, "what the metric says is on disk");
+    assert!(stored * 100 < body * percent, "{stored} stored for {body}");
+}
+
+#[given(expr = "an agentwire collector recording to a directory, with a size limit of {int} bytes")]
+async fn a_small_collector(w: &mut Proxies, bytes: u64) {
+    w.start_collector(&["--max-body", &bytes.to_string()]).await;
+}
+
+#[when(expr = "an exporter posts a {int}-byte body to be kept as a base")]
+async fn exporter_posts_a_base(w: &mut Proxies, n: usize) {
+    let to = w.server.as_ref().unwrap().addr;
+    w.post_batch(to, "/v1/traces", Bytes::from(vec![b'x'; n]), &[(KEEP, "?1")]).await;
+}
+
+#[then(expr = "it is answered {int}, not kept as a base, and nothing is recorded")]
+async fn refused_as_a_base(w: &mut Proxies, status: u16) {
+    assert!(w.posted.as_ref().unwrap().1.get(KEPT).is_none(), "a body over the limit is never a base");
+    refused_unrecorded(w, status).await;
+}
+
+#[given("an agentwire client in front of that collector")]
+async fn a_client_before_the_collector(w: &mut Proxies) {
+    a_client(w).await;
+}
+
+#[when(expr = "an exporter posts {int} gzip-compressed JSON batches of spans to {string}")]
+async fn exporter_posts(w: &mut Proxies, batches: usize, path: String) {
+    w.export(batches, &path, false).await;
+}
+
+#[when(expr = "an exporter posts {int} gzip-compressed JSON batches of spans to {string} through the client")]
+async fn exporter_posts_through_client(w: &mut Proxies, batches: usize, path: String) {
+    w.export(batches, &path, true).await;
+}
+
+#[when(expr = "an exporter posts a protobuf batch to {string}")]
+async fn exporter_posts_protobuf(w: &mut Proxies, path: String) {
+    let to = w.server.as_ref().unwrap().addr;
+    w.post_batch(to, &path, Bytes::from_static(b"\x0a\x02\x0a\x00"), &[("content-type", "application/x-protobuf")])
+        .await;
+}
+
+#[when("an exporter posts a gzip body that inflates past the collector's size limit")]
+async fn exporter_posts_a_bomb(w: &mut Proxies) {
+    let to = w.server.as_ref().unwrap().addr;
+    let bomb = gzip(&vec![0; (64 << 20) + 1]);
+    w.post_batch(to, "/v1/traces", bomb, &[("content-type", "application/json"), ("content-encoding", "gzip")]).await;
+}
+
+#[then(expr = "every batch is acknowledged with {int} and {string}")]
+async fn acknowledged(w: &mut Proxies, status: u16, body: String) {
+    assert_eq!(w.posted.as_ref().unwrap().0, status);
+    assert!(w.sent.iter().all(|s| s.response == body.as_bytes()));
+}
+
+#[then("it is acknowledged with 200, an empty body and the protobuf content type")]
+async fn acknowledged_in_kind(w: &mut Proxies) {
+    let (status, headers, body) = w.posted.as_ref().unwrap();
+    assert_eq!((*status, &body[..]), (200, &b""[..]));
+    assert_eq!(headers["content-type"], "application/x-protobuf");
+}
+
+#[then("the recording holds every batch decoded, with its path and content type")]
+async fn recording_holds_batches(w: &mut Proxies) {
+    let file = recording(w);
+    let listed = String::from_utf8(log(&["ls", &file], b"").await).unwrap();
+    assert_eq!(listed.lines().count(), w.sent.len(), "{listed}");
+    for (i, line) in listed.lines().enumerate() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields[4..], ["POST", "/v1/traces", "application/json", "-"], "{line}");
+        assert!(log(&["get", &file, &i.to_string()], b"").await == w.sent[i].body, "batch {i}");
+    }
+}
+
+#[then(expr = "the recording takes under {int}% of the batches' decoded bytes")]
+async fn recording_ratio_of_batches(w: &mut Proxies, percent: u64) {
+    recording_ratio(w, percent).await;
+}
+
+#[then("the upstream received every batch byte for byte, still gzip-compressed")]
+async fn upstream_received_gzip(w: &mut Proxies) {
+    let recorded = w.recorded();
+    assert_eq!(recorded.len(), w.gzipped.len());
+    for (i, ((headers, body), gz)) in recorded.iter().zip(&w.gzipped).enumerate() {
+        assert!(body == gz, "batch {i}");
+        assert_eq!(headers["content-encoding"], "gzip", "batch {i}");
+    }
+}
+
+#[then(expr = "the batches after the first crossed the network in under {int}% of their decoded size")]
+async fn batches_ratio(w: &mut Proxies, percent: u64) {
+    ratio(w, percent).await;
+}
+
+#[then(expr = "it is answered {int} and nothing is recorded")]
+async fn refused_unrecorded(w: &mut Proxies, status: u16) {
+    assert_eq!(w.posted.as_ref().unwrap().0, status);
+    let listed = log(&["ls", &recording(w)], b"").await;
+    assert!(listed.is_empty(), "{}", String::from_utf8_lossy(&listed));
+}
+
+#[when("a tool posts a brotli-encoded body through the client")]
+async fn brotli_through_client(w: &mut Proxies) {
+    // not real brotli: the client must not need to read it, only to leave it alone. Two turns, so
+    // the second would have a base to delta against.
+    let to = w.client.as_ref().unwrap().addr;
+    for turn in [3, 4] {
+        let body = conversation("br", turn);
+        w.post_batch(to, "/v1/messages", body.clone(), &[("content-encoding", "br")]).await;
+        w.gzipped.push(body);
+    }
+}
+
+#[then("the upstream received it unchanged, still brotli-encoded")]
+async fn upstream_received_brotli(w: &mut Proxies) {
+    let recorded = w.recorded();
+    assert_eq!(recorded.len(), 2);
+    for ((headers, body), sent) in recorded.iter().zip(&w.gzipped) {
+        assert!(body == sent);
+        assert_eq!(headers["content-encoding"], "br");
+    }
 }
 
 #[tokio::main]

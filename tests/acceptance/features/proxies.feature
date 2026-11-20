@@ -47,3 +47,7 @@ Feature: Requests cross the network as deltas and reach the API byte for byte
     When the upstream API is down
     And a tool posts a request through the client
     Then the tool is answered 502
+
+  Scenario: A body in a content coding the client cannot decode reaches the API as it was sent
+    When a tool posts a brotli-encoded body through the client
+    Then the upstream received it unchanged, still brotli-encoded

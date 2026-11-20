@@ -49,13 +49,9 @@ impl Client {
         let target = codec::hash(&body);
         // a clone of each base (refcounted, no copy), so the scan runs outside the lock
         let bases: Vec<(Hash, Bytes)> = self.lock().iter().cloned().collect();
-        let shared = |base: &[u8]| {
-            let p = codec::common_prefix(base, &body);
-            p + codec::common_suffix(&base[p..], &body[p..])
-        };
         let delta = bases
             .iter()
-            .max_by_key(|(_, base)| shared(base))
+            .max_by_key(|(_, base)| codec::shared(base, &body))
             .map(|(hash, base)| codec::encode(base, hash, &body, &target))
             .filter(|delta| delta.len() < body.len());
         Prepared { body, target, delta }
