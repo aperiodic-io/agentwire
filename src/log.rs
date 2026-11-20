@@ -22,9 +22,11 @@ use crate::codec::{self, Hash};
 
 const MAGIC: &[u8; 4] = b"AWL1";
 const VERSION: u8 = 1;
-/// ponytail: fixed chain length; reading record i rebuilds at most this many bodies. A knob if
-/// random reads of multi-MB records show up as slow.
-const MAX_DEPTH: usize = 64;
+/// Reading one record rebuilds at most this many bodies, and at most `MAX_CHAIN_BYTES` of them; the
+/// writer then stores a record whole. Small spans chain for long, multi-MB requests restart sooner.
+/// ponytail: fixed bounds; a knob if random reads (or ratio) need another trade-off
+const MAX_DEPTH: usize = 4096;
+const MAX_CHAIN_BYTES: usize = if cfg!(test) { 1 << 20 } else { 1 << 30 };
 
 /// Appends records to an AWL1 file. Write it through a `BufWriter`; the file is readable up to
 /// the last complete record at any time, so flush when a record must survive a crash.
@@ -41,7 +43,9 @@ struct Recent {
     index: u64,
     hash: Hash,
     body: Bytes,
+    /// bodies, and their bytes, rebuilt to read this record
     depth: usize,
+    chain: usize,
 }
 
 impl<W: Write> Writer<W> {
@@ -58,16 +62,17 @@ impl<W: Write> Writer<W> {
     pub fn append(&mut self, meta: &[u8], body: Bytes) -> io::Result<u64> {
         let hash = codec::hash(&body);
         let encode = |base: Option<&Recent>| match base {
-            Some(r) => (self.next - r.index, r.depth + 1, codec::encode(&r.body, &r.hash, &body, &hash)),
-            None => (0, 0, codec::encode(b"", &codec::hash(b""), &body, &hash)),
+            Some(r) => (self.next - r.index, r.depth + 1, r.chain, codec::encode(&r.body, &r.hash, &body, &hash)),
+            None => (0, 0, 0, codec::encode(b"", &codec::hash(b""), &body, &hash)),
         };
-        let bases: Vec<&Recent> = self.recent.iter().filter(|r| r.depth + 1 < MAX_DEPTH).collect();
+        let fits = |r: &&Recent| r.depth + 1 < MAX_DEPTH && r.chain + body.len() <= MAX_CHAIN_BYTES;
+        let bases: Vec<&Recent> = self.recent.iter().filter(fits).collect();
         let best = bases.iter().map(|r| (codec::shared(&r.body, &body), *r)).max_by_key(|(shared, _)| *shared);
         // a re-sent context shares most of its bytes at the edges: that base, one encode. Otherwise
         // (ids before the prompt, as spans have) the edges say little: try none (it wins a tie), then
         // every base.
         // ponytail: `window` encodes per such record; sample-hash the bases if that shows in CPU
-        let (back, depth, delta) = match best {
+        let (back, depth, chain, delta) = match best {
             Some((shared, r)) if shared * 2 >= body.len() => encode(Some(r)),
             _ => {
                 [None].into_iter().chain(bases.into_iter().map(Some)).map(encode).min_by_key(|(.., d)| d.len()).unwrap()
@@ -84,7 +89,8 @@ impl<W: Write> Writer<W> {
             if self.recent.len() == self.window {
                 self.recent.pop_front();
             }
-            self.recent.push_back(Recent { index, hash, body, depth });
+            let chain = chain + body.len();
+            self.recent.push_back(Recent { index, hash, body, depth, chain });
         }
         Ok(index)
     }
@@ -334,8 +340,34 @@ mod tests {
         for i in [99, 0, 64, 65, 37] {
             assert_eq!(r.get(i).unwrap(), records[i].1, "record {i}");
         }
-        assert_eq!(r.records()[MAX_DEPTH].back, 0, "a chain stops at {MAX_DEPTH} and starts again whole");
         assert_eq!(r.get(100).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_long_trace_keeps_its_own_chain() {
+        // 100 spans per trace, interleaved: a count cap of 64 sent span 64 of each to another trace
+        let span = |n: &str, t: usize| Bytes::from((0..t).map(|i| format!("{n}{i} ")).collect::<String>());
+        let records: Vec<_> = (1..=100).flat_map(|t| ["a", "b", "c"].map(|n| (vec![], span(n, t)))).collect();
+        let file = write(4, &records);
+        assert!(open(&file).unwrap().records()[3..].iter().all(|r| r.back == 3));
+    }
+
+    #[test]
+    fn reading_a_record_rebuilds_a_bounded_chain() {
+        // by bytes: ~20 KB bodies against a (test-sized) 1 MiB budget
+        let records: Vec<_> = (1..=100).map(|t| (vec![], request("a", t))).collect();
+        let file = write(1, &records);
+        let r = open(&file).unwrap();
+        let restart = r.records().iter().skip(1).position(|r| r.back == 0).unwrap() + 1;
+        let chain: usize = records[..restart + 1].iter().map(|(_, b)| b.len()).sum();
+        assert!(chain > MAX_CHAIN_BYTES, "restarted at {restart}, its chain would rebuild {chain} bytes");
+        assert!(chain - records[restart].1.len() <= MAX_CHAIN_BYTES);
+        // by records: tiny bodies never reach the byte budget
+        let records: Vec<_> = (0..MAX_DEPTH + 1).map(|i| (vec![], Bytes::from(format!("x{i}")))).collect();
+        let file = write(1, &records);
+        let r = open(&file).unwrap();
+        assert_eq!(r.records()[MAX_DEPTH].back, 0, "a chain stops at {MAX_DEPTH} records");
+        assert!(r.records()[1..MAX_DEPTH].iter().all(|r| r.back == 1));
     }
 
     #[test]

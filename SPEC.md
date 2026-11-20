@@ -141,8 +141,8 @@ inside a record holds the records before it: a writer that stopped mid-write los
 it was writing.
 
 A writer SHOULD bound the chain behind any record, so reading one rebuilds a bounded number of
-bodies. The reference writer starts again with a whole record every 64. `meta` is not covered by
-any hash. Put what must be verified in the body.
+bodies. The reference writer starts again with a whole record once a chain would rebuild 4,096
+records or 1 GiB. `meta` is not covered by any hash. Put what must be verified in the body.
 
 Only bodies are stored. `agentwire server --record-dir` writes the time, the method and the path as
 `meta`, never a header. A file holds everything in it in the clear: protect it as you would the
