@@ -353,6 +353,7 @@ impl Recording {
         let n = body.len() as u64;
         let appended = self.writer.append(meta, body).and_then(|_| self.writer.flush());
         if let Err(e) = appended {
+            tracing::error!(error = %e, path = %self.path.display(), "recording failed; forwarding the request unrecorded");
             self.failures += 1;
             let _ = self.next_file();
             return Err(e);
@@ -422,9 +423,9 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
             let meta = format!("{} {} {path} {} {encoding}", unix_ms(), parts.method, ct.as_deref().unwrap_or("-"));
             // stored and flushed before it is forwarded: what the upstream saw is on disk
             // ponytail: one writer behind a lock; a writer per shard if recording limits throughput
-            let written = tokio::task::spawn_blocking(move || lock(&record).append(meta.as_bytes(), stored)).await;
-            if !matches!(written, Ok(Ok(()))) {
-                tracing::error!(?written, "recording failed; forwarding the request unrecorded");
+            // a failed write is logged and counted where it happens; it never stops the request
+            if let Err(e) = tokio::task::spawn_blocking(move || lock(&record).append(meta.as_bytes(), stored)).await {
+                tracing::error!(error = %e, "recording panicked; forwarding the request unrecorded");
             }
             Ok(match upstream {
                 Some(upstream) => forward(&http, upstream, &parts, body).await,
@@ -785,6 +786,22 @@ mod tests {
             .collect();
         assert_eq!(bodies, [&b"before"[..], b"after"]);
         assert!(r.metrics().contains("agentwire_record_failures_total 1\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn files_rotated_within_a_millisecond_get_their_own_names_in_order() {
+        let dir = std::env::temp_dir().join(format!("agentwire-rotation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = Recording::open(dir.clone(), 1, 1).unwrap(); // every record fills its file
+        for body in ["a", "b", "c"] {
+            r.append(b"", Bytes::from(body)).unwrap();
+        }
+        let mut names: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        names.sort();
+        let seqs: Vec<&str> = names.iter().map(|n| &n[n.len() - 10..n.len() - 4]).collect();
+        assert_eq!(seqs, ["000000", "000001", "000002", "000003"], "{names:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

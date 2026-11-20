@@ -623,6 +623,23 @@ async fn collector_reports(w: &mut Proxies, records: u64, percent: u64) {
     assert!(stored * 100 < body * percent, "{stored} stored for {body}");
 }
 
+#[given(expr = "an agentwire collector recording to a directory, with a size limit of {int} bytes")]
+async fn a_small_collector(w: &mut Proxies, bytes: u64) {
+    w.start_collector(&["--max-body", &bytes.to_string()]).await;
+}
+
+#[when(expr = "an exporter posts a {int}-byte body to be kept as a base")]
+async fn exporter_posts_a_base(w: &mut Proxies, n: usize) {
+    let to = w.server.as_ref().unwrap().addr;
+    w.post_batch(to, "/v1/traces", Bytes::from(vec![b'x'; n]), &[(KEEP, "?1")]).await;
+}
+
+#[then(expr = "it is answered {int}, not kept as a base, and nothing is recorded")]
+async fn refused_as_a_base(w: &mut Proxies, status: u16) {
+    assert!(w.posted.as_ref().unwrap().1.get(KEPT).is_none(), "a body over the limit is never a base");
+    refused_unrecorded(w, status).await;
+}
+
 #[given("an agentwire client in front of that collector")]
 async fn a_client_before_the_collector(w: &mut Proxies) {
     a_client(w).await;

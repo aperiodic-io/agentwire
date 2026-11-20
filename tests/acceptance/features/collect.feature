@@ -40,3 +40,8 @@ Feature: Logs and traces cross the network as deltas and are stored as deltas
     When an exporter posts 24 gzip-compressed JSON batches of spans to "/v1/traces"
     Then the recording spans several files, each readable on its own, holding every batch in order
     And the collector reports 24 records stored in under 25% of their bytes, and no failures
+
+  Scenario: A collector refuses a body over its size limit before it keeps it as a base
+    Given an agentwire collector recording to a directory, with a size limit of 1000 bytes
+    When an exporter posts a 2000-byte body to be kept as a base
+    Then it is answered 413, not kept as a base, and nothing is recorded
