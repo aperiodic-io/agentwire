@@ -147,6 +147,7 @@ records or 1 GiB. `meta` is not covered by any hash. Put what must be verified i
 Only bodies are stored. `agentwire server --record-dir` and `agentwire collect` store a gzip body
 decoded, and write as `meta`, separated by spaces: the time (Unix ms), the method, the path, the
 content type (spaces removed) and the encoding the body is still in, `-` for none or absent. Never
-a header. A file holds everything in it in the clear: protect it as you would the
+a header. For an OTLP/gRPC Export call the body is its one message, decompressed, the path its gRPC
+method and the content type `application/grpc`. A file holds everything in it in the clear: protect it as you would the
 requests, and keep one file per tenant where a tenant's records must be deletable on their own
 (deleting one record means rewriting those that delta against it).

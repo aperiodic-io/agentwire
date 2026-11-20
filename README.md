@@ -140,23 +140,30 @@ whose own trace's last span is 16 records back is tried against the bases in bet
 
 ### Collecting: `agentwire collect`
 
-A log sink for OTLP/HTTP traces and logs, and for any HTTP log plugin. It stores every request body
+A log sink for OTLP traces, logs and metrics, over HTTP or gRPC, and for any HTTP log plugin. It stores every request body
 in AWL1, gzip decoded, with its time, method, path, content type and the encoding it is still in
 (`-` for none; never a header). With `--forward` it then sends each request on, as received, to the
 real backend. Without one it answers OTLP's empty success. Put `agentwire client` in front of an
 exporter and the batches also cross the network as deltas.
 
 ```bash
-agentwire collect --record-dir /var/log/agentwire                         # a sink on :4318
+agentwire collect --record-dir /var/log/agentwire                         # a sink on :4318 and :4317
 agentwire collect --record-dir /var/log/agentwire --forward https://cloud.langfuse.com/api/public/otel
 ```
 
+**OTLP/gRPC.** Each address takes gRPC as well (HTTP/2 without TLS, as `insecure` exporters send
+it). An Export call's one message is stored, decompressed, as the record's body (content type
+`application/grpc`). `--forward` is an OTLP/HTTP endpoint: each Export goes on to it as OTLP/HTTP
+protobuf (`/v1/traces`, `/v1/logs` or `/v1/metrics`), and its answer comes back as the gRPC status
+(429 and 502–504 as `UNAVAILABLE`, which exporters retry). So a gRPC exporter can feed a backend
+that takes only OTLP/HTTP, such as Langfuse. TLS is for a proxy in front.
+
 **Langfuse (or any OTLP backend).** Point the exporter at the collector, keep its headers: they are
-forwarded, never stored. OTLP over gRPC is not supported, so use `http/protobuf` or `http/json`.
+forwarded, never stored.
 
 ```bash
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf   # or grpc, with http://127.0.0.1:4317
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(echo -n "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64 -w0)"
 ```
 
@@ -185,6 +192,7 @@ OpenTelemetry Python SDK's OTLP/HTTP exporter, protobuf and gzip):
 |---|---|---:|
 | SDK → `collect --forward` → Langfuse 3.227 | all 7,643 spans, in Langfuse and in the recording | **3.26 MB** of AWL1 for 338.6 MB of protobuf (104×). Langfuse itself kept 31.6 MiB in ClickHouse (ZSTD(3)) and 356 MB of raw events in S3 |
 | SDK → `collect --forward` → OpenTelemetry Collector 0.115 | all 7,343 chat spans, the same span ids at both ends | 2.63 MB for 338.5 MB (129×) |
+| SDK over **gRPC** (gzip) → `collect --forward` → OpenTelemetry Collector 0.115 (OTLP/HTTP) | all 7,343 chat spans | 3.28 MB for 338.6 MB (103×) |
 | 12 conversations, 4 at a time → Kong 3.9 `ai-proxy` → `http-log` → `collect` | all 329 log entries, each with the request's full message list | 325 KB for 16.8 MB of Kong logs (52×) |
 
 ### Recording a proxy, packing files
@@ -272,8 +280,8 @@ client.confirm(&request, response.headers().get(agentwire::KEPT).and_then(|v| v.
 | Flag | Env | Default | |
 |---|---|---|---|
 | `--record-dir` | `AGENTWIRE_RECORD_DIR` | (required) | The new AWL1 file goes here. |
-| `--forward` | `AGENTWIRE_FORWARD` | none | The backend each request is sent on to, as received. Without one, each is answered 200. |
-| `--listen` | `AGENTWIRE_LISTEN` | `127.0.0.1:4318` | OTLP/HTTP's port, on loopback: whoever reaches it can fill the disk. In a container, `0.0.0.0:4318` on a private network. |
+| `--forward` | `AGENTWIRE_FORWARD` | none | The backend each request is sent on to: as received, or a gRPC Export as OTLP/HTTP protobuf. Without one, each is acknowledged. |
+| `--listen` | `AGENTWIRE_LISTEN` | `127.0.0.1:4318,127.0.0.1:4317` | Where to listen; each address takes OTLP/HTTP and OTLP/gRPC. On loopback: whoever reaches it can fill the disk. In a container, `0.0.0.0:4318,0.0.0.0:4317` on a private network. |
 | `--record-window` | `AGENTWIRE_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per trace or exporter interleaved. |
 | `--rotate-bytes` | `AGENTWIRE_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. Every file reads on its own; deleting old ones (or shipping them to object storage) is yours to schedule. |
 | `--max-body` | `AGENTWIRE_MAX_BODY` | 64 MiB | The largest body stored, after gzip decoding; larger ones are answered 413. |

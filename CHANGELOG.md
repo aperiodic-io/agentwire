@@ -5,6 +5,10 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- `agentwire collect` takes OTLP over gRPC (HTTP/2 without TLS) on every address it listens on, by
+  default 127.0.0.1:4318 and 127.0.0.1:4317. An Export call's message is stored decompressed; with
+  `--forward` it goes on as OTLP/HTTP protobuf, and the backend's answer comes back as the gRPC
+  status.
 - AWL1 (SPEC.md §7): logs of LLM requests or trace spans stored as AWD1 deltas against earlier
   records, every record checked by SHA-256. `agentwire::log::{Writer, Reader}`.
 - `agentwire server --record-dir`: stores each request it forwards (body, time, method, path).
