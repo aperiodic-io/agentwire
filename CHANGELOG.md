@@ -10,7 +10,11 @@ version byte (SPEC.md); a crate release that changes it says so here.
 - `agentwire server --record-dir`: stores each request it forwards (body, time, method, path).
 - `agentwire log pack | unpack | get | ls`: JSON lines in and out of AWL1 files.
 - `agentwire collect`: an OTLP/HTTP and HTTP-log sink that stores what is posted in AWL1, and
-  forwards it unchanged with `--forward`. Gzip bodies are stored decoded.
+  forwards it unchanged with `--forward`. Gzip bodies are stored decoded. It listens on loopback
+  unless told otherwise.
+- Recording (`collect`, `server --record-dir`) starts a new, self-contained file at
+  `--rotate-bytes` (1 GiB), moves to a new file after a failed write, and reports
+  `agentwire_recorded_*` and `agentwire_record_failures_total` metrics.
 - `agentwire client` decodes gzip request bodies before it deltas them, and sends a body in any
   other content coding as is (an `awd1` delta of it used to drop that coding).
 

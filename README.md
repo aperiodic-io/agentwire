@@ -125,7 +125,8 @@ deltas, each against an earlier record ([SPEC.md §7](SPEC.md#7-awl1-a-log-of-bo
 A record costs about its new bytes, any record reads back on its own, and every one is checked by
 SHA-256.
 
-On 7,343 OTel-GenAI-style spans built from 300 public SWE-agent runs (16 traces in flight, 337 MB):
+7,343 OTel-GenAI-style spans built from 300 public SWE-agent runs, 16 traces in flight, as JSON
+lines (`agentwire log pack`, 337 MB):
 
 | Stored as | Size | |
 |---|---:|---:|
@@ -133,8 +134,9 @@ On 7,343 OTel-GenAI-style spans built from 300 public SWE-agent runs (16 traces 
 | messages deduplicated per trace, then zstd-1 blocks | 14.6 MB | 23× |
 | **AWL1, one record per span** | **3.2 MB** | **105×** |
 
-Any span reads back in 64 ms. Writing span-shaped data runs at about 12 MB/s on one core, because
-each span is tried against every base in its window.
+Any span reads back in 64 ms. One record per span writes at about 12 MB/s on one core: a span
+whose own trace's last span is 16 records back is tried against the bases in between. OTLP batches
+(what `collect` stores) usually delta against the batch before them, one encode each.
 
 ### Collecting: `agentwire collect`
 
@@ -159,12 +161,15 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(echo -n "$LANGFUSE_PUBL
 ```
 
 **Kong AI Gateway.** Log payloads from `ai-proxy`, and send each log entry to the collector with
-`http-log` (declarative config; not tested against Kong in this repository):
+`http-log`. Agent prompts are larger than Kong's defaults allow: raise `max_request_body_size`, and
+the body buffer with `KONG_NGINX_HTTP_CLIENT_BODY_BUFFER_SIZE=16m` (a body Kong spills to a temp file
+is answered 400, "request body doesn't contain valid prompts").
 
 ```yaml
 plugins:
   - name: ai-proxy
     config:
+      max_request_body_size: 16777216
       logging: { log_payloads: true, log_statistics: true }
       # route_type, auth, model: as you have them
   - name: http-log
@@ -172,6 +177,15 @@ plugins:
       http_endpoint: http://agentwire-collect:4318/kong
       content_type: application/json
 ```
+
+**Measured against the real thing** (300 public SWE-agent runs, 16 traces in flight, the
+OpenTelemetry Python SDK's OTLP/HTTP exporter, protobuf and gzip):
+
+| Pipeline | What arrived | Stored |
+|---|---|---:|
+| SDK → `collect --forward` → Langfuse 3.227 | all 7,643 spans, in Langfuse and in the recording | **3.26 MB** of AWL1 for 338.6 MB of protobuf (104×). Langfuse itself kept 31.6 MiB in ClickHouse (ZSTD(3)) and 356 MB of raw events in S3 |
+| SDK → `collect --forward` → OpenTelemetry Collector 0.115 | all 7,343 chat spans, the same span ids at both ends | 2.63 MB for 338.5 MB (129×) |
+| 12 conversations, 4 at a time → Kong 3.9 `ai-proxy` → `http-log` → `collect` | all 329 log entries, each with the request's full message list | 325 KB for 16.8 MB of Kong logs (52×) |
 
 ### Recording a proxy, packing files
 
@@ -251,6 +265,7 @@ client.confirm(&request, response.headers().get(agentwire::KEPT).and_then(|v| v.
 | `--metrics` | `AGENTWIRE_METRICS` | off | Prometheus text at `http://<addr>/metrics`, on its own port. |
 | `--record-dir` | `AGENTWIRE_RECORD_DIR` | off | Store every request body forwarded in a new AWL1 file here. Requests are then buffered (up to `--max-body`). |
 | `--record-window` | `AGENTWIRE_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per conversation in flight. |
+| `--rotate-bytes` | `AGENTWIRE_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. |
 
 **`agentwire collect`**: a log sink that stores what is posted to it in AWL1 ([above](#collecting-agentwire-collect)).
 
@@ -258,8 +273,9 @@ client.confirm(&request, response.headers().get(agentwire::KEPT).and_then(|v| v.
 |---|---|---|---|
 | `--record-dir` | `AGENTWIRE_RECORD_DIR` | (required) | The new AWL1 file goes here. |
 | `--forward` | `AGENTWIRE_FORWARD` | none | The backend each request is sent on to, as received. Without one, each is answered 200. |
-| `--listen` | `AGENTWIRE_LISTEN` | `0.0.0.0:4318` | OTLP/HTTP's port. |
+| `--listen` | `AGENTWIRE_LISTEN` | `127.0.0.1:4318` | OTLP/HTTP's port, on loopback: whoever reaches it can fill the disk. In a container, `0.0.0.0:4318` on a private network. |
 | `--record-window` | `AGENTWIRE_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per trace or exporter interleaved. |
+| `--rotate-bytes` | `AGENTWIRE_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. Every file reads on its own; deleting old ones (or shipping them to object storage) is yours to schedule. |
 | `--max-body` | `AGENTWIRE_MAX_BODY` | 64 MiB | The largest body stored, after gzip decoding; larger ones are answered 413. |
 | `--metrics` | `AGENTWIRE_METRICS` | off | |
 
@@ -283,6 +299,8 @@ deltas on.
 | `agentwire_server_refused_total` | Deltas refused (unknown base, corrupt, too large). The client resent each in full. |
 | `agentwire_client_requests_total`, `agentwire_client_deltas_total`, `agentwire_client_resent_total` | Requests, how many went as deltas, and how many were resent in full. |
 | `agentwire_client_body_bytes_total`, `agentwire_client_wire_bytes_total` | Request bytes, and what was sent for them. Their ratio is your saving. |
+| `agentwire_recorded_total`, `agentwire_recorded_body_bytes_total`, `agentwire_recorded_file_bytes_total` | Records stored (`--record-dir`, `collect`), their bytes, and the bytes of the files holding them. Their ratio is the storage saving. |
+| `agentwire_record_failures_total` | Records that could not be written (disk full, I/O error). The request was still forwarded; the next record goes to a new file. |
 
 ### Deploying
 

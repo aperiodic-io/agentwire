@@ -34,3 +34,9 @@ Feature: Logs and traces cross the network as deltas and are stored as deltas
     Given an agentwire collector recording to a directory
     When an exporter posts a gzip body that inflates past the collector's size limit
     Then it is answered 413 and nothing is recorded
+
+  Scenario: A collector starts a new file at the size limit, and each file reads on its own
+    Given an agentwire collector recording to a directory, starting a new file every 100000 bytes
+    When an exporter posts 24 gzip-compressed JSON batches of spans to "/v1/traces"
+    Then the recording spans several files, each readable on its own, holding every batch in order
+    And the collector reports 24 records stored in under 25% of their bytes, and no failures

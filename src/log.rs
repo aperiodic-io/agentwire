@@ -28,6 +28,9 @@ const VERSION: u8 = 1;
 const MAX_DEPTH: usize = 4096;
 const MAX_CHAIN_BYTES: usize = if cfg!(test) { 1 << 20 } else { 1 << 30 };
 
+/// (records back to the base, depth, bytes its chain rebuilds, the AWD1 delta)
+type Encoded = (u64, usize, usize, Vec<u8>);
+
 /// Appends records to an AWL1 file. Write it through a `BufWriter`; the file is readable up to
 /// the last complete record at any time, so flush when a record must survive a crash.
 #[derive(Debug)]
@@ -69,13 +72,28 @@ impl<W: Write> Writer<W> {
         let bases: Vec<&Recent> = self.recent.iter().filter(fits).collect();
         let best = bases.iter().map(|r| (codec::shared(&r.body, &body), *r)).max_by_key(|(shared, _)| *shared);
         // a re-sent context shares most of its bytes at the edges: that base, one encode. Otherwise
-        // (ids before the prompt, as spans have) the edges say little: try none (it wins a tie), then
-        // every base.
-        // ponytail: `window` encodes per such record; sample-hash the bases if that shows in CPU
+        // (ids before the prompt, as spans have) the edges say little: try the bases newest first,
+        // and take the first that makes the record under 1/64 of its size (consecutive OTLP batches:
+        // the first one tried), else the smallest, or the record whole if that is no larger.
+        // ponytail: up to `window` + 1 encodes for a record no base makes small
         let (back, depth, chain, delta) = match best {
             Some((shared, r)) if shared * 2 >= body.len() => encode(Some(r)),
-            _ => {
-                [None].into_iter().chain(bases.into_iter().map(Some)).map(encode).min_by_key(|(.., d)| d.len()).unwrap()
+            _ => 'tried: {
+                let mut smallest: Option<Encoded> = None;
+                for r in bases.into_iter().rev() {
+                    let e = encode(Some(r));
+                    if e.3.len() * 64 <= body.len() {
+                        break 'tried e;
+                    }
+                    if smallest.as_ref().is_none_or(|s| e.3.len() < s.3.len()) {
+                        smallest = Some(e);
+                    }
+                }
+                let whole = encode(None);
+                match smallest {
+                    Some(s) if s.3.len() < whole.3.len() => s,
+                    _ => whole,
+                }
             }
         };
         write_varint(&mut self.out, back)?;
@@ -132,56 +150,9 @@ impl<R: Read + Seek> Reader<R> {
         let mut src = BufReader::new(src);
         let len = src.seek(SeekFrom::End(0))?;
         src.seek(SeekFrom::Start(0))?;
-        let mut magic = [0; 5];
-        src.read_exact(&mut magic).map_err(|_| invalid("not an AWL1 file"))?;
-        if &magic[..4] != MAGIC {
-            return Err(invalid("not an AWL1 file"));
-        }
-        if magic[4] != VERSION {
-            return Err(invalid("unsupported AWL1 version"));
-        }
-        let window = read_varint(&mut src)?.ok_or_else(|| invalid("truncated header"))?;
-        let mut reader = Reader { src, window: window as usize, max_body, records: Vec::new(), truncated: false };
-        reader.index(len)?;
-        Ok(reader)
-    }
-
-    fn index(&mut self, len: u64) -> io::Result<()> {
-        loop {
-            let at = self.src.stream_position()?;
-            if at == len {
-                return Ok(());
-            }
-            match self.next_record(len)? {
-                Some(record) => self.records.push(record),
-                None => {
-                    self.truncated = true;
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    /// The next record's header, its payload skipped; `None` when the file ends inside it.
-    fn next_record(&mut self, len: u64) -> io::Result<Option<Record>> {
-        let n = self.records.len() as u64;
-        let Some(back) = read_varint(&mut self.src)? else { return Ok(None) };
-        if back > n || back > self.window as u64 {
-            return Err(invalid("a record names a base it cannot have"));
-        }
-        let Some(meta_len) = read_varint(&mut self.src)? else { return Ok(None) };
-        if meta_len > len - self.src.stream_position()? {
-            return Ok(None);
-        }
-        let mut meta = vec![0; meta_len as usize];
-        self.src.read_exact(&mut meta)?;
-        let Some(stored) = read_varint(&mut self.src)? else { return Ok(None) };
-        let offset = self.src.stream_position()?;
-        if stored > len - offset {
-            return Ok(None);
-        }
-        self.src.seek_relative(stored as i64)?;
-        Ok(Some(Record { meta, back, stored, offset }))
+        let window = header(&mut src)?;
+        let (records, truncated) = index(&mut src, len, window)?;
+        Ok(Reader { src, window: window as usize, max_body, records, truncated })
     }
 
     pub fn records(&self) -> &[Record] {
@@ -193,14 +164,8 @@ impl<R: Read + Seek> Reader<R> {
         if i >= self.records.len() {
             return Err(io::Error::new(io::ErrorKind::NotFound, "no such record"));
         }
-        let mut chain = vec![i];
-        let mut at = i;
-        while self.records[at].back != 0 {
-            at -= self.records[at].back as usize;
-            chain.push(at);
-        }
         let mut body = Vec::new();
-        for &j in chain.iter().rev() {
+        for &j in chain(&self.records, i).iter().rev() {
             body = self.rebuild(j, &body)?;
         }
         Ok(body)
@@ -236,6 +201,65 @@ impl<R: Read + Seek> Reader<R> {
     }
 }
 
+/// The file header: its magic and version, then the window.
+fn header(src: &mut impl Read) -> io::Result<u64> {
+    let mut magic = [0; 5];
+    src.read_exact(&mut magic).map_err(|_| invalid("not an AWL1 file"))?;
+    if &magic[..4] != MAGIC {
+        return Err(invalid("not an AWL1 file"));
+    }
+    if magic[4] != VERSION {
+        return Err(invalid("unsupported AWL1 version"));
+    }
+    read_varint(src)?.ok_or_else(|| invalid("truncated header"))
+}
+
+/// Every record's place from `src`'s position to `len`, payloads skipped; and whether the file ends
+/// inside a record (the records before it are whole).
+fn index(src: &mut (impl Read + Seek), len: u64, window: u64) -> io::Result<(Vec<Record>, bool)> {
+    let mut records = Vec::new();
+    while src.stream_position()? != len {
+        match next_record(src, len, records.len() as u64, window)? {
+            Some(record) => records.push(record),
+            None => return Ok((records, true)),
+        }
+    }
+    Ok((records, false))
+}
+
+/// Record `n`'s header, its payload skipped; `None` when the file ends inside it.
+fn next_record(src: &mut (impl Read + Seek), len: u64, n: u64, window: u64) -> io::Result<Option<Record>> {
+    let Some(back) = read_varint(src)? else { return Ok(None) };
+    if back > n || back > window {
+        return Err(invalid("a record names a base it cannot have"));
+    }
+    let Some(meta_len) = read_varint(src)? else { return Ok(None) };
+    if meta_len > len - src.stream_position()? {
+        return Ok(None);
+    }
+    let mut meta = vec![0; meta_len as usize];
+    src.read_exact(&mut meta)?;
+    let Some(stored) = read_varint(src)? else { return Ok(None) };
+    let offset = src.stream_position()?;
+    if stored > len - offset {
+        return Ok(None);
+    }
+    src.seek(SeekFrom::Start(offset + stored))?;
+    Ok(Some(Record { meta, back, stored, offset }))
+}
+
+/// Record `i`, its base, its base's base, … down to one stored whole. `open` admitted only records
+/// with `back <= index`, so each step goes strictly down and stays in bounds.
+fn chain(records: &[Record], i: usize) -> Vec<usize> {
+    let mut chain = vec![i];
+    let mut at = i;
+    while records[at].back != 0 {
+        at -= records[at].back as usize;
+        chain.push(at);
+    }
+    chain
+}
+
 fn invalid(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e)
 }
@@ -257,6 +281,69 @@ fn read_varint(src: &mut impl Read) -> io::Result<Option<u64>> {
         buf.push(byte[0]);
         if byte[0] & 0x80 == 0 || buf.len() == 10 {
             return codec::read_varint(&buf).map(|(v, _)| Some(v)).map_err(invalid);
+        }
+    }
+}
+
+/// Kani proofs over every input of a bounded size: the reader's parsing and index arithmetic never
+/// panic, and admit only what SPEC.md §7 allows. zstd and SHA-256 (in `rebuild`) are C and assembly
+/// Kani does not model; the property tests and the `log` fuzz target cover them.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+    use std::io::Cursor;
+
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn a_varint_from_a_stream_is_the_codecs_or_ends_early() {
+        let bytes: [u8; 11] = kani::any();
+        let len: usize = kani::any_where(|&l: &usize| l <= 11);
+        match read_varint(&mut &bytes[..len]) {
+            Ok(Some(v)) => {
+                let mut again = Vec::new();
+                codec::write_varint(&mut again, v);
+                assert!(again[..] == bytes[..again.len()], "the canonical encoding it read");
+            }
+            // the stream ended inside it: every byte read was a continuation byte
+            Ok(None) => assert!(len < 10 && bytes[..len].iter().all(|b| b & 0x80 != 0)),
+            Err(e) => assert!(e.kind() == io::ErrorKind::InvalidData),
+        }
+    }
+
+    /// Any bytes (up to 5: one record's header and payload), any record count and window: a record
+    /// is admitted only if it fits the file and names a base the count and window allow. `index`
+    /// pushes only what this returns, with the count so far, so every index it builds holds this.
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn a_record_is_admitted_only_if_it_fits_the_file_and_the_window() {
+        let bytes: [u8; 5] = kani::any();
+        let len: usize = kani::any_where(|&l: &usize| l <= 5);
+        let (n, window): (u64, u64) = (kani::any(), kani::any());
+        let mut src = Cursor::new(&bytes[..len]);
+        if let Ok(Some(r)) = next_record(&mut src, len as u64, n, window) {
+            assert!(r.back <= n && r.back <= window);
+            assert!(r.offset + r.stored <= len as u64);
+            assert!(src.position() == r.offset + r.stored, "the next record starts after this one");
+        }
+    }
+
+    /// Any index `open` can admit: the chain behind any record ends at one stored whole, in bounds.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn a_chain_walks_down_to_a_whole_record() {
+        const N: usize = 4;
+        let backs: [u64; N] = kani::any();
+        let records: Vec<Record> = (0..N)
+            .map(|i| {
+                kani::assume(backs[i] <= i as u64);
+                Record { meta: Vec::new(), back: backs[i], stored: 0, offset: 0 }
+            })
+            .collect();
+        let i: usize = kani::any_where(|&i: &usize| i < N);
+        let c = chain(&records, i);
+        assert!(c[0] == i && records[*c.last().unwrap()].back == 0);
+        for w in c.windows(2) {
+            assert!(w[1] < w[0] && w[0] - w[1] == records[w[0]].back as usize);
         }
     }
 }

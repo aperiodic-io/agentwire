@@ -76,12 +76,17 @@ enum Mode {
         /// Records a new one may delta against: about one per conversation in flight.
         #[arg(long, env = "AGENTWIRE_RECORD_WINDOW", default_value_t = 16)]
         record_window: usize,
+        /// Start a new AWL1 file once one reaches this size; every file reads on its own.
+        #[arg(long, env = "AGENTWIRE_ROTATE_BYTES", default_value_t = 1 << 30)]
+        rotate_bytes: u64,
     },
     /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
     /// AWL1, gzip decoded; forward each request as received when given a backend. Also accepts
     /// AWD1 deltas from `agentwire client`.
     Collect {
-        #[arg(long, env = "AGENTWIRE_LISTEN", default_value = "0.0.0.0:4318")]
+        /// Loopback by default: anyone who can reach it can fill the disk. In a container, give
+        /// 0.0.0.0:4318 and put it on a private network.
+        #[arg(long, env = "AGENTWIRE_LISTEN", default_value = "127.0.0.1:4318")]
         listen: SocketAddr,
         /// The new AWL1 file goes in this directory; read it with `agentwire log`.
         #[arg(long, env = "AGENTWIRE_RECORD_DIR")]
@@ -93,6 +98,9 @@ enum Mode {
         /// Records a new one may delta against: about one per trace or exporter interleaved.
         #[arg(long, env = "AGENTWIRE_RECORD_WINDOW", default_value_t = 16)]
         record_window: usize,
+        /// Start a new AWL1 file once one reaches this size; every file reads on its own.
+        #[arg(long, env = "AGENTWIRE_ROTATE_BYTES", default_value_t = 1 << 30)]
+        rotate_bytes: u64,
         /// The largest body stored, after gzip decoding.
         #[arg(long, env = "AGENTWIRE_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
@@ -173,9 +181,10 @@ async fn main() -> Result<(), BoxError> {
             metrics,
             record_dir,
             record_window,
+            rotate_bytes,
         } => {
             let record = match record_dir {
-                Some(dir) => Some(Arc::new(Mutex::new(recorder(&dir, record_window)?))),
+                Some(dir) => Some(Arc::new(Mutex::new(Recording::open(dir, record_window, rotate_bytes)?))),
                 None => None,
             };
             let store = Store::new(store_bytes, Duration::from_secs(ttl_seconds));
@@ -184,8 +193,8 @@ async fn main() -> Result<(), BoxError> {
             let forward = Forward { http, upstream: Some(Arc::new(upstream)), record, max_body };
             run_server(listen, store, Config { max_body, scope_headers }, metrics, forward).await
         }
-        Mode::Collect { listen, record_dir, forward, record_window, max_body, metrics } => {
-            let record = Some(Arc::new(Mutex::new(recorder(&record_dir, record_window)?)));
+        Mode::Collect { listen, record_dir, forward, record_window, rotate_bytes, max_body, metrics } => {
+            let record = Some(Arc::new(Mutex::new(Recording::open(record_dir, record_window, rotate_bytes)?)));
             let forward = Forward { http, upstream: forward.map(Arc::new), record, max_body };
             let config = Config { max_body, ..Config::default() };
             run_server(listen, Store::new(1 << 30, Duration::from_secs(1800)), config, metrics, forward).await
@@ -225,10 +234,13 @@ async fn run_server(
     let store = Arc::new(store);
     let layer = Awd1Layer::new(store.clone(), config);
     if let Some(addr) = metrics {
-        let (stats, store) = (layer.stats().clone(), store.clone());
-        serve_metrics(addr, move || server_metrics(&stats, &store)).await?;
+        let (stats, store, record) = (layer.stats().clone(), store.clone(), forward.record.clone());
+        serve_metrics(addr, move || {
+            server_metrics(&stats, &store) + &record.as_ref().map_or_else(String::new, |r| lock(r).metrics())
+        })
+        .await?;
     }
-    let service = layer.layer(forward);
+    let service = layer.layer(forward.clone());
     serve(listen, move || TowerToHyperService::new(service.clone())).await
 }
 
@@ -277,17 +289,92 @@ async fn shutdown_signal() {
     }
 }
 
-type Recorder = Arc<Mutex<log::Writer<BufWriter<File>>>>;
+type Recorder = Arc<Mutex<Recording>>;
 
-/// A new file in `dir`, named by the time it was opened: a restart never appends to, or replaces, one.
-fn recorder(dir: &std::path::Path, window: usize) -> Result<log::Writer<BufWriter<File>>, BoxError> {
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join(format!("{}-{}.awl", unix_ms(), std::process::id()));
-    let file = File::options().write(true).create_new(true).open(&path)?;
-    tracing::info!(path = %path.display(), "recording");
-    let mut w = log::Writer::new(BufWriter::new(file), window)?;
-    w.flush()?; // a valid, empty AWL1 file before the first record
-    Ok(w)
+fn lock(r: &Recorder) -> std::sync::MutexGuard<'_, Recording> {
+    // every append completes, or fails and moves to a new file, under the lock
+    r.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// AWL1 files in `dir`, named by when each was opened, so a restart never appends to or replaces
+/// one, and in order by name. Each is self-contained: a new one starts without bases.
+struct Recording {
+    dir: PathBuf,
+    window: usize,
+    rotate_bytes: u64,
+    path: PathBuf,
+    writer: log::Writer<BufWriter<File>>,
+    seq: u64,
+    /// bytes of the files already closed
+    closed: u64,
+    recorded: u64,
+    body_bytes: u64,
+    failures: u64,
+}
+
+impl Recording {
+    fn open(dir: PathBuf, window: usize, rotate_bytes: u64) -> io::Result<Self> {
+        std::fs::create_dir_all(&dir)?;
+        let (path, writer) = Self::create(&dir, window, 0)?;
+        Ok(Recording {
+            dir,
+            window,
+            rotate_bytes,
+            path,
+            writer,
+            seq: 0,
+            closed: 0,
+            recorded: 0,
+            body_bytes: 0,
+            failures: 0,
+        })
+    }
+
+    fn create(dir: &std::path::Path, window: usize, seq: u64) -> io::Result<(PathBuf, log::Writer<BufWriter<File>>)> {
+        let path = dir.join(format!("{}-{}-{seq:06}.awl", unix_ms(), std::process::id()));
+        let file = File::options().write(true).create_new(true).open(&path)?;
+        tracing::info!(path = %path.display(), "recording");
+        let mut w = log::Writer::new(BufWriter::new(file), window)?;
+        w.flush()?; // a valid, empty AWL1 file before the first record
+        Ok((path, w))
+    }
+
+    fn next_file(&mut self) -> io::Result<()> {
+        let len = std::fs::metadata(&self.path).map_or(0, |m| m.len());
+        let (path, writer) = Self::create(&self.dir, self.window, self.seq + 1)?;
+        (self.closed, self.seq, self.path, self.writer) = (self.closed + len, self.seq + 1, path, writer);
+        Ok(())
+    }
+
+    /// Appends and flushes one record, then starts a new file if this one is full. A failed write
+    /// may leave a part of a record at the end of the file: readers keep the records before it, and
+    /// the next record goes to a new file.
+    fn append(&mut self, meta: &[u8], body: Bytes) -> io::Result<()> {
+        let n = body.len() as u64;
+        let appended = self.writer.append(meta, body).and_then(|_| self.writer.flush());
+        if let Err(e) = appended {
+            self.failures += 1;
+            let _ = self.next_file();
+            return Err(e);
+        }
+        self.recorded += 1;
+        self.body_bytes += n;
+        if std::fs::metadata(&self.path)?.len() >= self.rotate_bytes {
+            self.next_file()?;
+        }
+        Ok(())
+    }
+
+    fn metrics(&self) -> String {
+        let on_disk = self.closed + std::fs::metadata(&self.path).map_or(0, |m| m.len());
+        format!(
+            "# TYPE agentwire_recorded_total counter\nagentwire_recorded_total {}\n\
+             # TYPE agentwire_recorded_body_bytes_total counter\nagentwire_recorded_body_bytes_total {}\n\
+             # TYPE agentwire_recorded_file_bytes_total counter\nagentwire_recorded_file_bytes_total {on_disk}\n\
+             # TYPE agentwire_record_failures_total counter\nagentwire_record_failures_total {}\n",
+            self.recorded, self.body_bytes, self.failures,
+        )
+    }
 }
 
 fn unix_ms() -> u128 {
@@ -335,12 +422,7 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
             let meta = format!("{} {} {path} {} {encoding}", unix_ms(), parts.method, ct.as_deref().unwrap_or("-"));
             // stored and flushed before it is forwarded: what the upstream saw is on disk
             // ponytail: one writer behind a lock; a writer per shard if recording limits throughput
-            let written = tokio::task::spawn_blocking(move || {
-                let mut w = record.lock().unwrap_or_else(|p| p.into_inner());
-                w.append(meta.as_bytes(), stored)?;
-                w.flush()
-            })
-            .await;
+            let written = tokio::task::spawn_blocking(move || lock(&record).append(meta.as_bytes(), stored)).await;
             if !matches!(written, Ok(Ok(()))) {
                 tracing::error!(?written, "recording failed; forwarding the request unrecorded");
             }
@@ -678,6 +760,32 @@ mod tests {
         let r = ack(&with("application/x-protobuf"));
         assert_eq!(r.headers()[header::CONTENT_TYPE], "application/x-protobuf");
         assert!(ack(&HeaderMap::new()).headers().get(header::CONTENT_TYPE).is_none());
+    }
+
+    #[test]
+    fn a_failed_write_moves_recording_to_a_new_file_and_loses_nothing_after_it() {
+        let dir = std::env::temp_dir().join(format!("agentwire-recording-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = Recording::open(dir.clone(), 4, 1 << 30).unwrap();
+        r.append(b"m", Bytes::from_static(b"before")).unwrap();
+        // the disk fills up: /dev/full fails every write with ENOSPC
+        let full = File::options().write(true).open("/dev/full").unwrap();
+        r.writer = log::Writer::new(BufWriter::new(full), 4).unwrap(); // the header waits in the buffer
+        assert!(r.append(b"m", Bytes::from_static(b"lost")).is_err());
+        r.append(b"m", Bytes::from_static(b"after")).unwrap();
+        assert_eq!((r.recorded, r.failures), (2, 1));
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        let bodies: Vec<Vec<u8>> = files
+            .iter()
+            .flat_map(|f| {
+                let mut reader = log::Reader::open(File::open(f).unwrap(), 1 << 20).unwrap();
+                (0..reader.records().len()).map(|i| reader.get(i).unwrap()).collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(bodies, [&b"before"[..], b"after"]);
+        assert!(r.metrics().contains("agentwire_record_failures_total 1\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -530,10 +530,11 @@ fn batch(turn: usize) -> Bytes {
 }
 
 impl Proxies {
-    async fn start_collector(&mut self) {
+    async fn start_collector(&mut self, extra: &[&str]) {
         self.record_dir = Some(scratch("collect"));
         let dir = self.record_dir.as_ref().unwrap().to_str().unwrap().to_owned();
         let mut args = vec!["collect".to_owned(), "--record-dir".to_owned(), dir];
+        args.extend(extra.iter().map(|a| a.to_string()));
         if let Some((addr, ..)) = &self.upstream {
             args.extend(["--forward".to_owned(), format!("http://{addr}")]);
         }
@@ -577,12 +578,49 @@ impl Proxies {
 
 #[given("an agentwire collector recording to a directory")]
 async fn a_collector(w: &mut Proxies) {
-    w.start_collector().await;
+    w.start_collector(&[]).await;
 }
 
 #[given("an agentwire collector in front of it, recording to a directory")]
 async fn a_forwarding_collector(w: &mut Proxies) {
-    w.start_collector().await;
+    w.start_collector(&[]).await;
+}
+
+#[given(expr = "an agentwire collector recording to a directory, starting a new file every {int} bytes")]
+async fn a_rotating_collector(w: &mut Proxies, bytes: u64) {
+    w.start_collector(&["--rotate-bytes", &bytes.to_string()]).await;
+}
+
+#[then("the recording spans several files, each readable on its own, holding every batch in order")]
+async fn recording_spans_files(w: &mut Proxies) {
+    let mut files: Vec<_> =
+        std::fs::read_dir(w.record_dir.as_ref().unwrap()).unwrap().map(|e| e.unwrap().path()).collect();
+    files.sort();
+    assert!(files.len() > 1, "{files:?}");
+    let mut bodies = Vec::new();
+    for (k, f) in files.iter().enumerate() {
+        let f = f.to_str().unwrap();
+        let n = String::from_utf8(log(&["ls", f], b"").await).unwrap().lines().count();
+        // the newest is the one the next record goes to: it may hold none yet
+        assert!(n > 0 || k == files.len() - 1, "{f} is empty");
+        for i in 0..n {
+            bodies.push(Bytes::from(log(&["get", f, &i.to_string()], b"").await));
+        }
+    }
+    assert!(bodies.iter().eq(w.sent.iter().map(|s| &s.body)), "every batch, in order, once");
+}
+
+#[then(expr = "the collector reports {int} records stored in under {int}% of their bytes, and no failures")]
+async fn collector_reports(w: &mut Proxies, records: u64, percent: u64) {
+    assert_eq!(w.metric(&w.server, "agentwire_recorded_total").await, records);
+    assert_eq!(w.metric(&w.server, "agentwire_record_failures_total").await, 0);
+    let body = w.metric(&w.server, "agentwire_recorded_body_bytes_total").await;
+    let stored = w.metric(&w.server, "agentwire_recorded_file_bytes_total").await;
+    assert_eq!(body, w.sent.iter().map(|s| s.body.len() as u64).sum::<u64>());
+    let on_disk: u64 =
+        std::fs::read_dir(w.record_dir.as_ref().unwrap()).unwrap().map(|e| e.unwrap().metadata().unwrap().len()).sum();
+    assert_eq!(stored, on_disk, "what the metric says is on disk");
+    assert!(stored * 100 < body * percent, "{stored} stored for {body}");
 }
 
 #[given("an agentwire client in front of that collector")]
