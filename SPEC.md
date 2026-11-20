@@ -144,7 +144,9 @@ A writer SHOULD bound the chain behind any record, so reading one rebuilds a bou
 bodies. The reference writer starts again with a whole record once a chain would rebuild 4,096
 records or 1 GiB. `meta` is not covered by any hash. Put what must be verified in the body.
 
-Only bodies are stored. `agentwire server --record-dir` writes the time, the method and the path as
-`meta`, never a header. A file holds everything in it in the clear: protect it as you would the
+Only bodies are stored. `agentwire server --record-dir` and `agentwire collect` store a gzip body
+decoded, and write as `meta`, separated by spaces: the time (Unix ms), the method, the path, the
+content type (spaces removed) and the encoding the body is still in, `-` for none or absent. Never
+a header. A file holds everything in it in the clear: protect it as you would the
 requests, and keep one file per tenant where a tenant's records must be deletable on their own
 (deleting one record means rewriting those that delta against it).

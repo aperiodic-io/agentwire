@@ -117,7 +117,7 @@ AWD1 is a codec a client and a server embed, the way they embed gzip. Pick by wh
 | **Only the client**: you call Anthropic, OpenAI, … | `agentwire server` as a reverse proxy near the provider. It is the same layer in front of a forwarder. |
 | **Neither**: a CLI tool such as Claude Code or Codex | `agentwire client` on the tool's machine, talking to an `agentwire server`. |
 
-## Storing LLM calls: AWL1
+## Storing logs and traces: AWL1
 
 Gateways log every request for audit and replay, and tracing pipelines store every span, each with
 the whole prompt. That is the same re-sent context, at rest. **AWL1** stores such a log as AWD1
@@ -125,9 +125,59 @@ deltas, each against an earlier record ([SPEC.md §7](SPEC.md#7-awl1-a-log-of-bo
 A record costs about its new bytes, any record reads back on its own, and every one is checked by
 SHA-256.
 
+On 7,343 OTel-GenAI-style spans built from 300 public SWE-agent runs (16 traces in flight, 337 MB):
+
+| Stored as | Size | |
+|---|---:|---:|
+| zstd-1, 1 MiB blocks, arrival order (a column store's blocks) | 34.6 MB | 9.7× |
+| messages deduplicated per trace, then zstd-1 blocks | 14.6 MB | 23× |
+| **AWL1, one record per span** | **3.2 MB** | **105×** |
+
+Any span reads back in 64 ms. Writing span-shaped data runs at about 12 MB/s on one core, because
+each span is tried against every base in its window.
+
+### Collecting: `agentwire collect`
+
+A log sink for OTLP/HTTP traces and logs, and for any HTTP log plugin. It stores every request body
+in AWL1, gzip decoded, with its time, method, path, content type and the encoding it is still in
+(`-` for none; never a header). With `--forward` it then sends each request on, as received, to the
+real backend. Without one it answers OTLP's empty success. Put `agentwire client` in front of an
+exporter and the batches also cross the network as deltas.
+
+```bash
+agentwire collect --record-dir /var/log/agentwire                         # a sink on :4318
+agentwire collect --record-dir /var/log/agentwire --forward https://cloud.langfuse.com/api/public/otel
+```
+
+**Langfuse (or any OTLP backend).** Point the exporter at the collector, keep its headers: they are
+forwarded, never stored. OTLP over gRPC is not supported, so use `http/protobuf` or `http/json`.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(echo -n "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64 -w0)"
+```
+
+**Kong AI Gateway.** Log payloads from `ai-proxy`, and send each log entry to the collector with
+`http-log` (declarative config; not tested against Kong in this repository):
+
+```yaml
+plugins:
+  - name: ai-proxy
+    config:
+      logging: { log_payloads: true, log_statistics: true }
+      # route_type, auth, model: as you have them
+  - name: http-log
+    config:
+      http_endpoint: http://agentwire-collect:4318/kong
+      content_type: application/json
+```
+
+### Recording a proxy, packing files
+
 **A gateway:** let `agentwire server` record what it forwards. Each request is on disk before it
-reaches the upstream, with its time, method and path (never its headers). If a write fails, the
-error is logged and the request is still forwarded.
+reaches the upstream, with the same meta as `collect`. If a write fails, the error is logged and the
+request is still forwarded.
 
 ```bash
 agentwire server --upstream https://api.anthropic.com --record-dir /var/log/agentwire
@@ -201,6 +251,17 @@ client.confirm(&request, response.headers().get(agentwire::KEPT).and_then(|v| v.
 | `--metrics` | `AGENTWIRE_METRICS` | off | Prometheus text at `http://<addr>/metrics`, on its own port. |
 | `--record-dir` | `AGENTWIRE_RECORD_DIR` | off | Store every request body forwarded in a new AWL1 file here. Requests are then buffered (up to `--max-body`). |
 | `--record-window` | `AGENTWIRE_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per conversation in flight. |
+
+**`agentwire collect`**: a log sink that stores what is posted to it in AWL1 ([above](#collecting-agentwire-collect)).
+
+| Flag | Env | Default | |
+|---|---|---|---|
+| `--record-dir` | `AGENTWIRE_RECORD_DIR` | (required) | The new AWL1 file goes here. |
+| `--forward` | `AGENTWIRE_FORWARD` | none | The backend each request is sent on to, as received. Without one, each is answered 200. |
+| `--listen` | `AGENTWIRE_LISTEN` | `0.0.0.0:4318` | OTLP/HTTP's port. |
+| `--record-window` | `AGENTWIRE_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per trace or exporter interleaved. |
+| `--max-body` | `AGENTWIRE_MAX_BODY` | 64 MiB | The largest body stored, after gzip decoding; larger ones are answered 413. |
+| `--metrics` | `AGENTWIRE_METRICS` | off | |
 
 **`agentwire client`**: for tools you cannot change. They post plain requests to it, and it sends
 deltas on.

@@ -9,6 +9,10 @@ version byte (SPEC.md); a crate release that changes it says so here.
   records, every record checked by SHA-256. `agentwire::log::{Writer, Reader}`.
 - `agentwire server --record-dir`: stores each request it forwards (body, time, method, path).
 - `agentwire log pack | unpack | get | ls`: JSON lines in and out of AWL1 files.
+- `agentwire collect`: an OTLP/HTTP and HTTP-log sink that stores what is posted in AWL1, and
+  forwards it unchanged with `--forward`. Gzip bodies are stored decoded.
+- `agentwire client` decodes gzip request bodies before it deltas them, and sends a body in any
+  other content coding as is (an `awd1` delta of it used to drop that coding).
 
 ## [0.1.0]
 

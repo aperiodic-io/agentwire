@@ -1,11 +1,13 @@
 //! `agentwire server`: the AWD1 layer as a reverse proxy in front of an HTTP API.
 //! `agentwire client`: a local proxy that sends what a tool posts to it as AWD1 deltas.
-//! `agentwire log`: pack, list and read AWL1 files (what `agentwire server --record-dir` writes).
+//! `agentwire collect`: a log sink (OTLP/HTTP, a gateway's HTTP log plugin) that stores every
+//! request body in AWL1, and forwards it unchanged when given a backend.
+//! `agentwire log`: pack, list and read AWL1 files (what `--record-dir` and `collect` write).
 
 use std::convert::Infallible;
 use std::fs::File;
 use std::future::Future;
-use std::io::{self, BufRead, BufWriter, Write};
+use std::io::{self, BufRead, BufWriter, Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -74,6 +76,28 @@ enum Mode {
         /// Records a new one may delta against: about one per conversation in flight.
         #[arg(long, env = "AGENTWIRE_RECORD_WINDOW", default_value_t = 16)]
         record_window: usize,
+    },
+    /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
+    /// AWL1, gzip decoded; forward each request as received when given a backend. Also accepts
+    /// AWD1 deltas from `agentwire client`.
+    Collect {
+        #[arg(long, env = "AGENTWIRE_LISTEN", default_value = "0.0.0.0:4318")]
+        listen: SocketAddr,
+        /// The new AWL1 file goes in this directory; read it with `agentwire log`.
+        #[arg(long, env = "AGENTWIRE_RECORD_DIR")]
+        record_dir: PathBuf,
+        /// The backend each request is forwarded to, as received, e.g.
+        /// https://cloud.langfuse.com/api/public/otel. Without one, each request is answered 200.
+        #[arg(long, env = "AGENTWIRE_FORWARD")]
+        forward: Option<reqwest::Url>,
+        /// Records a new one may delta against: about one per trace or exporter interleaved.
+        #[arg(long, env = "AGENTWIRE_RECORD_WINDOW", default_value_t = 16)]
+        record_window: usize,
+        /// The largest body stored, after gzip decoding.
+        #[arg(long, env = "AGENTWIRE_MAX_BODY", default_value_t = 64 << 20)]
+        max_body: usize,
+        #[arg(long, env = "AGENTWIRE_METRICS")]
+        metrics: Option<SocketAddr>,
     },
     /// Accept plain requests from a local tool and send them to an `agentwire server` as deltas.
     Client {
@@ -154,16 +178,17 @@ async fn main() -> Result<(), BoxError> {
                 Some(dir) => Some(Arc::new(Mutex::new(recorder(&dir, record_window)?))),
                 None => None,
             };
-            let store = Arc::new(Store::new(store_bytes, Duration::from_secs(ttl_seconds)));
+            let store = Store::new(store_bytes, Duration::from_secs(ttl_seconds));
             let scope_headers =
                 scope_headers.iter().map(|h| HeaderName::try_from(h.as_str())).collect::<Result<_, _>>()?;
-            let layer = Awd1Layer::new(store.clone(), Config { max_body, scope_headers });
-            if let Some(addr) = metrics {
-                let (stats, store) = (layer.stats().clone(), store.clone());
-                serve_metrics(addr, move || server_metrics(&stats, &store)).await?;
-            }
-            let service = layer.layer(Forward { http, upstream: Arc::new(upstream), record, max_body });
-            serve(listen, move || TowerToHyperService::new(service.clone())).await
+            let forward = Forward { http, upstream: Some(Arc::new(upstream)), record, max_body };
+            run_server(listen, store, Config { max_body, scope_headers }, metrics, forward).await
+        }
+        Mode::Collect { listen, record_dir, forward, record_window, max_body, metrics } => {
+            let record = Some(Arc::new(Mutex::new(recorder(&record_dir, record_window)?)));
+            let forward = Forward { http, upstream: forward.map(Arc::new), record, max_body };
+            let config = Config { max_body, ..Config::default() };
+            run_server(listen, Store::new(1 << 30, Duration::from_secs(1800)), config, metrics, forward).await
         }
         Mode::Client { listen, upstream, bases, max_body, metrics } => {
             let proxy = Arc::new(ClientProxy {
@@ -187,6 +212,24 @@ async fn main() -> Result<(), BoxError> {
             .await
         }
     }
+}
+
+/// The AWD1 layer in front of `forward`, until shutdown.
+async fn run_server(
+    listen: SocketAddr,
+    store: Store,
+    config: Config,
+    metrics: Option<SocketAddr>,
+    forward: Forward,
+) -> Result<(), BoxError> {
+    let store = Arc::new(store);
+    let layer = Awd1Layer::new(store.clone(), config);
+    if let Some(addr) = metrics {
+        let (stats, store) = (layer.stats().clone(), store.clone());
+        serve_metrics(addr, move || server_metrics(&stats, &store)).await?;
+    }
+    let service = layer.layer(forward);
+    serve(listen, move || TowerToHyperService::new(service.clone())).await
 }
 
 /// Accepts connections until SIGTERM or Ctrl-C, then lets requests in flight finish.
@@ -242,18 +285,21 @@ fn recorder(dir: &std::path::Path, window: usize) -> Result<log::Writer<BufWrite
     let path = dir.join(format!("{}-{}.awl", unix_ms(), std::process::id()));
     let file = File::options().write(true).create_new(true).open(&path)?;
     tracing::info!(path = %path.display(), "recording");
-    Ok(log::Writer::new(BufWriter::new(file), window)?)
+    let mut w = log::Writer::new(BufWriter::new(file), window)?;
+    w.flush()?; // a valid, empty AWL1 file before the first record
+    Ok(w)
 }
 
 fn unix_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())
 }
 
-/// The inner service of `agentwire server`: sends the request on to the upstream API.
+/// The inner service of `agentwire server` and `collect`: records the request (if recording), then
+/// sends it on to the upstream, or answers it (a collector without a backend).
 #[derive(Clone)]
 struct Forward {
     http: reqwest::Client,
-    upstream: Arc<reqwest::Url>,
+    upstream: Option<Arc<reqwest::Url>>,
     record: Option<Recorder>,
     max_body: usize,
 }
@@ -272,28 +318,36 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
             (self.http.clone(), self.upstream.clone(), self.record.clone(), self.max_body);
         Box::pin(async move {
             let (parts, body) = request.into_parts();
-            let Some(record) = record else {
-                return Ok(forward(&http, &upstream, &parts, reqwest::Body::wrap(body)).await);
+            let (Some(record), upstream) = (record, &upstream) else {
+                let upstream = upstream.as_ref().expect("a server without a recorder has an upstream");
+                return Ok(forward(&http, upstream, &parts, reqwest::Body::wrap(body)).await);
             };
             let body = match Limited::new(body, max_body).collect().await {
                 Ok(b) => b.to_bytes(),
                 Err(_) => return Ok(status(StatusCode::PAYLOAD_TOO_LARGE)),
             };
+            let (stored, encoding) = match decoded(&parts.headers, body.clone(), max_body) {
+                Ok(d) => d,
+                Err(code) => return Ok(status(code)),
+            };
             let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
-            let meta = format!("{} {} {path}", unix_ms(), parts.method);
+            let ct = parts.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|v| v.replace(' ', ""));
+            let meta = format!("{} {} {path} {} {encoding}", unix_ms(), parts.method, ct.as_deref().unwrap_or("-"));
             // stored and flushed before it is forwarded: what the upstream saw is on disk
             // ponytail: one writer behind a lock; a writer per shard if recording limits throughput
-            let kept = body.clone();
-            let stored = tokio::task::spawn_blocking(move || {
+            let written = tokio::task::spawn_blocking(move || {
                 let mut w = record.lock().unwrap_or_else(|p| p.into_inner());
-                w.append(meta.as_bytes(), kept)?;
+                w.append(meta.as_bytes(), stored)?;
                 w.flush()
             })
             .await;
-            if !matches!(stored, Ok(Ok(()))) {
-                tracing::error!(?stored, "recording failed; forwarding the request unrecorded");
+            if !matches!(written, Ok(Ok(()))) {
+                tracing::error!(?written, "recording failed; forwarding the request unrecorded");
             }
-            Ok(forward(&http, &upstream, &parts, body).await)
+            Ok(match upstream {
+                Some(upstream) => forward(&http, upstream, &parts, body).await,
+                None => ack(&parts.headers),
+            })
         })
     }
 }
@@ -395,6 +449,39 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
     }
 }
 
+/// The body as stored and delta'd: gzip decoded (at most `max` bytes), with "-" for its encoding;
+/// any other encoding kept as sent, and named.
+fn decoded(headers: &HeaderMap, body: Bytes, max: usize) -> Result<(Bytes, String), StatusCode> {
+    let encoding = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).unwrap_or("").trim();
+    if encoding.is_empty() || encoding.eq_ignore_ascii_case("identity") {
+        return Ok((body, "-".to_owned()));
+    }
+    if !encoding.eq_ignore_ascii_case("gzip") && !encoding.eq_ignore_ascii_case("x-gzip") {
+        return Ok((body, encoding.replace(' ', "")));
+    }
+    let mut out = Vec::new();
+    flate2::read::MultiGzDecoder::new(&body[..])
+        .take(max as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if out.len() > max {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    Ok((Bytes::from(out), "-".to_owned()))
+}
+
+/// A collector's answer: OTLP/HTTP's empty success, in the request's content type.
+fn ack(headers: &HeaderMap) -> Response<ResBody> {
+    let content_type = headers.get(header::CONTENT_TYPE).cloned();
+    let json = content_type.as_ref().is_some_and(|v| v.as_bytes().starts_with(b"application/json"));
+    let body = Full::new(Bytes::from_static(if json { b"{}" } else { b"" }));
+    let mut r = Response::new(body.map_err(|never| match never {}).boxed_unsync());
+    if let Some(v) = content_type {
+        r.headers_mut().insert(header::CONTENT_TYPE, v);
+    }
+    r
+}
+
 fn status(code: StatusCode) -> Response<ResBody> {
     let mut r = Response::new(ResBody::default());
     *r.status_mut() = code;
@@ -424,6 +511,16 @@ impl ClientProxy {
         let body = match Limited::new(body, self.max_body).collect().await {
             Ok(b) => b.to_bytes(),
             Err(_) => return status(StatusCode::PAYLOAD_TOO_LARGE),
+        };
+        // a delta of gzip bytes finds nothing: decode first. A body in another encoding goes as is
+        // (`awd1` must be its only content coding)
+        let body = match decoded(&parts.headers, body, self.max_body) {
+            Ok((body, encoding)) if encoding == "-" => {
+                parts.headers.remove(header::CONTENT_ENCODING);
+                body
+            }
+            Ok((body, _)) => return forward(&self.http, &self.upstream, &parts, body).await,
+            Err(code) => return status(code),
         };
         if body.is_empty() {
             return forward(&self.http, &self.upstream, &parts, body).await;
@@ -541,6 +638,46 @@ mod tests {
             "https://gw.example.com/anthropic/v1/messages"
         );
         assert_eq!(at("http://127.0.0.1:8080", "/"), "http://127.0.0.1:8080/");
+    }
+
+    #[test]
+    fn gzip_is_decoded_within_the_limit_and_other_encodings_are_kept() {
+        let gz = |b: &[u8]| {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(b).unwrap();
+            Bytes::from(e.finish().unwrap())
+        };
+        let with = |enc: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::CONTENT_ENCODING, enc.parse().unwrap());
+            h
+        };
+        let plain = Bytes::from_static(b"hello");
+        assert_eq!(decoded(&HeaderMap::new(), plain.clone(), 5), Ok((plain.clone(), "-".into())));
+        assert_eq!(decoded(&with("identity"), plain.clone(), 5), Ok((plain.clone(), "-".into())));
+        for enc in ["gzip", "GZIP", "x-gzip"] {
+            assert_eq!(decoded(&with(enc), gz(b"hello"), 5), Ok((plain.clone(), "-".into())), "{enc}");
+        }
+        let two_members = [gz(b"hel"), gz(b"lo")].concat();
+        assert_eq!(decoded(&with("gzip"), two_members.into(), 5), Ok((plain.clone(), "-".into())));
+        assert_eq!(decoded(&with("gzip"), gz(b"hello!"), 5), Err(StatusCode::PAYLOAD_TOO_LARGE));
+        assert_eq!(decoded(&with("gzip"), plain.clone(), 5), Err(StatusCode::BAD_REQUEST), "not gzip");
+        assert_eq!(decoded(&with("br"), plain.clone(), 5), Ok((plain, "br".into())));
+    }
+
+    #[test]
+    fn a_collector_acknowledges_in_the_requests_content_type() {
+        let with = |ct: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::CONTENT_TYPE, ct.parse().unwrap());
+            h
+        };
+        let r = ack(&with("application/json"));
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "application/json");
+        let r = ack(&with("application/x-protobuf"));
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "application/x-protobuf");
+        assert!(ack(&HeaderMap::new()).headers().get(header::CONTENT_TYPE).is_none());
     }
 
     #[test]
