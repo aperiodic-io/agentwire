@@ -86,7 +86,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude
 
 For OpenAI-style clients, point `OPENAI_BASE_URL` at the client and use
 `--upstream https://api.openai.com` on the server. API keys pass straight through; neither proxy
-stores or logs credentials or bodies. Add `--metrics 127.0.0.1:9464` to either side to see the
+stores or logs credentials, and bodies are stored only with `--record-dir` ([below](#storing-llm-calls-awl1)). Add `--metrics 127.0.0.1:9464` to either side to see the
 bytes saved.
 
 ## How it works
@@ -116,6 +116,39 @@ AWD1 is a codec a client and a server embed, the way they embed gzip. Pick by wh
 | **Both ends**: your agent and your API, agents talking to each other, your inference server | The library: [`Client`](src/client.rs) on the sending side, [`Awd1Layer`](src/server.rs) (a `tower` layer) on the receiving side. |
 | **Only the client**: you call Anthropic, OpenAI, … | `agentwire server` as a reverse proxy near the provider. It is the same layer in front of a forwarder. |
 | **Neither**: a CLI tool such as Claude Code or Codex | `agentwire client` on the tool's machine, talking to an `agentwire server`. |
+
+## Storing LLM calls: AWL1
+
+Gateways log every request for audit and replay, and tracing pipelines store every span, each with
+the whole prompt. That is the same re-sent context, at rest. **AWL1** stores such a log as AWD1
+deltas, each against an earlier record ([SPEC.md §7](SPEC.md#7-awl1-a-log-of-bodies-stored-as-deltas)).
+A record costs about its new bytes, any record reads back on its own, and every one is checked by
+SHA-256.
+
+**A gateway:** let `agentwire server` record what it forwards. Each request is on disk before it
+reaches the upstream, with its time, method and path (never its headers). If a write fails, the
+error is logged and the request is still forwarded.
+
+```bash
+agentwire server --upstream https://api.anthropic.com --record-dir /var/log/agentwire
+agentwire log ls /var/log/agentwire/1763650000000-4242.awl      # index, base, bytes stored, meta
+agentwire log get /var/log/agentwire/1763650000000-4242.awl 17 > request-17.json        # replay it
+```
+
+**A trace pipeline:** pack exported spans, one JSON object per line, and unpack them byte for byte.
+`--window` is how many traces or conversations are interleaved in the export.
+
+```bash
+agentwire log pack spans.awl --window 32 < exported-spans.jsonl
+agentwire log unpack spans.awl > spans.jsonl
+```
+
+**Embedded** (Rust): `agentwire::log::Writer` appends, `agentwire::log::Reader` indexes and reads.
+
+```rust
+let mut log = agentwire::log::Writer::new(std::io::BufWriter::new(file), 16)?;
+log.append(b"2026-11-20T14:15:00Z trace=ab12", body)?; // meta, body
+```
 
 ## The library (Rust)
 
@@ -166,6 +199,8 @@ client.confirm(&request, response.headers().get(agentwire::KEPT).and_then(|v| v.
 | `--max-body` | `AGENTWIRE_MAX_BODY` | 64 MiB | The largest body kept or rebuilt. |
 | `--scope-header` | `AGENTWIRE_SCOPE_HEADERS` | `authorization,x-api-key` | The headers that identify a tenant. Bases never cross them. |
 | `--metrics` | `AGENTWIRE_METRICS` | off | Prometheus text at `http://<addr>/metrics`, on its own port. |
+| `--record-dir` | `AGENTWIRE_RECORD_DIR` | off | Store every request body forwarded in a new AWL1 file here. Requests are then buffered (up to `--max-body`). |
+| `--record-window` | `AGENTWIRE_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per conversation in flight. |
 
 **`agentwire client`**: for tools you cannot change. They post plain requests to it, and it sends
 deltas on.

@@ -113,3 +113,38 @@ client's own previous request, not a response the server served. A provider that
 request bodies with the previous request as dictionary would make AWD1 unnecessary. The
 `prefix`/`suffix` copy saves a zstd pass over the unchanged context, which `dcz` would compress
 again on every request.
+
+## 7. AWL1: a log of bodies stored as deltas
+
+A gateway's request log and a trace pipeline's spans re-send the whole prompt on every call, as the
+requests themselves do. AWL1 stores such a log as a file of AWD1 delta bodies (§3), each against
+one of the records before it, so a record costs about its new bytes and every one is checked by
+SHA-256 when it is read.
+
+```
+file    = "AWL1" version window record*
+version = %x01
+window  = varint            ; how many of the latest records a record may name as its base
+record  = back meta_len meta delta_len delta
+back    = varint            ; records back to the base; 0: the base is the empty body
+meta    = meta_len bytes    ; stored as is (a time, an id, a method and path)
+delta   = delta_len bytes   ; an AWD1 body (§3) whose base is that record's body
+```
+
+Every record is an AWD1 delta. One stored whole is a delta against the empty body (`back = 0`).
+
+A reader rebuilds record *i* from the record `back` before it, and so on down to one with `back = 0`.
+It MUST reject a file whose magic or version it does not know, and a `back` greater than *i* or
+than `window`. It MUST reject a record whose delta's `base` hash is not that of the body it rebuilt
+for the base, and whatever §3 rejects (rebuilt with the reader's own size limit). A file that ends
+inside a record holds the records before it: a writer that stopped mid-write loses only the record
+it was writing.
+
+A writer SHOULD bound the chain behind any record, so reading one rebuilds a bounded number of
+bodies. The reference writer starts again with a whole record every 64. `meta` is not covered by
+any hash. Put what must be verified in the body.
+
+Only bodies are stored. `agentwire server --record-dir` writes the time, the method and the path as
+`meta`, never a header. A file holds everything in it in the clear: protect it as you would the
+requests, and keep one file per tenant where a tenant's records must be deletable on their own
+(deleting one record means rewriting those that delta against it).

@@ -37,6 +37,11 @@ struct Proxies {
     sent: Vec<Sent>,
     turns: HashMap<String, usize>,
     last: Option<(u16, HeaderMap)>,
+    /// where the server records requests (`--record-dir`), when it does
+    record_dir: Option<std::path::PathBuf>,
+    /// JSON lines to pack, and the packed file
+    lines: Vec<Bytes>,
+    packed: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -175,7 +180,12 @@ impl Proxies {
 
     async fn start_server(&mut self) {
         let upstream = format!("http://{}", self.upstream.as_ref().unwrap().0);
-        let server = spawn(&["server", "--upstream", &upstream]).await;
+        let mut args = vec!["server", "--upstream", &upstream];
+        let dir = self.record_dir.as_ref().map(|d| d.to_str().unwrap().to_owned());
+        if let Some(dir) = &dir {
+            args.extend(["--record-dir", dir]);
+        }
+        let server = spawn(&args).await;
         if let Some((_, target, _)) = &self.relay {
             *target.lock().unwrap() = server.addr;
         }
@@ -387,6 +397,111 @@ async fn only_the_base(w: &mut Proxies) {
     let recorded = w.recorded();
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].1, "base");
+}
+
+/// A fresh directory under the system's temp dir, for this process only.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("agentwire-acceptance-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// `agentwire log <args>`, its stdout; it must succeed.
+async fn log(args: &[&str], stdin: &[u8]) -> Vec<u8> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentwire"))
+        .arg("log")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(stdin).await.unwrap();
+    drop(input);
+    let out = child.wait_with_output().await.unwrap();
+    assert!(out.status.success(), "agentwire log {args:?}: {}", out.status);
+    out.stdout
+}
+
+#[given("an agentwire server in front of it, recording to a directory")]
+async fn a_recording_server(w: &mut Proxies) {
+    w.record_dir = Some(scratch("record"));
+    w.start_server().await;
+}
+
+/// The one file the server records to.
+fn recording(w: &Proxies) -> String {
+    let files: Vec<_> = std::fs::read_dir(w.record_dir.as_ref().unwrap()).unwrap().map(|e| e.unwrap().path()).collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(files[0].extension().unwrap(), "awl");
+    files[0].to_str().unwrap().to_owned()
+}
+
+#[then("the recording holds every request byte for byte, with its method and path")]
+async fn recording_holds(w: &mut Proxies) {
+    let file = recording(w);
+    let listed = String::from_utf8(log(&["ls", &file], b"").await).unwrap();
+    assert_eq!(listed.lines().count(), w.sent.len(), "{listed}");
+    for (i, line) in listed.lines().enumerate() {
+        // index, back, stored bytes, then the meta: a timestamp, the method and the path
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields[0], i.to_string());
+        assert!(fields[3].parse::<u64>().unwrap() > 1_700_000_000_000, "{line}");
+        assert_eq!(fields[4..], ["POST", "/v1/messages"], "{line}");
+        assert_eq!(log(&["get", &file, &i.to_string()], b"").await, w.sent[i].body, "request {i}");
+    }
+}
+
+#[then(expr = "the recording takes under {int}% of the requests' bytes")]
+async fn recording_ratio(w: &mut Proxies, percent: u64) {
+    let stored = std::fs::metadata(recording(w)).unwrap().len();
+    let body: u64 = w.sent.iter().map(|s| s.body.len() as u64).sum();
+    assert!(stored * 100 < body * percent, "{stored} bytes stored for {body}");
+}
+
+#[given(expr = "{int} traces of {int} spans, each span carrying the whole prompt, as JSON lines")]
+async fn spans_as_json_lines(w: &mut Proxies, traces: usize, spans: usize) {
+    // trace by trace, as a collector exports them: the span's ids come first, the prompt after
+    for span in 0..spans {
+        for trace in 0..traces {
+            let prompt = String::from_utf8(conversation(&format!("t{trace}"), span + 1).to_vec()).unwrap();
+            let prompt = prompt.replace('"', "\\\"");
+            w.lines.push(Bytes::from(format!(
+                r#"{{"trace_id":"t{trace}","span_id":"s{span}","name":"chat","attributes":{{"gen_ai.prompt":"{prompt}"}}}}"#
+            )));
+        }
+    }
+}
+
+#[when("they are packed with `agentwire log pack`")]
+async fn pack(w: &mut Proxies) {
+    let file = scratch("pack").join("spans.awl");
+    log(&["pack", file.to_str().unwrap()], &jsonl(&w.lines)).await;
+    w.packed = Some(file);
+}
+
+fn jsonl(lines: &[Bytes]) -> Vec<u8> {
+    lines.iter().flat_map(|l| [&l[..], b"\n"].concat()).collect()
+}
+
+#[then("`agentwire log unpack` gives back the same lines")]
+async fn unpack(w: &mut Proxies) {
+    let file = w.packed.as_ref().unwrap().to_str().unwrap();
+    assert!(log(&["unpack", file], b"").await == jsonl(&w.lines));
+}
+
+#[then(expr = "`agentwire log get` gives back span {int} alone")]
+async fn get_one(w: &mut Proxies, i: usize) {
+    let file = w.packed.as_ref().unwrap().to_str().unwrap();
+    assert_eq!(log(&["get", file, &i.to_string()], b"").await, w.lines[i]);
+}
+
+#[then(expr = "the packed file takes under {int}% of the lines' bytes")]
+async fn packed_ratio(w: &mut Proxies, percent: u64) {
+    let stored = std::fs::metadata(w.packed.as_ref().unwrap()).unwrap().len();
+    let raw = jsonl(&w.lines).len() as u64;
+    assert!(stored * 100 < raw * percent, "{stored} bytes stored for {raw}");
 }
 
 #[tokio::main]

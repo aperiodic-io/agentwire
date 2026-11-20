@@ -3,6 +3,13 @@
 This project follows [Semantic Versioning](https://semver.org). The AWD1 wire format has its own
 version byte (SPEC.md); a crate release that changes it says so here.
 
+## [Unreleased]
+
+- AWL1 (SPEC.md §7): logs of LLM requests or trace spans stored as AWD1 deltas against earlier
+  records, every record checked by SHA-256. `agentwire::log::{Writer, Reader}`.
+- `agentwire server --record-dir`: stores each request it forwards (body, time, method, path).
+- `agentwire log pack | unpack | get | ls`: JSON lines in and out of AWL1 files.
+
 ## [0.1.0]
 
 First release.

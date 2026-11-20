@@ -1,0 +1,453 @@
+//! AWL1 (SPEC.md §7): a log of bodies, each stored as an AWD1 delta against one of the records
+//! before it. Gateway request logs and trace spans re-send the whole prompt every call, so a record
+//! costs about its new bytes. Every record is checked by SHA-256 when read back.
+//!
+//! ```
+//! use agentwire::log::{Reader, Writer};
+//! let mut w = Writer::new(Vec::new(), 8)?;
+//! w.append(b"req 1", bytes::Bytes::from_static(br#"{"messages":["hi"]}"#))?;
+//! w.append(b"req 2", bytes::Bytes::from_static(br#"{"messages":["hi","more"]}"#))?;
+//! let mut r = Reader::open(std::io::Cursor::new(w.into_inner()), 64 << 20)?;
+//! assert_eq!(r.get(1)?, br#"{"messages":["hi","more"]}"#);
+//! assert_eq!(r.records()[1].meta, b"req 2");
+//! # Ok::<(), std::io::Error>(())
+//! ```
+
+use std::collections::VecDeque;
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
+
+use bytes::Bytes;
+
+use crate::codec::{self, Hash};
+
+const MAGIC: &[u8; 4] = b"AWL1";
+const VERSION: u8 = 1;
+/// ponytail: fixed chain length; reading record i rebuilds at most this many bodies. A knob if
+/// random reads of multi-MB records show up as slow.
+const MAX_DEPTH: usize = 64;
+
+/// Appends records to an AWL1 file. Write it through a `BufWriter`; the file is readable up to
+/// the last complete record at any time, so flush when a record must survive a crash.
+#[derive(Debug)]
+pub struct Writer<W: Write> {
+    out: W,
+    window: usize,
+    recent: VecDeque<Recent>,
+    next: u64,
+}
+
+#[derive(Debug)]
+struct Recent {
+    index: u64,
+    hash: Hash,
+    body: Bytes,
+    depth: usize,
+}
+
+impl<W: Write> Writer<W> {
+    /// `window`: how many of the latest records a new one may delta against. One per conversation
+    /// interleaved in the log; the reader holds that many bodies while it scans.
+    pub fn new(mut out: W, window: usize) -> io::Result<Self> {
+        out.write_all(MAGIC)?;
+        out.write_all(&[VERSION])?;
+        write_varint(&mut out, window as u64)?;
+        Ok(Writer { out, window, recent: VecDeque::new(), next: 0 })
+    }
+
+    /// Appends `body` with its `meta` (stored as is: a timestamp, an id, a path) and returns its index.
+    pub fn append(&mut self, meta: &[u8], body: Bytes) -> io::Result<u64> {
+        let hash = codec::hash(&body);
+        let encode = |base: Option<&Recent>| match base {
+            Some(r) => (self.next - r.index, r.depth + 1, codec::encode(&r.body, &r.hash, &body, &hash)),
+            None => (0, 0, codec::encode(b"", &codec::hash(b""), &body, &hash)),
+        };
+        let bases: Vec<&Recent> = self.recent.iter().filter(|r| r.depth + 1 < MAX_DEPTH).collect();
+        let best = bases.iter().map(|r| (codec::shared(&r.body, &body), *r)).max_by_key(|(shared, _)| *shared);
+        // a re-sent context shares most of its bytes at the edges: that base, one encode. Otherwise
+        // (ids before the prompt, as spans have) the edges say little: try none (it wins a tie), then
+        // every base.
+        // ponytail: `window` encodes per such record; sample-hash the bases if that shows in CPU
+        let (back, depth, delta) = match best {
+            Some((shared, r)) if shared * 2 >= body.len() => encode(Some(r)),
+            _ => {
+                [None].into_iter().chain(bases.into_iter().map(Some)).map(encode).min_by_key(|(.., d)| d.len()).unwrap()
+            }
+        };
+        write_varint(&mut self.out, back)?;
+        write_varint(&mut self.out, meta.len() as u64)?;
+        self.out.write_all(meta)?;
+        write_varint(&mut self.out, delta.len() as u64)?;
+        self.out.write_all(&delta)?;
+        let index = self.next;
+        self.next += 1;
+        if self.window > 0 {
+            if self.recent.len() == self.window {
+                self.recent.pop_front();
+            }
+            self.recent.push_back(Recent { index, hash, body, depth });
+        }
+        Ok(index)
+    }
+
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+
+    pub fn into_inner(self) -> W {
+        self.out
+    }
+}
+
+/// One record's place in the file, read without decoding it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Record {
+    pub meta: Vec<u8>,
+    /// Records back to its base; 0: none (the record is stored whole).
+    pub back: u64,
+    /// Bytes the record's delta takes in the file.
+    pub stored: u64,
+    offset: u64,
+}
+
+/// Reads an AWL1 file. `open` indexes it; records are decoded only when asked for.
+#[derive(Debug)]
+pub struct Reader<R> {
+    src: BufReader<R>,
+    window: usize,
+    max_body: usize,
+    records: Vec<Record>,
+    /// The file ends inside a record (its writer stopped mid-write): the records before it are whole.
+    pub truncated: bool,
+}
+
+impl<R: Read + Seek> Reader<R> {
+    /// Indexes the file. `max_body` caps any body it will rebuild, as the server's limit does.
+    pub fn open(src: R, max_body: usize) -> io::Result<Self> {
+        let mut src = BufReader::new(src);
+        let len = src.seek(SeekFrom::End(0))?;
+        src.seek(SeekFrom::Start(0))?;
+        let mut magic = [0; 5];
+        src.read_exact(&mut magic).map_err(|_| invalid("not an AWL1 file"))?;
+        if &magic[..4] != MAGIC {
+            return Err(invalid("not an AWL1 file"));
+        }
+        if magic[4] != VERSION {
+            return Err(invalid("unsupported AWL1 version"));
+        }
+        let window = read_varint(&mut src)?.ok_or_else(|| invalid("truncated header"))?;
+        let mut reader = Reader { src, window: window as usize, max_body, records: Vec::new(), truncated: false };
+        reader.index(len)?;
+        Ok(reader)
+    }
+
+    fn index(&mut self, len: u64) -> io::Result<()> {
+        loop {
+            let at = self.src.stream_position()?;
+            if at == len {
+                return Ok(());
+            }
+            match self.next_record(len)? {
+                Some(record) => self.records.push(record),
+                None => {
+                    self.truncated = true;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// The next record's header, its payload skipped; `None` when the file ends inside it.
+    fn next_record(&mut self, len: u64) -> io::Result<Option<Record>> {
+        let n = self.records.len() as u64;
+        let Some(back) = read_varint(&mut self.src)? else { return Ok(None) };
+        if back > n || back > self.window as u64 {
+            return Err(invalid("a record names a base it cannot have"));
+        }
+        let Some(meta_len) = read_varint(&mut self.src)? else { return Ok(None) };
+        if meta_len > len - self.src.stream_position()? {
+            return Ok(None);
+        }
+        let mut meta = vec![0; meta_len as usize];
+        self.src.read_exact(&mut meta)?;
+        let Some(stored) = read_varint(&mut self.src)? else { return Ok(None) };
+        let offset = self.src.stream_position()?;
+        if stored > len - offset {
+            return Ok(None);
+        }
+        self.src.seek_relative(stored as i64)?;
+        Ok(Some(Record { meta, back, stored, offset }))
+    }
+
+    pub fn records(&self) -> &[Record] {
+        &self.records
+    }
+
+    /// Record `i`'s body, rebuilt from its chain of bases and checked by SHA-256.
+    pub fn get(&mut self, i: usize) -> io::Result<Vec<u8>> {
+        if i >= self.records.len() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "no such record"));
+        }
+        let mut chain = vec![i];
+        let mut at = i;
+        while self.records[at].back != 0 {
+            at -= self.records[at].back as usize;
+            chain.push(at);
+        }
+        let mut body = Vec::new();
+        for &j in chain.iter().rev() {
+            body = self.rebuild(j, &body)?;
+        }
+        Ok(body)
+    }
+
+    /// Every record in order, each body rebuilt once: holds the last `window` bodies, not the file.
+    pub fn scan(&mut self, mut f: impl FnMut(&Record, &[u8]) -> io::Result<()>) -> io::Result<()> {
+        let mut recent: VecDeque<Vec<u8>> = VecDeque::new();
+        for i in 0..self.records.len() {
+            let back = self.records[i].back as usize;
+            let body = if back == 0 { self.rebuild(i, b"")? } else { self.rebuild(i, &recent[recent.len() - back])? };
+            f(&self.records[i], &body)?;
+            if self.window > 0 {
+                if recent.len() == self.window {
+                    recent.pop_front();
+                }
+                recent.push_back(body);
+            }
+        }
+        Ok(())
+    }
+
+    fn rebuild(&mut self, i: usize, base: &[u8]) -> io::Result<Vec<u8>> {
+        let Record { offset, stored, .. } = self.records[i];
+        self.src.seek(SeekFrom::Start(offset))?;
+        let mut delta = vec![0; stored as usize];
+        self.src.read_exact(&mut delta)?;
+        let (header, frame) = codec::parse(&delta, self.max_body).map_err(invalid)?;
+        if header.base != codec::hash(base) {
+            return Err(invalid(codec::Error::Corrupt));
+        }
+        codec::apply(base, &header, frame).map_err(invalid)
+    }
+}
+
+fn invalid(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, e)
+}
+
+fn write_varint(out: &mut impl Write, v: u64) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(10);
+    codec::write_varint(&mut buf, v);
+    out.write_all(&buf)
+}
+
+/// A canonical varint from a stream; `None` when the stream ends inside it.
+fn read_varint(src: &mut impl Read) -> io::Result<Option<u64>> {
+    let mut buf = Vec::with_capacity(10);
+    let mut byte = [0];
+    loop {
+        if src.read(&mut byte)? == 0 {
+            return Ok(None);
+        }
+        buf.push(byte[0]);
+        if byte[0] & 0x80 == 0 || buf.len() == 10 {
+            return codec::read_varint(&buf).map(|(v, _)| Some(v)).map_err(invalid);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hex;
+    use proptest::prelude::*;
+    use std::io::Cursor;
+
+    /// A gateway's request after `turns` turns: a 20 KB system prompt of its own that does not
+    /// compress by itself (hex of hashes), then the turns.
+    fn request(name: &str, turns: usize) -> Bytes {
+        let system: String = (0..300).map(|i| hex(&codec::hash(format!("{name}{i}").as_bytes()))).collect();
+        let msgs: String = (0..turns).map(|i| format!(r#"{{"role":"user","content":"{name} turn {i}"}},"#)).collect();
+        Bytes::from(format!(r#"{{"system":"{system}","messages":[{msgs}{{}}]}}"#))
+    }
+
+    fn write(window: usize, records: &[(Vec<u8>, Bytes)]) -> Vec<u8> {
+        let mut w = Writer::new(Vec::new(), window).unwrap();
+        for (i, (meta, body)) in records.iter().enumerate() {
+            assert_eq!(w.append(meta, body.clone()).unwrap(), i as u64);
+        }
+        w.flush().unwrap();
+        w.into_inner()
+    }
+
+    fn open(file: &[u8]) -> io::Result<Reader<Cursor<&[u8]>>> {
+        Reader::open(Cursor::new(file), 1 << 26)
+    }
+
+    fn scanned(file: &[u8]) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut out = Vec::new();
+        open(file)?.scan(|r, body| {
+            out.push((r.meta.clone(), body.to_vec()));
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    #[test]
+    fn interleaved_conversations_cost_about_their_new_bytes() {
+        let mut records = Vec::new();
+        for turn in 1..=10 {
+            for name in ["a", "b", "c"] {
+                records.push((format!("{name}{turn}").into_bytes(), request(name, turn)));
+            }
+        }
+        let file = write(4, &records);
+        let raw: usize = records.iter().map(|(_, b)| b.len()).sum();
+        let first_turns: usize = records[..3].iter().map(|(_, b)| b.len()).sum();
+        assert!(file.len() < first_turns + 200 * records.len(), "{} bytes for {raw}", file.len());
+        let r = open(&file).unwrap();
+        assert!(r.records()[3..].iter().all(|r| r.back == 3), "each finds its own conversation");
+        let back: Vec<_> = scanned(&file).unwrap();
+        assert_eq!(back, records.iter().map(|(m, b)| (m.clone(), b.to_vec())).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn spans_whose_ids_come_first_still_find_their_trace() {
+        // ids at the front: a span shares ~30 edge bytes with its own trace's last span, and more
+        // with another trace's span at the same turn (their last turns end alike)
+        let span = |t: usize, s: usize| {
+            let prompt = String::from_utf8(request(&format!("t{t}"), s + 1).to_vec()).unwrap();
+            let last_turn = "tell me more ".repeat(s); // ends the same in every trace
+            Bytes::from(format!(r#"{{"trace_id":"t{t}","span_id":"s{s}","prompt":{prompt:?},"turn":"{last_turn}"}}"#))
+        };
+        let records: Vec<_> = (0..6).flat_map(|s| (0..3).map(move |t| (vec![], span(t, s)))).collect();
+        let file = write(4, &records);
+        let r = open(&file).unwrap();
+        assert!(r.records()[3..].iter().all(|r| r.back == 3), "{:?}", r.records());
+        assert_eq!(scanned(&file).unwrap().len(), records.len());
+    }
+
+    #[test]
+    fn any_record_is_read_on_its_own() {
+        let records: Vec<_> = (1..=100).map(|t| (vec![], request("a", t))).collect();
+        let file = write(1, &records);
+        let mut r = open(&file).unwrap();
+        for i in [99, 0, 64, 65, 37] {
+            assert_eq!(r.get(i).unwrap(), records[i].1, "record {i}");
+        }
+        assert_eq!(r.records()[MAX_DEPTH].back, 0, "a chain stops at {MAX_DEPTH} and starts again whole");
+        assert_eq!(r.get(100).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn an_unrelated_body_is_stored_whole_and_a_window_of_0_stores_all_whole() {
+        let file = write(4, &[(vec![], request("a", 1)), (vec![], Bytes::from_static(b"tiny"))]);
+        assert_eq!(open(&file).unwrap().records()[1].back, 0, "it shares no byte with the base");
+        let file = write(0, &[(vec![], request("a", 1)), (vec![], request("a", 2))]);
+        assert!(open(&file).unwrap().records().iter().all(|r| r.back == 0));
+        assert_eq!(scanned(&file).unwrap()[1].1, request("a", 2));
+    }
+
+    #[test]
+    fn the_layout_is_the_spec() {
+        let file = write(8, &[(b"m".to_vec(), Bytes::from_static(b"hello"))]);
+        assert_eq!(&file[..6], b"AWL1\x01\x08");
+        // back 0, meta "m", then the AWD1 delta against the empty body
+        assert_eq!(&file[6..9], b"\x00\x01m");
+        assert_eq!(&file[10..14], b"AWD1");
+        assert_eq!(file[9] as usize, file.len() - 10);
+        assert_eq!(&file[15..47], &codec::hash(b""));
+    }
+
+    #[test]
+    fn a_file_cut_short_keeps_every_whole_record() {
+        let records: Vec<_> = (1..=5).map(|t| (b"meta".to_vec(), request("a", t))).collect();
+        let file = write(2, &records);
+        let ends: Vec<usize> = (0..=5).map(|n| write(2, &records[..n]).len()).collect();
+        for cut in 6..file.len() {
+            let whole = ends.iter().rposition(|&e| e <= cut).unwrap();
+            let r = open(&file[..cut]).unwrap();
+            assert_eq!((r.records().len(), r.truncated), (whole, ends[whole] != cut), "cut at {cut}");
+        }
+        assert_eq!(scanned(&file[..file.len() - 1]).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn what_is_not_an_awl1_file_is_refused() {
+        for bad in [&b""[..], b"AWL", b"AWD1\x01\x00", b"AWL1\x02\x00", b"AWL1\x01"] {
+            assert_eq!(open(bad).unwrap_err().kind(), io::ErrorKind::InvalidData, "{bad:?}");
+        }
+        // a record naming a base before the first record, or beyond the window
+        assert!(open(b"AWL1\x01\x02\x01\x00\x00").is_err());
+        let mut file = write(1, &[(vec![], request("a", 1)), (vec![], request("a", 2))]);
+        file.extend_from_slice(b"\x02\x00\x00");
+        assert!(open(&file).is_err(), "back 2 over a window of 1");
+    }
+
+    #[test]
+    fn a_record_rebuilt_against_the_wrong_base_is_refused() {
+        // record 2 deltas against 1; point it at 0 instead (same window, a valid back)
+        let records: Vec<_> = [request("a", 1), request("b", 1), request("b", 2)].map(|b| (vec![], b)).to_vec();
+        let mut file = write(2, &records);
+        assert_eq!(open(&file).unwrap().records()[2].back, 1);
+        let back_at = write(2, &records[..2]).len(); // record 2 starts with its back varint
+        file[back_at] = 2;
+        let err = open(&file).unwrap().get(2).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(scanned(&file).is_err());
+    }
+
+    #[test]
+    fn a_body_over_the_readers_limit_is_refused() {
+        let file = write(1, &[(vec![], request("a", 1))]);
+        let mut r = Reader::open(Cursor::new(&file[..]), 100).unwrap();
+        assert_eq!(r.get(0).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn any_records_round_trip(
+            window in 0usize..4,
+            bodies in proptest::collection::vec(
+                (proptest::collection::vec(any::<u8>(), 0..8), proptest::collection::vec(any::<u8>(), 0..300)),
+                0..20,
+            ),
+        ) {
+            // records that share bytes, as a log's do: each extends a random earlier one
+            let mut records: Vec<(Vec<u8>, Bytes)> = Vec::new();
+            for (i, (meta, tail)) in bodies.into_iter().enumerate() {
+                let head = if i > 0 { records[tail.len() % i].1.to_vec() } else { vec![] };
+                records.push((meta, Bytes::from([head, tail].concat())));
+            }
+            let file = write(window, &records);
+            let mut r = open(&file).unwrap();
+            prop_assert!(!r.truncated);
+            for (i, (meta, body)) in records.iter().enumerate() {
+                prop_assert_eq!(&r.records()[i].meta, meta);
+                prop_assert_eq!(&r.get(i).unwrap(), body);
+            }
+            let expected: Vec<_> = records.iter().map(|(m, b)| (m.clone(), b.to_vec())).collect();
+            prop_assert_eq!(scanned(&file).unwrap(), expected);
+        }
+
+        #[test]
+        fn a_corrupted_file_never_yields_a_wrong_body(
+            at in any::<proptest::sample::Index>(),
+            flip in 1u8..,
+        ) {
+            let records: Vec<_> = (1..=3).map(|t| (vec![], request("a", t))).collect();
+            let mut file = write(2, &records);
+            let i = at.index(file.len());
+            file[i] ^= flip;
+            if let Ok(mut r) = open(&file) {
+                let n = r.records().len();
+                for (j, (_, expected)) in records.iter().enumerate().take(n) {
+                    if let Ok(body) = r.get(j) {
+                        prop_assert_eq!(&body, expected, "byte {} flipped", i);
+                    }
+                }
+            }
+        }
+    }
+}

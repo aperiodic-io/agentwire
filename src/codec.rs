@@ -200,7 +200,7 @@ fn decompress(reference: &[u8], frame: &[u8], literal_len: usize) -> Result<Vec<
 }
 
 /// Canonical unsigned LEB128, at most 10 bytes (a u64).
-fn read_varint(buf: &[u8]) -> Result<(u64, usize), Error> {
+pub(crate) fn read_varint(buf: &[u8]) -> Result<(u64, usize), Error> {
     let mut v = 0u64;
     for (i, &b) in buf.iter().enumerate().take(10) {
         if i == 9 && b > 1 {
@@ -217,12 +217,18 @@ fn read_varint(buf: &[u8]) -> Result<(u64, usize), Error> {
     Err(Error::Malformed(if buf.len() >= 10 { "varint overflow" } else { "truncated varint" }))
 }
 
-fn write_varint(out: &mut Vec<u8>, mut v: u64) {
+pub(crate) fn write_varint(out: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
         out.push(v as u8 | 0x80);
         v >>= 7;
     }
     out.push(v as u8);
+}
+
+/// Bytes a delta of `target` against `base` copies instead of sending: the common prefix and suffix.
+pub(crate) fn shared(base: &[u8], target: &[u8]) -> usize {
+    let p = common_prefix(base, target);
+    p + common_suffix(&base[p..], &target[p..])
 }
 
 /// Length of the longest common prefix: 64-byte slice compares (memcmp), then bytes.

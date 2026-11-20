@@ -1,16 +1,21 @@
 //! `agentwire server`: the AWD1 layer as a reverse proxy in front of an HTTP API.
 //! `agentwire client`: a local proxy that sends what a tool posts to it as AWD1 deltas.
+//! `agentwire log`: pack, list and read AWL1 files (what `agentwire server --record-dir` writes).
 
 use std::convert::Infallible;
+use std::fs::File;
 use std::future::Future;
+use std::io::{self, BufRead, BufWriter, Write};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use agentwire::client::Client;
+use agentwire::log;
 use agentwire::server::{Awd1Layer, Config, InnerBody, Stats};
 use agentwire::store::Store;
 use agentwire::{ERROR, KEPT};
@@ -62,6 +67,13 @@ enum Mode {
         /// Serve Prometheus metrics at http://<addr>/metrics.
         #[arg(long, env = "AGENTWIRE_METRICS")]
         metrics: Option<SocketAddr>,
+        /// Store every request body forwarded, with its time, method and path (never its headers),
+        /// in a new AWL1 file in this directory; read it with `agentwire log`.
+        #[arg(long, env = "AGENTWIRE_RECORD_DIR")]
+        record_dir: Option<PathBuf>,
+        /// Records a new one may delta against: about one per conversation in flight.
+        #[arg(long, env = "AGENTWIRE_RECORD_WINDOW", default_value_t = 16)]
+        record_window: usize,
     },
     /// Accept plain requests from a local tool and send them to an `agentwire server` as deltas.
     Client {
@@ -79,10 +91,43 @@ enum Mode {
         #[arg(long, env = "AGENTWIRE_METRICS")]
         metrics: Option<SocketAddr>,
     },
+    /// Read and write AWL1 files: bodies stored as deltas against earlier ones.
+    #[command(subcommand)]
+    Log(LogCmd),
+}
+
+#[derive(Subcommand)]
+enum LogCmd {
+    /// Store each line of stdin (JSON lines: spans, requests) as a record of a new AWL1 file.
+    Pack {
+        file: PathBuf,
+        /// Records a new one may delta against: about one per trace or conversation interleaved.
+        #[arg(long, default_value_t = 16)]
+        window: usize,
+    },
+    /// Write every record's body to stdout, one per line: `pack`'s input back.
+    Unpack {
+        file: PathBuf,
+        #[arg(long, default_value_t = 64 << 20)]
+        max_body: usize,
+    },
+    /// Write one record's body to stdout, byte for byte.
+    Get {
+        file: PathBuf,
+        index: usize,
+        #[arg(long, default_value_t = 64 << 20)]
+        max_body: usize,
+    },
+    /// List the records: index, records back to its base (0: stored whole), bytes stored, meta.
+    Ls { file: PathBuf },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
+    let cli = Cli::parse();
+    if let Mode::Log(cmd) = cli.mode {
+        return run_log(cmd);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "agentwire=info".into()),
@@ -92,8 +137,23 @@ async fn main() -> Result<(), BoxError> {
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .build()?;
-    match Cli::parse().mode {
-        Mode::Server { listen, upstream, store_bytes, ttl_seconds, max_body, scope_headers, metrics } => {
+    match cli.mode {
+        Mode::Log(_) => unreachable!("handled above"),
+        Mode::Server {
+            listen,
+            upstream,
+            store_bytes,
+            ttl_seconds,
+            max_body,
+            scope_headers,
+            metrics,
+            record_dir,
+            record_window,
+        } => {
+            let record = match record_dir {
+                Some(dir) => Some(Arc::new(Mutex::new(recorder(&dir, record_window)?))),
+                None => None,
+            };
             let store = Arc::new(Store::new(store_bytes, Duration::from_secs(ttl_seconds)));
             let scope_headers =
                 scope_headers.iter().map(|h| HeaderName::try_from(h.as_str())).collect::<Result<_, _>>()?;
@@ -102,7 +162,7 @@ async fn main() -> Result<(), BoxError> {
                 let (stats, store) = (layer.stats().clone(), store.clone());
                 serve_metrics(addr, move || server_metrics(&stats, &store)).await?;
             }
-            let service = layer.layer(Forward { http, upstream: Arc::new(upstream) });
+            let service = layer.layer(Forward { http, upstream: Arc::new(upstream), record, max_body });
             serve(listen, move || TowerToHyperService::new(service.clone())).await
         }
         Mode::Client { listen, upstream, bases, max_body, metrics } => {
@@ -174,11 +234,28 @@ async fn shutdown_signal() {
     }
 }
 
+type Recorder = Arc<Mutex<log::Writer<BufWriter<File>>>>;
+
+/// A new file in `dir`, named by the time it was opened: a restart never appends to, or replaces, one.
+fn recorder(dir: &std::path::Path, window: usize) -> Result<log::Writer<BufWriter<File>>, BoxError> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{}-{}.awl", unix_ms(), std::process::id()));
+    let file = File::options().write(true).create_new(true).open(&path)?;
+    tracing::info!(path = %path.display(), "recording");
+    Ok(log::Writer::new(BufWriter::new(file), window)?)
+}
+
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())
+}
+
 /// The inner service of `agentwire server`: sends the request on to the upstream API.
 #[derive(Clone)]
 struct Forward {
     http: reqwest::Client,
     upstream: Arc<reqwest::Url>,
+    record: Option<Recorder>,
+    max_body: usize,
 }
 
 impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
@@ -191,13 +268,71 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
     }
 
     fn call(&mut self, request: Request<InnerBody<Incoming>>) -> Self::Future {
-        let (http, upstream) = (self.http.clone(), self.upstream.clone());
+        let (http, upstream, record, max_body) =
+            (self.http.clone(), self.upstream.clone(), self.record.clone(), self.max_body);
         Box::pin(async move {
             let (parts, body) = request.into_parts();
-            let body = reqwest::Body::wrap(body);
+            let Some(record) = record else {
+                return Ok(forward(&http, &upstream, &parts, reqwest::Body::wrap(body)).await);
+            };
+            let body = match Limited::new(body, max_body).collect().await {
+                Ok(b) => b.to_bytes(),
+                Err(_) => return Ok(status(StatusCode::PAYLOAD_TOO_LARGE)),
+            };
+            let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
+            let meta = format!("{} {} {path}", unix_ms(), parts.method);
+            // stored and flushed before it is forwarded: what the upstream saw is on disk
+            // ponytail: one writer behind a lock; a writer per shard if recording limits throughput
+            let kept = body.clone();
+            let stored = tokio::task::spawn_blocking(move || {
+                let mut w = record.lock().unwrap_or_else(|p| p.into_inner());
+                w.append(meta.as_bytes(), kept)?;
+                w.flush()
+            })
+            .await;
+            if !matches!(stored, Ok(Ok(()))) {
+                tracing::error!(?stored, "recording failed; forwarding the request unrecorded");
+            }
             Ok(forward(&http, &upstream, &parts, body).await)
         })
     }
+}
+
+fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
+    let mut out = BufWriter::new(io::stdout().lock());
+    match cmd {
+        LogCmd::Pack { file, window } => {
+            let file = File::options().write(true).create_new(true).open(file)?;
+            let mut w = log::Writer::new(BufWriter::new(file), window)?;
+            for line in io::stdin().lock().split(b'\n') {
+                w.append(b"", Bytes::from(line?))?;
+            }
+            w.flush()?;
+        }
+        LogCmd::Unpack { file, max_body } => {
+            let mut r = open_log(&file, max_body)?;
+            r.scan(|_, body| {
+                out.write_all(body)?;
+                out.write_all(b"\n")
+            })?;
+        }
+        LogCmd::Get { file, index, max_body } => out.write_all(&open_log(&file, max_body)?.get(index)?)?,
+        LogCmd::Ls { file } => {
+            for (i, r) in open_log(&file, 0)?.records().iter().enumerate() {
+                writeln!(out, "{i} {} {} {}", r.back, r.stored, String::from_utf8_lossy(&r.meta))?;
+            }
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+fn open_log(path: &std::path::Path, max_body: usize) -> io::Result<log::Reader<File>> {
+    let r = log::Reader::open(File::open(path)?, max_body)?;
+    if r.truncated {
+        eprintln!("{}: the file ends inside a record; reading the records before it", path.display());
+    }
+    Ok(r)
 }
 
 /// One request to the upstream, its response streamed back; a failure to reach it is a 502.
