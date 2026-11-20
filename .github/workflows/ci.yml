@@ -104,7 +104,7 @@ jobs:
           if [ "$c" -eq 3 ] && [ -s mutants.out/timeout.txt ] && ! [ -s mutants.out/missed.txt ]; then c=0; fi
           exit "$c"
 
-  # The Kani proofs (`#[cfg(kani)] mod proofs` in src/codec.rs): nothing else builds them, so a
+  # The Kani proofs (`#[cfg(kani)] mod proofs` in src/codec.rs and src/log.rs): nothing else builds them, so a
   # change to that code breaks them unseen. Kani 0.68.0, as the proofs were verified with; its own
   # nightly toolchain, so no -D warnings: RUSTFLAGS unset (an empty one is passed on as an argument).
   kani:

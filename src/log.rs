@@ -26,7 +26,7 @@ const VERSION: u8 = 1;
 /// writer then stores a record whole. Small spans chain for long, multi-MB requests restart sooner.
 /// ponytail: fixed bounds; a knob if random reads (or ratio) need another trade-off
 const MAX_DEPTH: usize = 4096;
-const MAX_CHAIN_BYTES: usize = if cfg!(test) { 1 << 20 } else { 1 << 30 };
+const MAX_CHAIN_BYTES: usize = if cfg!(test) { 1_048_576 } else { 1_073_741_824 }; // 1 MiB, 1 GiB
 
 /// (records back to the base, depth, bytes its chain rebuilds, the AWD1 delta)
 type Encoded = (u64, usize, usize, Vec<u8>);
@@ -103,12 +103,10 @@ impl<W: Write> Writer<W> {
         self.out.write_all(&delta)?;
         let index = self.next;
         self.next += 1;
-        if self.window > 0 {
-            if self.recent.len() == self.window {
-                self.recent.pop_front();
-            }
-            let chain = chain + body.len();
-            self.recent.push_back(Recent { index, hash, body, depth, chain });
+        let chain = chain + body.len();
+        self.recent.push_back(Recent { index, hash, body, depth, chain });
+        if self.recent.len() > self.window {
+            self.recent.pop_front();
         }
         Ok(index)
     }
@@ -178,11 +176,9 @@ impl<R: Read + Seek> Reader<R> {
             let back = self.records[i].back as usize;
             let body = if back == 0 { self.rebuild(i, b"")? } else { self.rebuild(i, &recent[recent.len() - back])? };
             f(&self.records[i], &body)?;
-            if self.window > 0 {
-                if recent.len() == self.window {
-                    recent.pop_front();
-                }
-                recent.push_back(body);
+            recent.push_back(body);
+            if recent.len() > self.window {
+                recent.pop_front();
             }
         }
         Ok(())
@@ -234,7 +230,8 @@ fn next_record(src: &mut (impl Read + Seek), len: u64, n: u64, window: u64) -> i
         return Err(invalid("a record names a base it cannot have"));
     }
     let Some(meta_len) = read_varint(src)? else { return Ok(None) };
-    if meta_len > len - src.stream_position()? {
+    // a meta longer than the rest of the file: the file ends inside it
+    if (len - src.stream_position()?).checked_sub(meta_len).is_none() {
         return Ok(None);
     }
     let mut meta = vec![0; meta_len as usize];
@@ -261,6 +258,11 @@ fn chain(records: &[Record], i: usize) -> Vec<usize> {
 }
 
 fn invalid(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    // Kani: the same kind without its message (a boxed `dyn Error` is beyond what CBMC models in
+    // memory); no proof checks the message
+    if cfg!(kani) {
+        return io::ErrorKind::InvalidData.into();
+    }
     io::Error::new(io::ErrorKind::InvalidData, e)
 }
 
@@ -319,11 +321,40 @@ mod proofs {
         let bytes: [u8; 5] = kani::any();
         let len: usize = kani::any_where(|&l: &usize| l <= 5);
         let (n, window): (u64, u64) = (kani::any(), kani::any());
-        let mut src = Cursor::new(&bytes[..len]);
+        let mut src = Tiny { bytes, len, pos: 0 };
         if let Ok(Some(r)) = next_record(&mut src, len as u64, n, window) {
             assert!(r.back <= n && r.back <= window);
             assert!(r.offset + r.stored <= len as u64);
-            assert!(src.position() == r.offset + r.stored, "the next record starts after this one");
+            assert!(src.pos as u64 == r.offset + r.stored, "the next record starts after this one");
+        }
+    }
+
+    /// A file of up to 5 bytes, read a byte at a time: what `Cursor` does, in less for CBMC to model.
+    struct Tiny {
+        bytes: [u8; 5],
+        len: usize,
+        pos: usize,
+    }
+
+    impl Read for Tiny {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.is_empty() || self.pos >= self.len {
+                return Ok(0);
+            }
+            buf[0] = self.bytes[self.pos];
+            self.pos += 1;
+            Ok(1)
+        }
+    }
+
+    impl Seek for Tiny {
+        fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+            match to {
+                SeekFrom::Start(p) if p <= self.len as u64 => self.pos = p as usize,
+                SeekFrom::Current(0) => {}
+                _ => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
+            }
+            Ok(self.pos as u64)
         }
     }
 
@@ -428,6 +459,62 @@ mod tests {
             assert_eq!(r.get(i).unwrap(), records[i].1, "record {i}");
         }
         assert_eq!(r.get(100).unwrap_err().kind(), io::ErrorKind::NotFound);
+        // against the one before (the window's edge), whole where the byte budget restarts a chain
+        assert!(
+            r.records()[1..].iter().all(|r| r.back <= 1) && r.records().iter().filter(|r| r.back == 1).count() > 90
+        );
+        assert_eq!(scanned(&file).unwrap().len(), 100);
+    }
+
+    #[test]
+    fn a_resent_context_deltas_against_the_base_sharing_the_most_not_the_newest_small_enough() {
+        let context: String = (0..1600).map(|i| hex(&codec::hash(format!("p{i}").as_bytes()))).collect();
+        let (cut, junk) = (context.len() * 99 / 100, "j".repeat(1000));
+        let old = Bytes::from(context.clone()); // all of the context
+        let new = Bytes::from(format!("{}{junk}", &context[..cut])); // 99% of it: small, not smallest
+        let target = Bytes::from(format!("{context} and a new turn"));
+        let file = write(4, &[(vec![], old), (vec![], new), (vec![], target)]);
+        let r = open(&file).unwrap();
+        assert_eq!(r.records()[2].back, 2);
+        assert!(r.records()[2].stored < 200, "{} bytes", r.records()[2].stored);
+    }
+
+    #[test]
+    fn with_no_base_making_it_small_the_smallest_delta_wins_and_the_newest_on_a_tie() {
+        let random = |tag: &str, n: usize| -> String {
+            (0..n).map(|i| hex(&codec::hash(format!("{tag}{i}").as_bytes()))).collect()
+        };
+        // the target shares half its bytes with `half`, in the middle (its edges are its own), and
+        // nothing with `other`: no delta comes under 1/64 of it
+        let shared = random("shared", 64);
+        let half = Bytes::from(format!("{}{shared}{}", random("h1", 32), random("h2", 32)));
+        let other = Bytes::from(random("other", 128));
+        let target = Bytes::from(format!("{}{shared}{}", random("t1", 32), random("t2", 32)));
+        let file = write(4, &[(vec![], half.clone()), (vec![], other.clone()), (vec![], target.clone())]);
+        assert_eq!(open(&file).unwrap().records()[2].back, 2, "the base it shares half with");
+        // two bases equally good: the newer one (a shorter way back)
+        let file = write(4, &[(vec![], half.clone()), (vec![], half), (vec![], other), (vec![], target)]);
+        assert_eq!(open(&file).unwrap().records()[3].back, 2);
+    }
+
+    #[test]
+    fn flush_reaches_the_underlying_writer() {
+        #[derive(Default)]
+        struct Flushes(Vec<u8>, usize);
+        impl Write for Flushes {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                self.0.extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.1 += 1;
+                Ok(())
+            }
+        }
+        let mut w = Writer::new(Flushes::default(), 1).unwrap();
+        w.append(b"", Bytes::from_static(b"x")).unwrap();
+        w.flush().unwrap();
+        assert_eq!(w.into_inner().1, 1);
     }
 
     #[test]
