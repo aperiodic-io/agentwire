@@ -185,6 +185,12 @@ plugins:
       content_type: application/json
 ```
 
+**Tested in CI with the three most deployed open-source gateways** ([tests/gateways/](tests/gateways/test_gateways.py),
+their real images): `agentwire client` and `agentwire server` in front of **LiteLLM** 1.110,
+**Kong** 3.9 and **Portkey** 1.15, with each gateway's logs stored by agentwire: Kong's `http-log`
+and LiteLLM's `generic_api` callback into `collect`, and for Portkey, which exports none,
+`agentwire server --record-dir` in front of it.
+
 **Measured against the real thing** (300 public SWE-agent runs, 16 traces in flight, the
 OpenTelemetry Python SDK's OTLP/HTTP exporter, protobuf and gzip):
 
