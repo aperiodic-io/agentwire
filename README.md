@@ -140,23 +140,30 @@ whose own trace's last span is 16 records back is tried against the bases in bet
 
 ### Collecting: `agentwire collect`
 
-A log sink for OTLP/HTTP traces and logs, and for any HTTP log plugin. It stores every request body
+A log sink for OTLP traces, logs and metrics, over HTTP or gRPC, and for any HTTP log plugin. It stores every request body
 in AWL1, gzip decoded, with its time, method, path, content type and the encoding it is still in
 (`-` for none; never a header). With `--forward` it then sends each request on, as received, to the
 real backend. Without one it answers OTLP's empty success. Put `agentwire client` in front of an
 exporter and the batches also cross the network as deltas.
 
 ```bash
-agentwire collect --record-dir /var/log/agentwire                         # a sink on :4318
+agentwire collect --record-dir /var/log/agentwire                         # a sink on :4318 and :4317
 agentwire collect --record-dir /var/log/agentwire --forward https://cloud.langfuse.com/api/public/otel
 ```
 
+**OTLP/gRPC.** Each address takes gRPC as well (HTTP/2 without TLS, as `insecure` exporters send
+it). An Export call's one message is stored, decompressed, as the record's body (content type
+`application/grpc`). `--forward` is an OTLP/HTTP endpoint: each Export goes on to it as OTLP/HTTP
+protobuf (`/v1/traces`, `/v1/logs` or `/v1/metrics`), and its answer comes back as the gRPC status
+(429 and 502–504 as `UNAVAILABLE`, which exporters retry). So a gRPC exporter can feed a backend
+that takes only OTLP/HTTP, such as Langfuse. TLS is for a proxy in front.
+
 **Langfuse (or any OTLP backend).** Point the exporter at the collector, keep its headers: they are
-forwarded, never stored. OTLP over gRPC is not supported, so use `http/protobuf` or `http/json`.
+forwarded, never stored.
 
 ```bash
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf   # or grpc, with http://127.0.0.1:4317
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(echo -n "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64 -w0)"
 ```
 
@@ -178,6 +185,12 @@ plugins:
       content_type: application/json
 ```
 
+**Tested in CI with the three most deployed open-source gateways** ([tests/gateways/](tests/gateways/test_gateways.py),
+their real images): `agentwire client` and `agentwire server` in front of **LiteLLM** 1.110,
+**Kong** 3.9 and **Portkey** 1.15, with each gateway's logs stored by agentwire: Kong's `http-log`
+and LiteLLM's `generic_api` callback into `collect`, and for Portkey, which exports none,
+`agentwire server --record-dir` in front of it.
+
 **Measured against the real thing** (300 public SWE-agent runs, 16 traces in flight, the
 OpenTelemetry Python SDK's OTLP/HTTP exporter, protobuf and gzip):
 
@@ -185,6 +198,7 @@ OpenTelemetry Python SDK's OTLP/HTTP exporter, protobuf and gzip):
 |---|---|---:|
 | SDK → `collect --forward` → Langfuse 3.227 | all 7,643 spans, in Langfuse and in the recording | **3.26 MB** of AWL1 for 338.6 MB of protobuf (104×). Langfuse itself kept 31.6 MiB in ClickHouse (ZSTD(3)) and 356 MB of raw events in S3 |
 | SDK → `collect --forward` → OpenTelemetry Collector 0.115 | all 7,343 chat spans, the same span ids at both ends | 2.63 MB for 338.5 MB (129×) |
+| SDK over **gRPC** (gzip) → `collect --forward` → OpenTelemetry Collector 0.115 (OTLP/HTTP) | all 7,343 chat spans | 3.28 MB for 338.6 MB (103×) |
 | 12 conversations, 4 at a time → Kong 3.9 `ai-proxy` → `http-log` → `collect` | all 329 log entries, each with the request's full message list | 325 KB for 16.8 MB of Kong logs (52×) |
 
 ### Recording a proxy, packing files
@@ -212,6 +226,19 @@ agentwire log unpack spans.awl > spans.jsonl
 ```rust
 let mut log = agentwire::log::Writer::new(std::io::BufWriter::new(file), 16)?;
 log.append(b"2026-11-20T14:15:00Z trace=ab12", body)?; // meta, body
+```
+
+**Embedded** (Python, [python/](python/README.md)): the same files, written and read from an ingest
+path or a notebook. `append` and reads release the GIL.
+
+```python
+import agentwire
+
+with agentwire.Writer("spans.awl", window=16) as w:
+    w.append(span_bytes, meta=b"trace=ab12")
+
+for meta, body in agentwire.Reader("/var/log/agentwire/1763650000000-4242-000000.awl"):
+    ...
 ```
 
 ## The library (Rust)
@@ -272,8 +299,8 @@ client.confirm(&request, response.headers().get(agentwire::KEPT).and_then(|v| v.
 | Flag | Env | Default | |
 |---|---|---|---|
 | `--record-dir` | `AGENTWIRE_RECORD_DIR` | (required) | The new AWL1 file goes here. |
-| `--forward` | `AGENTWIRE_FORWARD` | none | The backend each request is sent on to, as received. Without one, each is answered 200. |
-| `--listen` | `AGENTWIRE_LISTEN` | `127.0.0.1:4318` | OTLP/HTTP's port, on loopback: whoever reaches it can fill the disk. In a container, `0.0.0.0:4318` on a private network. |
+| `--forward` | `AGENTWIRE_FORWARD` | none | The backend each request is sent on to: as received, or a gRPC Export as OTLP/HTTP protobuf. Without one, each is acknowledged. |
+| `--listen` | `AGENTWIRE_LISTEN` | `127.0.0.1:4318,127.0.0.1:4317` | Where to listen; each address takes OTLP/HTTP and OTLP/gRPC. On loopback: whoever reaches it can fill the disk. In a container, `0.0.0.0:4318,0.0.0.0:4317` on a private network. |
 | `--record-window` | `AGENTWIRE_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per trace or exporter interleaved. |
 | `--rotate-bytes` | `AGENTWIRE_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. Every file reads on its own; deleting old ones (or shipping them to object storage) is yours to schedule. |
 | `--max-body` | `AGENTWIRE_MAX_BODY` | 64 MiB | The largest body stored, after gzip decoding; larger ones are answered 413. |
@@ -339,9 +366,10 @@ and [SECURITY.md](SECURITY.md).
 
 ## Status
 
-**0.1.** The wire format is version 1 and stable for 0.x. The Rust library and both proxies are
-complete and tested. Not built yet: bindings for Python, TypeScript and Go, and a base store shared
-across server replicas (use sticky routing; see [Deploying](#deploying)).
+**0.1.** The wire format is version 1 and stable for 0.x. The Rust library, both proxies, `collect`
+and the Python bindings for AWL1 are complete and tested. Not built yet: Python bindings for the
+AWD1 client, bindings for TypeScript and Go, and a base store shared across server replicas (use
+sticky routing; see [Deploying](#deploying)).
 
 ## Development
 

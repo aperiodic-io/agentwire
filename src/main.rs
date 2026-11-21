@@ -35,6 +35,8 @@ use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tower_layer::Layer;
 
+mod grpc;
+
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ResBody = UnsyncBoxBody<Bytes, BoxError>;
 
@@ -84,10 +86,11 @@ enum Mode {
     /// AWL1, gzip decoded; forward each request as received when given a backend. Also accepts
     /// AWD1 deltas from `agentwire client`.
     Collect {
+        /// Where to listen (repeat, or comma-separate); each address takes OTLP/HTTP and OTLP/gRPC.
         /// Loopback by default: anyone who can reach it can fill the disk. In a container, give
-        /// 0.0.0.0:4318 and put it on a private network.
-        #[arg(long, env = "AGENTWIRE_LISTEN", default_value = "127.0.0.1:4318")]
-        listen: SocketAddr,
+        /// 0.0.0.0:4318,0.0.0.0:4317 and put it on a private network.
+        #[arg(long, env = "AGENTWIRE_LISTEN", value_delimiter = ',', default_value = "127.0.0.1:4318,127.0.0.1:4317")]
+        listen: Vec<SocketAddr>,
         /// The new AWL1 file goes in this directory; read it with `agentwire log`.
         #[arg(long, env = "AGENTWIRE_RECORD_DIR")]
         record_dir: PathBuf,
@@ -190,12 +193,12 @@ async fn main() -> Result<(), BoxError> {
             let store = Store::new(store_bytes, Duration::from_secs(ttl_seconds));
             let scope_headers =
                 scope_headers.iter().map(|h| HeaderName::try_from(h.as_str())).collect::<Result<_, _>>()?;
-            let forward = Forward { http, upstream: Some(Arc::new(upstream)), record, max_body };
-            run_server(listen, store, Config { max_body, scope_headers }, metrics, forward).await
+            let forward = Forward { http, upstream: Some(Arc::new(upstream)), record, max_body, grpc: false };
+            run_server(vec![listen], store, Config { max_body, scope_headers }, metrics, forward).await
         }
         Mode::Collect { listen, record_dir, forward, record_window, rotate_bytes, max_body, metrics } => {
             let record = Some(Arc::new(Mutex::new(Recording::open(record_dir, record_window, rotate_bytes)?)));
-            let forward = Forward { http, upstream: forward.map(Arc::new), record, max_body };
+            let forward = Forward { http, upstream: forward.map(Arc::new), record, max_body, grpc: true };
             let config = Config { max_body, ..Config::default() };
             run_server(listen, Store::new(1 << 30, Duration::from_secs(1800)), config, metrics, forward).await
         }
@@ -225,7 +228,7 @@ async fn main() -> Result<(), BoxError> {
 
 /// The AWD1 layer in front of `forward`, until shutdown.
 async fn run_server(
-    listen: SocketAddr,
+    listen: Vec<SocketAddr>,
     store: Store,
     config: Config,
     metrics: Option<SocketAddr>,
@@ -241,7 +244,9 @@ async fn run_server(
         .await?;
     }
     let service = layer.layer(forward.clone());
-    serve(listen, move || TowerToHyperService::new(service.clone())).await
+    let make = move || TowerToHyperService::new(service.clone());
+    futures_util::future::try_join_all(listen.into_iter().map(|addr| serve(addr, make.clone()))).await?;
+    Ok(())
 }
 
 /// Accepts connections until SIGTERM or Ctrl-C, then lets requests in flight finish.
@@ -390,6 +395,8 @@ struct Forward {
     upstream: Option<Arc<reqwest::Url>>,
     record: Option<Recorder>,
     max_body: usize,
+    /// `collect`: take OTLP/gRPC Export calls too
+    grpc: bool,
 }
 
 impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
@@ -404,8 +411,12 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
     fn call(&mut self, request: Request<InnerBody<Incoming>>) -> Self::Future {
         let (http, upstream, record, max_body) =
             (self.http.clone(), self.upstream.clone(), self.record.clone(), self.max_body);
+        let grpc = self.grpc && grpc::is_grpc(request.headers());
         Box::pin(async move {
             let (parts, body) = request.into_parts();
+            if let (true, Some(record)) = (grpc, &record) {
+                return Ok(export(&http, upstream.as_deref(), record, parts, body, max_body).await);
+            }
             let (Some(record), upstream) = (record, &upstream) else {
                 let upstream = upstream.as_ref().expect("a server without a recorder has an upstream");
                 return Ok(forward(&http, upstream, &parts, reqwest::Body::wrap(body)).await);
@@ -418,20 +429,83 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
                 Ok(d) => d,
                 Err(code) => return Ok(status(code)),
             };
-            let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
-            let ct = parts.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|v| v.replace(' ', ""));
-            let meta = format!("{} {} {path} {} {encoding}", unix_ms(), parts.method, ct.as_deref().unwrap_or("-"));
-            // stored and flushed before it is forwarded: what the upstream saw is on disk
-            // ponytail: one writer behind a lock; a writer per shard if recording limits throughput
-            // a failed write is logged and counted where it happens; it never stops the request
-            if let Err(e) = tokio::task::spawn_blocking(move || lock(&record).append(meta.as_bytes(), stored)).await {
-                tracing::error!(error = %e, "recording panicked; forwarding the request unrecorded");
-            }
+            store(&record, &parts, &encoding, stored).await;
             Ok(match upstream {
                 Some(upstream) => forward(&http, upstream, &parts, body).await,
                 None => ack(&parts.headers),
             })
         })
+    }
+}
+
+/// Stores one record, flushed, before the request goes on: what the upstream saw is on disk. Its
+/// meta is the time, method, path, content type and the encoding `body` is still in.
+// ponytail: one writer behind a lock; a writer per shard if recording limits throughput
+async fn store(record: &Recorder, parts: &http::request::Parts, encoding: &str, body: Bytes) {
+    let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
+    let ct = parts.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|v| v.replace(' ', ""));
+    let meta = format!("{} {} {path} {} {encoding}", unix_ms(), parts.method, ct.as_deref().unwrap_or("-"));
+    let record = record.clone();
+    // a failed write is logged and counted where it happens; it never stops the request
+    if let Err(e) = tokio::task::spawn_blocking(move || lock(&record).append(meta.as_bytes(), body)).await {
+        tracing::error!(error = %e, "recording panicked; forwarding the request unrecorded");
+    }
+}
+
+/// One OTLP/gRPC Export call: its message is stored (decompressed), then sent on to the backend as
+/// OTLP/HTTP protobuf, whose answer comes back as the gRPC status; or acknowledged, without one.
+async fn export(
+    http: &reqwest::Client,
+    upstream: Option<&reqwest::Url>,
+    record: &Recorder,
+    mut parts: http::request::Parts,
+    body: InnerBody<Incoming>,
+    max_body: usize,
+) -> Response<ResBody> {
+    let Some(otlp_path) = grpc::otlp_http_path(parts.uri.path()) else {
+        return grpc::error(grpc::Code::Unimplemented, "not an OTLP Export method");
+    };
+    let Ok(body) = Limited::new(body, max_body + 5).collect().await.map(|b| b.to_bytes()) else {
+        return grpc::error(grpc::Code::ResourceExhausted, "the export exceeds the size limit");
+    };
+    let (message, compressed) = match grpc::message(&body) {
+        Ok(m) => m,
+        Err(code) => return grpc::error(code, "not one length-prefixed message"),
+    };
+    let message = if compressed {
+        let gzip = parts.headers.get("grpc-encoding").is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"gzip"));
+        if !gzip {
+            return grpc::error(grpc::Code::Unimplemented, "only gzip compression is supported");
+        }
+        match gunzip(message, max_body) {
+            Ok(m) => m,
+            Err(StatusCode::PAYLOAD_TOO_LARGE) => {
+                return grpc::error(grpc::Code::ResourceExhausted, "the export exceeds the size limit");
+            }
+            Err(_) => return grpc::error(grpc::Code::InvalidArgument, "the message is not gzip"),
+        }
+    } else {
+        body.slice_ref(message)
+    };
+    store(record, &parts, "-", message.clone()).await;
+    let Some(upstream) = upstream else { return grpc::ok(b"") };
+    // OTLP/HTTP: the same message, as protobuf, at the signal's path; the request's other headers
+    // (authorization, user-agent) go along
+    parts.uri = http::Uri::from_static(otlp_path);
+    parts.headers.insert(header::CONTENT_TYPE, http::HeaderValue::from_static("application/x-protobuf"));
+    for name in ["grpc-encoding", "grpc-accept-encoding", "grpc-timeout", "content-length"] {
+        parts.headers.remove(name);
+    }
+    let response = forward(http, upstream, &parts, message).await;
+    let code = grpc::code_for(response.status());
+    if code != grpc::Code::Ok {
+        return grpc::error(code, "the backend refused the export");
+    }
+    // an Export response from the backend the operator configured, as an HTTP answer is streamed
+    // back unbounded: small (a partial-success count at most)
+    match response.into_body().collect().await {
+        Ok(answer) => grpc::ok(&answer.to_bytes()),
+        Err(_) => grpc::error(grpc::Code::Unknown, "the backend's answer could not be read"),
     }
 }
 
@@ -542,15 +616,20 @@ fn decoded(headers: &HeaderMap, body: Bytes, max: usize) -> Result<(Bytes, Strin
     if !encoding.eq_ignore_ascii_case("gzip") && !encoding.eq_ignore_ascii_case("x-gzip") {
         return Ok((body, encoding.replace(' ', "")));
     }
+    Ok((gunzip(&body, max)?, "-".to_owned()))
+}
+
+/// Gzip (one member or several) decoded to at most `max` bytes: 413 past it, 400 for what is not gzip.
+fn gunzip(body: &[u8], max: usize) -> Result<Bytes, StatusCode> {
     let mut out = Vec::new();
-    flate2::read::MultiGzDecoder::new(&body[..])
+    flate2::read::MultiGzDecoder::new(body)
         .take(max as u64 + 1)
         .read_to_end(&mut out)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if out.len() > max {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
-    Ok((Bytes::from(out), "-".to_owned()))
+    Ok(Bytes::from(out))
 }
 
 /// A collector's answer: OTLP/HTTP's empty success, in the request's content type.

@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 jobs:
   crate:
-    runs-on: celesto-memory
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: |
@@ -20,7 +20,7 @@ jobs:
         env: { CARGO_REGISTRY_TOKEN: "${{ secrets.CARGO_REGISTRY_TOKEN }}" }
 
   image:
-    runs-on: celesto-memory
+    runs-on: ubuntu-24.04
     permissions: { contents: read, packages: write }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -39,7 +39,7 @@ jobs:
 
   github-release:
     needs: [crate, image]
-    runs-on: celesto-memory
+    runs-on: ubuntu-24.04
     permissions: { contents: write }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

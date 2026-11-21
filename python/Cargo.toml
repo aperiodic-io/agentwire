@@ -1,0 +1,26 @@
+[package]
+name = "agentwire-python"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Python bindings for AWL1: LLM request logs and trace spans stored as deltas."
+repository = "https://github.com/aperiodic-io/agentwire"
+publish = false
+
+[lib]
+# the Python module is `agentwire`; the Rust crate it wraps is renamed `awl` here
+name = "agentwire"
+crate-type = ["cdylib"]
+
+[dependencies]
+awl = { package = "agentwire", path = "..", default-features = false }
+bytes = "1"
+# one wheel for CPython 3.9 and later
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py39"] }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+# a workspace of its own: the crate's tests, coverage and mutants never build it
+[workspace]

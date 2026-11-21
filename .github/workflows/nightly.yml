@@ -11,7 +11,7 @@ env:
   RUSTFLAGS: -D warnings
 jobs:
   mutants:
-    runs-on: celesto-memory
+    runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
       fail-fast: false
@@ -40,7 +40,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   fuzz:
-    runs-on: celesto-memory
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env: { RUSTFLAGS: "" }
     steps:

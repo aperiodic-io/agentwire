@@ -45,3 +45,45 @@ Feature: Logs and traces cross the network as deltas and are stored as deltas
     Given an agentwire collector recording to a directory, with a size limit of 1000 bytes
     When an exporter posts a 2000-byte body to be kept as a base
     Then it is answered 413, not kept as a base, and nothing is recorded
+
+  Scenario: A gRPC exporter's gzip exports are stored as their protobuf messages
+    Given an agentwire collector recording to a directory
+    When a gRPC exporter sends 6 gzip-compressed trace exports
+    Then every export is answered with gRPC status 0 and an empty response message
+    And the recording holds every export's message, with its gRPC method and content type
+
+  Scenario: With a backend, gRPC exports go on as OTLP/HTTP protobuf
+    Given an upstream API
+    And an agentwire collector in front of it, recording to a directory
+    When a gRPC exporter sends 3 gzip-compressed trace exports
+    Then every export is answered with gRPC status 0
+    And the upstream received every export's message at "/v1/traces" as "application/x-protobuf"
+
+  Scenario: A backend that cannot be reached is reported to the exporter as UNAVAILABLE
+    Given an upstream API
+    And an agentwire collector in front of it, recording to a directory
+    When the upstream API is down
+    And a gRPC exporter sends 1 gzip-compressed trace exports
+    Then the export is answered with gRPC status 14
+
+  Scenario: A gRPC body that is not one length-prefixed message is refused, and not recorded
+    Given an agentwire collector recording to a directory
+    When a gRPC exporter sends a body that is not one length-prefixed message
+    Then the export is answered with gRPC status 3
+    And nothing is recorded
+
+  Scenario Outline: A gRPC call is taken or refused with the status an exporter acts on
+    Given an agentwire collector recording to a directory, with a size limit of 1000 bytes
+    When a gRPC exporter sends <call>
+    Then the export is answered with gRPC status <status>
+    And the number of records stored is <records>
+
+    Examples:
+      | call                                               | status | records |
+      | an uncompressed export of 1000 bytes               | 0      | 1       |
+      | an uncompressed export of 1001 bytes               | 8      | 0       |
+      | a gzip export that inflates to 1000 bytes          | 0      | 1       |
+      | a gzip export that inflates to 1001 bytes          | 8      | 0       |
+      | an export compressed with deflate                  | 12     | 0       |
+      | an export flagged as gzip that is not gzip         | 3      | 0       |
+      | a call to a method other than Export               | 12     | 0       |

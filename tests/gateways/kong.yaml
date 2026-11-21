@@ -1,0 +1,23 @@
+# Kong AI Gateway (DB-less): ai-proxy in front of the mock model, its payload logs to agentwire collect
+_format_version: "3.0"
+services:
+  - name: llm
+    url: http://127.0.0.1:18080
+    routes:
+      - name: chat
+        paths: ["/v1/chat/completions"]
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              max_request_body_size: 16777216
+              auth: { header_name: Authorization, header_value: "Bearer mock" }
+              logging: { log_payloads: true, log_statistics: true }
+              model:
+                provider: openai
+                name: gpt-4o
+                options: { upstream_url: "http://127.0.0.1:18080/v1/chat/completions" }
+          - name: http-log
+            config:
+              http_endpoint: http://127.0.0.1:14318/kong
+              content_type: application/json

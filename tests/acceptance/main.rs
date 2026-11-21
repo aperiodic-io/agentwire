@@ -45,6 +45,8 @@ struct Proxies {
     /// what an exporter posted: the gzip bytes, and the status of the last post
     gzipped: Vec<Bytes>,
     posted: Option<(u16, HeaderMap, Bytes)>,
+    /// gRPC exports: the message sent, and (grpc-status, response message) for each
+    grpc: Vec<(Bytes, Option<u32>, Bytes)>,
 }
 
 #[derive(Debug)]
@@ -97,7 +99,9 @@ async fn upstream() -> (SocketAddr, Recorded, tokio::task::JoinHandle<()>) {
                     let (parts, body) = r.into_parts();
                     let body = body.collect().await.unwrap().to_bytes();
                     let frames = answer(&body);
-                    seen.lock().unwrap().push((parts.headers, body));
+                    let mut headers = parts.headers;
+                    headers.insert("x-test-path", parts.uri.path().parse().unwrap()); // for the steps
+                    seen.lock().unwrap().push((headers, body));
                     let stream =
                         futures_util::stream::iter(frames.into_iter().map(|f| Ok::<_, Infallible>(Frame::data(f))));
                     Ok::<_, Infallible>(Response::new(StreamBody::new(stream)))
@@ -177,6 +181,10 @@ async fn spawn(args: &[&str]) -> Proc {
 }
 
 impl Proxies {
+    fn upstream_paths(&self) -> Vec<String> {
+        self.recorded().iter().map(|(h, _)| h["x-test-path"].to_str().unwrap().to_owned()).collect()
+    }
+
     fn recorded(&self) -> Vec<(HeaderMap, Bytes)> {
         self.upstream.as_ref().unwrap().1.lock().unwrap().clone()
     }
@@ -712,6 +720,150 @@ async fn upstream_received_gzip(w: &mut Proxies) {
 #[then(expr = "the batches after the first crossed the network in under {int}% of their decoded size")]
 async fn batches_ratio(w: &mut Proxies, percent: u64) {
     ratio(w, percent).await;
+}
+
+const TRACE_EXPORT: &str = "/opentelemetry.proto.collector.trace.v1.TraceService/Export";
+
+/// One unary gRPC call over HTTP/2 without TLS (h2c, prior knowledge), as OTLP/gRPC exporters make
+/// it: `framed` is the length-prefixed body. Returns grpc-status (from the headers of a trailers-only
+/// answer, or the trailers) and the response's body.
+async fn grpc_call(to: SocketAddr, path: &str, framed: Bytes, gzip: bool) -> (Option<u32>, Bytes) {
+    grpc_call_with(to, path, framed, gzip.then_some("gzip")).await
+}
+
+async fn grpc_call_with(to: SocketAddr, path: &str, framed: Bytes, encoding: Option<&str>) -> (Option<u32>, Bytes) {
+    let io = TokioIo::new(TcpStream::connect(to).await.unwrap());
+    let (mut send, conn) = hyper::client::conn::http2::handshake(TokioExecutor::new(), io).await.unwrap();
+    tokio::spawn(conn);
+    let mut request =
+        Request::post(format!("http://{to}{path}")).header("content-type", "application/grpc").header("te", "trailers");
+    if let Some(encoding) = encoding {
+        request = request.header("grpc-encoding", encoding);
+    }
+    let response = send.send_request(request.body(http_body_util::Full::new(framed)).unwrap()).await.unwrap();
+    assert_eq!(response.status(), 200, "gRPC answers HTTP 200 and puts the outcome in grpc-status");
+    let status = |h: &HeaderMap| h.get("grpc-status").map(|v| v.to_str().unwrap().parse::<u32>().unwrap());
+    let mut grpc_status = status(response.headers());
+    let collected = response.into_body().collect().await.unwrap();
+    if let Some(trailers) = collected.trailers() {
+        grpc_status = grpc_status.or(status(trailers));
+    }
+    (grpc_status, collected.to_bytes())
+}
+
+/// gRPC's length-prefixed message: a compressed flag, a big-endian length, the bytes.
+fn grpc_frame(compressed: bool, message: &[u8]) -> Bytes {
+    let mut f = vec![u8::from(compressed)];
+    f.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    f.extend_from_slice(message);
+    Bytes::from(f)
+}
+
+#[when(expr = "a gRPC exporter sends {int} gzip-compressed trace exports")]
+async fn grpc_exports(w: &mut Proxies, n: usize) {
+    let to = w.server.as_ref().unwrap().addr;
+    for turn in 1..=n {
+        // the collector stores the message as is: any bytes stand in for an ExportTraceServiceRequest
+        let message = batch(turn);
+        let (status, body) = grpc_call(to, TRACE_EXPORT, grpc_frame(true, &gzip(&message)), true).await;
+        w.grpc.push((message, status, body));
+    }
+}
+
+#[when("a gRPC exporter sends a body that is not one length-prefixed message")]
+async fn grpc_garbage(w: &mut Proxies) {
+    let to = w.server.as_ref().unwrap().addr;
+    let (status, body) = grpc_call(to, TRACE_EXPORT, Bytes::from_static(b"\x00\x00\x00"), false).await;
+    w.grpc.push((Bytes::new(), status, body));
+}
+
+#[then("every export is answered with gRPC status 0 and an empty response message")]
+async fn grpc_ok_empty(w: &mut Proxies) {
+    for (i, (_, status, body)) in w.grpc.iter().enumerate() {
+        assert_eq!((*status, &body[..]), (Some(0), &b"\x00\x00\x00\x00\x00"[..]), "export {i}");
+    }
+}
+
+#[then("every export is answered with gRPC status 0")]
+async fn grpc_ok(w: &mut Proxies) {
+    assert!(
+        w.grpc.iter().all(|(_, status, _)| *status == Some(0)),
+        "{:?}",
+        w.grpc.iter().map(|g| g.1).collect::<Vec<_>>()
+    );
+}
+
+#[then(expr = "the export is answered with gRPC status {int}")]
+async fn grpc_status_is(w: &mut Proxies, code: u32) {
+    assert_eq!(w.grpc.last().unwrap().1, Some(code));
+}
+
+#[then("the recording holds every export's message, with its gRPC method and content type")]
+async fn recording_holds_grpc(w: &mut Proxies) {
+    let file = recording(w);
+    let listed = String::from_utf8(log(&["ls", &file], b"").await).unwrap();
+    assert_eq!(listed.lines().count(), w.grpc.len(), "{listed}");
+    for (i, line) in listed.lines().enumerate() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields[4..], ["POST", TRACE_EXPORT, "application/grpc", "-"], "{line}");
+        assert!(log(&["get", &file, &i.to_string()], b"").await == w.grpc[i].0, "export {i}");
+    }
+}
+
+#[then(expr = "the upstream received every export's message at {string} as {string}")]
+async fn upstream_received_otlp_http(w: &mut Proxies, path: String, content_type: String) {
+    let recorded = w.recorded();
+    assert_eq!(recorded.len(), w.grpc.len());
+    for ((headers, body), (message, ..)) in recorded.iter().zip(&w.grpc) {
+        assert!(body == message);
+        assert_eq!(headers["content-type"], content_type.as_str());
+        assert!(headers.get("grpc-encoding").is_none() && headers.get("content-encoding").is_none());
+    }
+    assert!(w.upstream_paths().iter().all(|p| *p == path), "{:?}", w.upstream_paths());
+}
+
+#[when(regex = r"^a gRPC exporter sends (an uncompressed export of|a gzip export that inflates to) (\d+) bytes$")]
+async fn grpc_sized(w: &mut Proxies, kind: String, n: usize) {
+    let to = w.server.as_ref().unwrap().addr;
+    let message = Bytes::from(vec![b's'; n]);
+    let (framed, gz) = if kind.starts_with("a gzip") {
+        (grpc_frame(true, &gzip(&message)), true)
+    } else {
+        (grpc_frame(false, &message), false)
+    };
+    let (status, body) = grpc_call(to, TRACE_EXPORT, framed, gz).await;
+    w.grpc.push((message, status, body));
+}
+
+#[when(
+    regex = r"^a gRPC exporter sends (an export compressed with deflate|an export flagged as gzip that is not gzip|a call to a method other than Export)$"
+)]
+async fn grpc_refused(w: &mut Proxies, call: String) {
+    let to = w.server.as_ref().unwrap().addr;
+    let (path, framed, gz) = match call.as_str() {
+        "an export compressed with deflate" => (TRACE_EXPORT, grpc_frame(true, b"deflated"), false),
+        "an export flagged as gzip that is not gzip" => (TRACE_EXPORT, grpc_frame(true, b"not gzip"), true),
+        _ => ("/grpc.health.v1.Health/Check", grpc_frame(false, b""), false),
+    };
+    // `false` for gzip with a compressed frame: grpc_call sends no grpc-encoding, so say deflate
+    let (status, body) = if call.contains("deflate") {
+        grpc_call_with(to, path, framed, Some("deflate")).await
+    } else {
+        grpc_call(to, path, framed, gz).await
+    };
+    w.grpc.push((Bytes::new(), status, body));
+}
+
+#[then(expr = "the number of records stored is {int}")]
+async fn recording_holds_n(w: &mut Proxies, n: usize) {
+    let listed = String::from_utf8(log(&["ls", &recording(w)], b"").await).unwrap();
+    assert_eq!(listed.lines().count(), n, "{listed}");
+}
+
+#[then("nothing is recorded")]
+async fn nothing_recorded(w: &mut Proxies) {
+    let listed = log(&["ls", &recording(w)], b"").await;
+    assert!(listed.is_empty(), "{}", String::from_utf8_lossy(&listed));
 }
 
 #[then(expr = "it is answered {int} and nothing is recorded")]

@@ -5,3 +5,5 @@
 /mutants.out*
 lcov.info
 .DS_Store
+/python/target
+__pycache__/

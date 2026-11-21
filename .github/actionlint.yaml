@@ -1,3 +1,0 @@
-self-hosted-runner:
-  # the organisation's runners (workflows/*.yml)
-  labels: [celesto-memory, celesto-large]
