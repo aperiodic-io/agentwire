@@ -5,6 +5,11 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- Python bindings for AWL1 (`python/`, built with maturin, one abi3 wheel for CPython 3.9+):
+  `agentwire.Writer` and `agentwire.Reader`, reading and writing the same files as the CLI and
+  `collect`.
+- `agentwire::log::Records`: a `Reader` iterates its records in order (`for (record, body) in
+  reader`), each body rebuilt once.
 - `agentwire collect` takes OTLP over gRPC (HTTP/2 without TLS) on every address it listens on, by
   default 127.0.0.1:4318 and 127.0.0.1:4317. An Export call's message is stored decompressed; with
   `--forward` it goes on as OTLP/HTTP protobuf, and the backend's answer comes back as the gRPC

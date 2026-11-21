@@ -222,6 +222,19 @@ let mut log = agentwire::log::Writer::new(std::io::BufWriter::new(file), 16)?;
 log.append(b"2026-11-20T14:15:00Z trace=ab12", body)?; // meta, body
 ```
 
+**Embedded** (Python, [python/](python/README.md)): the same files, written and read from an ingest
+path or a notebook. `append` and reads release the GIL.
+
+```python
+import agentwire
+
+with agentwire.Writer("spans.awl", window=16) as w:
+    w.append(span_bytes, meta=b"trace=ab12")
+
+for meta, body in agentwire.Reader("/var/log/agentwire/1763650000000-4242-000000.awl"):
+    ...
+```
+
 ## The library (Rust)
 
 ```toml
@@ -347,9 +360,10 @@ and [SECURITY.md](SECURITY.md).
 
 ## Status
 
-**0.1.** The wire format is version 1 and stable for 0.x. The Rust library and both proxies are
-complete and tested. Not built yet: bindings for Python, TypeScript and Go, and a base store shared
-across server replicas (use sticky routing; see [Deploying](#deploying)).
+**0.1.** The wire format is version 1 and stable for 0.x. The Rust library, both proxies, `collect`
+and the Python bindings for AWL1 are complete and tested. Not built yet: Python bindings for the
+AWD1 client, bindings for TypeScript and Go, and a base store shared across server replicas (use
+sticky routing; see [Deploying](#deploying)).
 
 ## Development
 

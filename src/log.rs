@@ -173,15 +173,22 @@ impl<R: Read + Seek> Reader<R> {
     pub fn scan(&mut self, mut f: impl FnMut(&Record, &[u8]) -> io::Result<()>) -> io::Result<()> {
         let mut recent: VecDeque<Vec<u8>> = VecDeque::new();
         for i in 0..self.records.len() {
-            let back = self.records[i].back as usize;
-            let body = if back == 0 { self.rebuild(i, b"")? } else { self.rebuild(i, &recent[recent.len() - back])? };
+            let body = self.in_order(i, &recent)?;
             f(&self.records[i], &body)?;
-            recent.push_back(body);
-            if recent.len() > self.window {
-                recent.pop_front();
-            }
+            remember(&mut recent, body, self.window);
         }
         Ok(())
+    }
+
+    /// Record `i`'s body, the records before it having been read in order into `recent`.
+    fn in_order(&mut self, i: usize, recent: &VecDeque<Vec<u8>>) -> io::Result<Vec<u8>> {
+        match self.records[i].back as usize {
+            0 => self.rebuild(i, b""),
+            back => {
+                // `open` admitted back <= i and back <= window, and `recent` holds min(i, window)
+                self.rebuild(i, &recent[recent.len() - back])
+            }
+        }
     }
 
     fn rebuild(&mut self, i: usize, base: &[u8]) -> io::Result<Vec<u8>> {
@@ -255,6 +262,55 @@ fn chain(records: &[Record], i: usize) -> Vec<usize> {
         chain.push(at);
     }
     chain
+}
+
+/// Keeps the `window` latest bodies: the ones a later record may name as its base.
+fn remember(recent: &mut VecDeque<Vec<u8>>, body: Vec<u8>, window: usize) {
+    recent.push_back(body);
+    if recent.len() > window {
+        recent.pop_front();
+    }
+}
+
+/// Every record in order with its body, each rebuilt once, as [`Reader::scan`] reads them. After an
+/// error it yields nothing more.
+#[derive(Debug)]
+pub struct Records<R> {
+    reader: Reader<R>,
+    next: usize,
+    recent: VecDeque<Vec<u8>>,
+    failed: bool,
+}
+
+impl<R: Read + Seek> IntoIterator for Reader<R> {
+    type Item = io::Result<(Record, Vec<u8>)>;
+    type IntoIter = Records<R>;
+
+    fn into_iter(self) -> Records<R> {
+        Records { reader: self, next: 0, recent: VecDeque::new(), failed: false }
+    }
+}
+
+impl<R: Read + Seek> Iterator for Records<R> {
+    type Item = io::Result<(Record, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let i = self.next;
+        if self.failed || i >= self.reader.records.len() {
+            return None;
+        }
+        self.next += 1;
+        match self.reader.in_order(i, &self.recent) {
+            Ok(body) => {
+                remember(&mut self.recent, body.clone(), self.reader.window);
+                Some(Ok((self.reader.records[i].clone(), body)))
+            }
+            Err(e) => {
+                self.failed = true;
+                Some(Err(e))
+            }
+        }
+    }
 }
 
 fn invalid(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
@@ -432,6 +488,22 @@ mod tests {
         assert!(r.records()[3..].iter().all(|r| r.back == 3), "each finds its own conversation");
         let back: Vec<_> = scanned(&file).unwrap();
         assert_eq!(back, records.iter().map(|(m, b)| (m.clone(), b.to_vec())).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_reader_iterates_its_records_in_order_as_scan_reads_them() {
+        let records: Vec<_> =
+            (1..=6).flat_map(|t| ["a", "b"].map(|n| (format!("{n}{t}").into_bytes(), request(n, t)))).collect();
+        let file = write(2, &records);
+        let iterated: Vec<(Vec<u8>, Vec<u8>)> =
+            open(&file).unwrap().into_iter().map(|r| r.map(|(rec, body)| (rec.meta, body)).unwrap()).collect();
+        assert_eq!(iterated, scanned(&file).unwrap());
+        let mut bad = file.clone();
+        *bad.last_mut().unwrap() ^= 1;
+        let mut it = open(&bad).unwrap().into_iter();
+        assert_eq!(it.by_ref().take(11).filter(Result::is_ok).count(), 11);
+        assert!(it.next().unwrap().is_err(), "the corrupt last record");
+        assert!(it.next().is_none(), "and nothing after it");
     }
 
     #[test]
