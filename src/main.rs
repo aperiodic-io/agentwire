@@ -501,10 +501,11 @@ async fn export(
     if code != grpc::Code::Ok {
         return grpc::error(code, "the backend refused the export");
     }
-    // an Export response from the configured backend: small (a partial-success count at most)
-    match response.into_body().collect().await.map(|b| b.to_bytes()) {
-        Ok(answer) if answer.len() <= max_body => grpc::ok(&answer),
-        _ => grpc::error(grpc::Code::Unknown, "the backend's answer could not be read"),
+    // an Export response from the backend the operator configured, as an HTTP answer is streamed
+    // back unbounded: small (a partial-success count at most)
+    match response.into_body().collect().await {
+        Ok(answer) => grpc::ok(&answer.to_bytes()),
+        Err(_) => grpc::error(grpc::Code::Unknown, "the backend's answer could not be read"),
     }
 }
 
