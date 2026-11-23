@@ -1,18 +1,18 @@
 # Integrations
 
 How to get the logs of each popular coding agent, agent framework, gateway, cloud platform and
-telemetry pipeline into Logpak.
+telemetry pipeline into Deltapack.
 
 **OpenTelemetry is the main interface.** Point the OTLP exporter your tool, framework or gateway
-already has at `logpak collect`. With `--forward`, every batch is also passed on, as received, to
+already has at `deltapack collect`. With `--forward`, every batch is also passed on, as received, to
 the backend you use today (Langfuse, Phoenix, Datadog, an OpenTelemetry Collector). Nothing sits
-in the path of your model calls, and turning Logpak off is one environment variable.
+in the path of your model calls, and turning Deltapack off is one environment variable.
 
 | Way in | Command | Use it when |
 |---|---|---|
-| **A. OpenTelemetry** (main) | `logpak collect --record-dir DIR [--forward URL]` | the tool exports OTLP with the messages: most frameworks and gateways, and the coding agents marked so below |
-| **B. Recording proxy** (fallback) | `logpak server --upstream URL --record-dir DIR` | the tool exports no content over OTel, or you need the exact API request bytes |
-| **C. Pack a file** | `logpak log pack FILE.lpk < lines.jsonl` | logs that already land in files or buckets (Bedrock, Vertex, exports) |
+| **A. OpenTelemetry** (main) | `deltapack collect --record-dir DIR [--forward URL]` | the tool exports OTLP with the messages: most frameworks and gateways, and the coding agents marked so below |
+| **B. Recording proxy** (fallback) | `deltapack server --upstream URL --record-dir DIR` | the tool exports no content over OTel, or you need the exact API request bytes |
+| **C. Pack a file** | `deltapack log pack FILE.dpk < lines.jsonl` | logs that already land in files or buckets (Bedrock, Vertex, exports) |
 
 `collect` also takes plain JSON log POSTs on any path, which is how gateways with an HTTP log
 plugin (Kong, LiteLLM, APISIX) send their payload logs.
@@ -21,7 +21,7 @@ plugin (Kong, LiteLLM, APISIX) send their payload logs.
 
 - **full request:** the API request body itself, conversation history included.
 - **messages:** the input and output messages on each span or log record, once content capture is
-  on. Each record still repeats the conversation, so this is what Logpak compresses best.
+  on. Each record still repeats the conversation, so this is what Deltapack compresses best.
 - **prompts only:** the user's prompt and the reply, not the history sent with them.
 - **metadata only:** model, tokens, latency and cost. No content.
 - **no OTel.**
@@ -30,7 +30,7 @@ For **full request** and **messages**, use A. For the rest, use B.
 
 **Sources.** Keys and flags below were read from each project's official documentation in
 November 2026, and each section links its pages. Settings marked *(unverified)* were not
-confirmed by the docs. Check those against the linked page before you rely on them. Logpak's
+confirmed by the docs. Check those against the linked page before you rely on them. Deltapack's
 CI runs only LiteLLM, Kong and Portkey ([tests/gateways/](../tests/gateways/test_gateways.py)).
 Langfuse and the OpenTelemetry Collector were run end to end once, by hand (the README's
 "Measured end to end"). The rest have not been run end to end.
@@ -85,7 +85,7 @@ Langfuse and the OpenTelemetry Collector were run end to end once, by hand (the 
 (OTLP/HTTP, protobuf or JSON) or `http://127.0.0.1:4317` (OTLP/gRPC without TLS).
 
 ```bash
-logpak collect --record-dir ~/logpak/otel
+deltapack collect --record-dir ~/deltapack/otel
 ```
 
 ```bash
@@ -98,7 +98,7 @@ To keep your current backend, add `--forward` with its OTLP/HTTP base URL, and l
 backend are in [Forwarding](#forwarding-to-an-observability-backend).
 
 ```bash
-logpak collect --record-dir ~/logpak/otel --forward https://cloud.langfuse.com/api/public/otel
+deltapack collect --record-dir ~/deltapack/otel --forward https://cloud.langfuse.com/api/public/otel
 ```
 
 **Turn content capture on.** Most tracers leave prompts out by default. Each section names the
@@ -109,18 +109,18 @@ flag. Some tools put the content on log records rather than spans. Those also ne
 (Claude Code at 60 KB, Qwen Code at 1 MiB, VS Code Copilot by `maxAttributeSizeChars`), the
 section says how to raise it.
 
-**The base-URL rule (B).** Start `logpak server` with the provider's origin as `--upstream`.
+**The base-URL rule (B).** Start `deltapack server` with the provider's origin as `--upstream`.
 Then take the base URL the tool uses today, swap the origin for `http://127.0.0.1:8080`, and keep
 the path. `https://api.openai.com/v1` becomes `http://127.0.0.1:8080/v1`, and
 `https://api.anthropic.com` becomes `http://127.0.0.1:8080`. The server appends the request's path
 to the upstream's, and passes your API key headers through untouched.
 
 ```bash
-logpak server --listen 127.0.0.1:8080 --upstream https://api.anthropic.com --record-dir ~/logpak/anthropic
+deltapack server --listen 127.0.0.1:8080 --upstream https://api.anthropic.com --record-dir ~/deltapack/anthropic
 ```
 
 ```bash
-logpak server --listen 127.0.0.1:8081 --upstream https://api.openai.com --record-dir ~/logpak/openai
+deltapack server --listen 127.0.0.1:8081 --upstream https://api.openai.com --record-dir ~/deltapack/openai
 ```
 
 Run one server per provider, each on its own port and directory. The proxy speaks plain HTTP,
@@ -129,8 +129,8 @@ including streamed (SSE) responses. It does not speak WebSocket. The default `--
 
 **Any common compression works.** `collect` and `server --record-dir` decode gzip, deflate, brotli,
 zstd and snappy before they store a body, and gRPC messages by their `grpc-encoding`. A coding
-outside that list (lz4, for one) is stored as sent, which leaves Logpak nothing to delta.
-`logpak log ls` names the encoding of any record still compressed.
+outside that list (lz4, for one) is stored as sent, which leaves Deltapack nothing to delta.
+`deltapack log ls` names the encoding of any record still compressed.
 
 **Size limits.** `collect` and `server` take bodies up to 64 MiB (`--max-body`). Many senders cap
 lower and truncate or reject long agent prompts first. Each section notes the limits that matter.
@@ -178,7 +178,7 @@ claude
 **B.** For the request bytes exactly as Anthropic received them. No `/v1` in the base URL.
 
 ```bash
-logpak server --listen 127.0.0.1:8080 --upstream https://api.anthropic.com --record-dir ~/logpak/claude
+deltapack server --listen 127.0.0.1:8080 --upstream https://api.anthropic.com --record-dir ~/deltapack/claude
 ```
 
 ```bash
@@ -196,7 +196,7 @@ days (`cleanupPeriodDays`). It packs, but each message is stored only once, so e
 ratios. The format is internal to Claude Code.
 
 ```bash
-cat ~/.claude/projects/*/*.jsonl | logpak log pack claude-transcripts.lpk
+cat ~/.claude/projects/*/*.jsonl | deltapack log pack claude-transcripts.dpk
 ```
 
 Docs: [monitoring](https://code.claude.com/docs/en/monitoring-usage),
@@ -247,7 +247,7 @@ environment variables.
 **B.** This only works with API-key auth (`gemini-api-key`). Login with Google goes elsewhere.
 
 ```bash
-logpak server --listen 127.0.0.1:8082 --upstream https://generativelanguage.googleapis.com --record-dir ~/logpak/gemini
+deltapack server --listen 127.0.0.1:8082 --upstream https://generativelanguage.googleapis.com --record-dir ~/deltapack/gemini
 ```
 
 ```bash
@@ -305,7 +305,7 @@ COPILOT_OTEL_FILE_EXPORTER_PATH=~/copilot-otel.jsonl copilot
 ```
 
 ```bash
-logpak log pack copilot.lpk < ~/copilot-otel.jsonl
+deltapack log pack copilot.dpk < ~/copilot-otel.jsonl
 ```
 
 **B.** Only bring-your-own-key models go through the proxy. In `~/.copilot/providers.json`:
@@ -376,7 +376,7 @@ ANTHROPIC_HOST=http://127.0.0.1:8080 goose session
 the input payload, response and usage. Pack them before they rotate away:
 
 ```bash
-cat ~/.local/state/goose/logs/llm_request.*.jsonl | logpak log pack goose.lpk
+cat ~/.local/state/goose/logs/llm_request.*.jsonl | deltapack log pack goose.dpk
 ```
 
 Docs: [environment variables](https://goose-docs.ai/docs/guides/environment-variables),
@@ -391,17 +391,17 @@ snippets, not the history sent with them.
 `.codex/config.toml` is ignored for these keys.
 
 ```toml
-model_provider = "logpak"
+model_provider = "deltapack"
 
-[model_providers.logpak]
-name = "logpak"
+[model_providers.deltapack]
+name = "deltapack"
 base_url = "http://127.0.0.1:8081/v1"
 env_key = "OPENAI_API_KEY"
 wire_api = "responses"
 ```
 
 ```bash
-logpak server --listen 127.0.0.1:8081 --upstream https://api.openai.com --record-dir ~/logpak/codex
+deltapack server --listen 127.0.0.1:8081 --upstream https://api.openai.com --record-dir ~/deltapack/codex
 ```
 
 - Leave `supports_websockets` unset or false on this provider. The Responses WebSocket transport
@@ -493,12 +493,12 @@ Over OTel: **no OTel** in V2 (V1's experimental `openTelemetry` field is ignored
 ```jsonc
 { "providers": {
     "anthropic": { "settings": { "baseURL": "http://127.0.0.1:8080" } },
-    "logpak-openai": { "package": "@opencode/ai/providers/openai-compatible",
+    "deltapack-openai": { "package": "@opencode/ai/providers/openai-compatible",
                        "settings": { "baseURL": "http://127.0.0.1:8081/v1" } } } }
 ```
 
 - On V1, the key is `provider.<id>.options.baseURL` (see the migration page).
-- With ChatGPT sign-in and no custom `baseURL`, OpenCode zstd-encodes request bodies. Logpak
+- With ChatGPT sign-in and no custom `baseURL`, OpenCode zstd-encodes request bodies. Deltapack
   decodes zstd before it stores them.
 
 Docs: [providers](https://opencode.ai/docs/providers/), [migrating from V1](https://opencode.ai/docs/migrate-v1/).
@@ -530,7 +530,7 @@ Over OTel: **no OTel**.
 
 ```yaml
 models:
-  - name: via-logpak
+  - name: via-deltapack
     provider: openai
     model: <model>
     apiBase: http://127.0.0.1:8081/v1
@@ -569,7 +569,7 @@ model:
 step, so steps re-send the conversation and pack well. Emit one step per line:
 
 ```bash
-for t in trajectories/*/*/*/*.traj; do jq -c '.trajectory[]' "$t"; done | logpak log pack swe.lpk --window 32
+for t in trajectories/*/*/*/*.traj; do jq -c '.trajectory[]' "$t"; done | deltapack log pack swe.dpk --window 32
 ```
 
 Docs: [keys and api_base](https://swe-agent.com/latest/installation/keys/),
@@ -583,7 +583,7 @@ Over OTel: **no OTel** (pseudonymous metrics only, without prompts).
 **B.** In `~/.config/crush/crushrc`. Use `--type messages` for an Anthropic-compatible provider.
 
 ```bash
-provider add logpak --type completions --base-url "http://127.0.0.1:8081/v1" --api-key "$OPENAI_API_KEY"
+provider add deltapack --type completions --base-url "http://127.0.0.1:8081/v1" --api-key "$OPENAI_API_KEY"
 ```
 
 Docs: [README](https://github.com/charmbracelet/crush).
@@ -617,11 +617,11 @@ Docs: [API access](https://zed.dev/docs/ai/use-api-access).
 ## Personal and autonomous agents
 
 Long-running agents that act on your behalf across chat apps, a browser or a shell. They run for
-hours and re-send their whole context on every step, which is the shape Logpak compresses best.
+hours and re-send their whole context on every step, which is the shape Deltapack compresses best.
 
-**In Docker?** Inside a container, `127.0.0.1` is the container itself. Run `logpak` on a network
-the container can reach (`logpak collect --listen 0.0.0.0:4318,0.0.0.0:4317`, or
-`logpak server --listen 0.0.0.0:8080`, on a private network), and point the agent at
+**In Docker?** Inside a container, `127.0.0.1` is the container itself. Run `deltapack` on a network
+the container can reach (`deltapack collect --listen 0.0.0.0:4318,0.0.0.0:4317`, or
+`deltapack server --listen 0.0.0.0:8080`, on a private network), and point the agent at
 `host.docker.internal` or the service name.
 
 ### OpenClaw
@@ -673,7 +673,7 @@ The standard `OTEL_EXPORTER_OTLP_*` variables work as fallbacks.
 `prompts.json`) under `<workspace>/.openclaw/trajectory-exports/`:
 
 ```bash
-logpak log pack openclaw.lpk < events.jsonl
+deltapack log pack openclaw.dpk < events.jsonl
 ```
 
 Docs: [OpenTelemetry setup](https://docs.openclaw.ai/gateway/opentelemetry/setup),
@@ -734,7 +734,7 @@ writes Claude-Code-style JSON lines. `HERMES_DUMP_REQUESTS=true` writes each API
 the log files.
 
 ```bash
-hermes sessions export sessions.jsonl && logpak log pack hermes.lpk < sessions.jsonl
+hermes sessions export sessions.jsonl && deltapack log pack hermes.dpk < sessions.jsonl
 ```
 
 Docs: [NeMo Relay](https://hermes-agent.nousresearch.com/docs/integrations/nemo-relay),
@@ -769,9 +769,9 @@ is a Rust fork of Codex, with Codex's configuration.
 **B.** In `~/.openinterpreter/config.toml`:
 
 ```toml
-model_provider = "logpak"
+model_provider = "deltapack"
 
-[model_providers.logpak]
+[model_providers.deltapack]
 base_url = "http://127.0.0.1:8081/v1"
 env_key = "OPENAI_API_KEY"
 wire_api = "responses"   # or "chat"
@@ -848,7 +848,7 @@ Docs: [.env.default](https://github.com/Significant-Gravitas/AutoGPT/blob/master
 
 Self-hosted platforms where agents are built from nodes or flows, and chat front-ends used as agent
 hubs. Most run in Docker: see the [Docker note](#personal-and-autonomous-agents) for reaching
-Logpak from a container.
+Deltapack from a container.
 
 ### n8n
 
@@ -968,7 +968,7 @@ without prompts).
 ```yaml
 endpoints:
   custom:
-    - name: "via-logpak"
+    - name: "via-deltapack"
       apiKey: "${OPENAI_API_KEY}"
       baseURL: "http://host.docker.internal:8081/v1"
       models: { default: ["<model>"] }
@@ -996,7 +996,7 @@ GENERIC_OPEN_AI_MODEL_PREF=<model>
 with a developer API key). Each line is a prompt and its response.
 
 ```bash
-logpak log pack anythingllm.lpk < chats.jsonl
+deltapack log pack anythingllm.dpk < chats.jsonl
 ```
 
 Docs: [.env.example](https://github.com/Mintplex-Labs/anything-llm/blob/master/docker/.env.example).
@@ -1110,7 +1110,7 @@ Keep Langfuse and keep every span. Send the plain OTel exporter to `collect`, an
 Langfuse. Langfuse takes OTLP/HTTP only, but `collect` turns gRPC exports into OTLP/HTTP protobuf.
 
 ```bash
-logpak collect --record-dir ~/logpak/otel --forward https://cloud.langfuse.com/api/public/otel
+deltapack collect --record-dir ~/deltapack/otel --forward https://cloud.langfuse.com/api/public/otel
 ```
 
 ```bash
@@ -1138,7 +1138,7 @@ export LANGSMITH_OTEL_ENABLED=true LANGSMITH_TRACING=true LANGSMITH_OTEL_ONLY=tr
 To keep LangSmith too, forward to it and put the key in the exporter's headers:
 
 ```bash
-logpak collect --record-dir ~/logpak/otel --forward https://api.smith.langchain.com/otel
+deltapack collect --record-dir ~/deltapack/otel --forward https://api.smith.langchain.com/otel
 ```
 
 ```bash
@@ -1417,15 +1417,15 @@ on its own.
 
 ```yaml
 litellm_settings:
-  callbacks: ["logpak"]
+  callbacks: ["deltapack"]
 callback_settings:
-  logpak:
+  deltapack:
     callback_type: generic_api
-    endpoint: http://logpak-collect:4318/litellm
+    endpoint: http://deltapack-collect:4318/litellm
     log_format: single        # json_array (default) | ndjson | single
 ```
 
-The environment alternative is `GENERIC_LOGGER_ENDPOINT` (tested in Logpak's CI), which posts
+The environment alternative is `GENERIC_LOGGER_ENDPOINT` (tested in Deltapack's CI), which posts
 the default JSON arrays. Those still delta well, because each batch shares its prompts with the
 one before.
 
@@ -1437,7 +1437,7 @@ litellm_settings:
 ```
 
 ```bash
-export OTEL_EXPORTER=otlp_http OTEL_ENDPOINT=http://logpak-collect:4318
+export OTEL_EXPORTER=otlp_http OTEL_ENDPOINT=http://deltapack-collect:4318
 ```
 
 **B.** Point a model's `api_base` at a recording server:
@@ -1445,7 +1445,7 @@ export OTEL_EXPORTER=otlp_http OTEL_ENDPOINT=http://logpak-collect:4318
 ```yaml
 model_list:
   - model_name: gpt-4o
-    litellm_params: { model: openai/gpt-4o, api_base: "http://logpak-server:8080/v1", api_key: os.environ/OPENAI_API_KEY }
+    litellm_params: { model: openai/gpt-4o, api_base: "http://deltapack-server:8080/v1", api_key: os.environ/OPENAI_API_KEY }
 ```
 
 Docs: [generic API](https://docs.litellm.ai/docs/observability/generic_api),
@@ -1453,7 +1453,7 @@ Docs: [generic API](https://docs.litellm.ai/docs/observability/generic_api),
 
 ### Kong AI Gateway
 
-**A.** Log payloads from `ai-proxy` and ship each entry with `http-log` (tested in Logpak's CI).
+**A.** Log payloads from `ai-proxy` and ship each entry with `http-log` (tested in Deltapack's CI).
 
 ```yaml
 plugins:
@@ -1463,7 +1463,7 @@ plugins:
       logging: { log_payloads: true, log_statistics: true }
   - name: http-log
     config:
-      http_endpoint: http://logpak-collect:4318/kong
+      http_endpoint: http://deltapack-collect:4318/kong
       content_type: application/json
 ```
 
@@ -1471,10 +1471,10 @@ plugins:
   400.
 - `http-log` sends one object per request until `queue.max_batch_size` is above 1.
 - The `opentelemetry` plugin also works. It is OTLP/HTTP protobuf only, so use
-  `traces_endpoint: http://logpak-collect:4318/v1/traces`.
+  `traces_endpoint: http://deltapack-collect:4318/v1/traces`.
 
 **B.** Set `model.options.upstream_url` to the full recording-server URL, for example
-`http://logpak-server:8080/v1/chat/completions`.
+`http://deltapack-server:8080/v1/chat/completions`.
 
 Docs: [ai-proxy](https://developer.konghq.com/plugins/ai-proxy/reference/),
 [http-log](https://developer.konghq.com/plugins/http-log/).
@@ -1482,10 +1482,10 @@ Docs: [ai-proxy](https://developer.konghq.com/plugins/ai-proxy/reference/),
 ### Portkey (open-source gateway)
 
 The open-source gateway exports no logs. Its Enterprise build's experimental OTel push is
-`EXPERIMENTAL_GEN_AI_OTEL_TRACES_ENABLED`. Record in front of it with B (tested in Logpak's CI):
+`EXPERIMENTAL_GEN_AI_OTEL_TRACES_ENABLED`. Record in front of it with B (tested in Deltapack's CI):
 
 ```bash
-logpak server --listen 127.0.0.1:8090 --upstream http://localhost:8787 --record-dir ~/logpak/portkey
+deltapack server --listen 127.0.0.1:8090 --upstream http://localhost:8787 --record-dir ~/deltapack/portkey
 ```
 
 Clients then use `http://127.0.0.1:8090/v1`.
@@ -1498,7 +1498,7 @@ Docs: [gateway](https://github.com/Portkey-AI/gateway).
 "plugins": {
   "ai-proxy": { "provider": "openai", "auth": { "header": { "Authorization": "Bearer <key>" } },
                 "options": { "model": "gpt-4o" }, "logging": { "summaries": true, "payloads": true } },
-  "http-logger": { "uri": "http://logpak-collect:4318/apisix", "concat_method": "new_line" }
+  "http-logger": { "uri": "http://deltapack-collect:4318/apisix", "concat_method": "new_line" }
 }
 ```
 
@@ -1516,7 +1516,7 @@ Content is exported by default.
 
 ```json
 { "plugins": [ { "enabled": true, "name": "otel", "config": {
-    "service_name": "bifrost", "collector_url": "http://logpak-collect:4318",
+    "service_name": "bifrost", "collector_url": "http://deltapack-collect:4318",
     "trace_type": "genai_extension", "protocol": "http" } } ] }
 ```
 
@@ -1536,7 +1536,7 @@ export.otlp.traces.enabled = true
 ```
 
 ```bash
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://logpak-collect:4317
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://deltapack-collect:4317
 ```
 
 - Whether spans include inference inputs is *(unverified)*.
@@ -1549,7 +1549,7 @@ Docs: [export OpenTelemetry traces](https://github.com/tensorzero/tensorzero/tre
 ```yaml
 frontendPolicies:
   tracing:
-    host: logpak-collect:4317         # gRPC by default; protocol: http is also documented
+    host: deltapack-collect:4317         # gRPC by default; protocol: http is also documented
     randomSampling: true
     attributes:
       llm.prompt: 'llm.prompt'           # CEL; the prompt is not in spans by default
@@ -1569,7 +1569,7 @@ Its OpenInference spans include full requests and responses by default. In Helm 
 extProc:
   extraEnvVars:
     - name: OTEL_EXPORTER_OTLP_ENDPOINT
-      value: http://logpak-collect:4317
+      value: http://deltapack-collect:4317
     - name: OTEL_METRICS_EXPORTER
       value: none
 ```
@@ -1614,7 +1614,7 @@ Mode. In Settings, Observability, OpenTelemetry Collector:
 Or record the requests yourself (B):
 
 ```bash
-logpak server --listen 127.0.0.1:8083 --upstream https://openrouter.ai --record-dir ~/logpak/openrouter
+deltapack server --listen 127.0.0.1:8083 --upstream https://openrouter.ai --record-dir ~/deltapack/openrouter
 ```
 
 Clients then use `http://127.0.0.1:8083/api/v1`.
@@ -1637,7 +1637,7 @@ Docs: [OTel](https://developers.cloudflare.com/ai-gateway/observability/otel-int
 Webhooks cut bodies at 10 KB, so they don't reach `collect` whole. Record in front of it (B):
 
 ```bash
-logpak server --listen 127.0.0.1:8084 --upstream https://ai-gateway.helicone.ai --record-dir ~/logpak/helicone
+deltapack server --listen 127.0.0.1:8084 --upstream https://ai-gateway.helicone.ai --record-dir ~/deltapack/helicone
 ```
 
 Docs: [webhooks](https://docs.helicone.ai/features/webhooks).
@@ -1675,7 +1675,7 @@ aws s3 cp --recursive s3://my-bucket/bedrock/AWSLogs/ ./bedrock-logs/
 ```
 
 ```bash
-find bedrock-logs -name '*.json.gz' | sort | xargs zcat | jq -c . | logpak log pack bedrock.lpk --window 32
+find bedrock-logs -name '*.json.gz' | sort | xargs zcat | jq -c . | deltapack log pack bedrock.dpk --window 32
 ```
 
 `jq -c .` normalises to one record per line, whatever the files' layout. Bedrock requests are
@@ -1702,7 +1702,7 @@ Request-response logging (`setPublisherModelConfig` with `loggingConfig`) writes
 `full_response` to BigQuery. Pairs over 10 MB are not recorded.
 
 ```bash
-bq query --format=json --max_rows=1000000 --nouse_legacy_sql 'SELECT * FROM `proj.ds.request_response_logging`' | jq -c '.[]' | logpak log pack vertex.lpk
+bq query --format=json --max_rows=1000000 --nouse_legacy_sql 'SELECT * FROM `proj.ds.request_response_logging`' | jq -c '.[]' | deltapack log pack vertex.dpk
 ```
 
 For large tables, export to GCS as newline-delimited JSON instead, then pack the files.
@@ -1713,23 +1713,23 @@ Docs: [request-response logging](https://docs.cloud.google.com/vertex-ai/generat
 
 ## Telemetry pipelines
 
-If spans already flow through a pipeline, add Logpak as one more exporter. Nothing else in the
+If spans already flow through a pipeline, add Deltapack as one more exporter. Nothing else in the
 pipeline changes.
 
 ### OpenTelemetry Collector
 
 ```yaml
 exporters:
-  otlp_http/logpak:                 # formerly otlphttp, now a deprecated alias
-    endpoint: http://logpak-collect:4318
+  otlp_http/deltapack:                 # formerly otlphttp, now a deprecated alias
+    endpoint: http://deltapack-collect:4318
     compression: gzip
 service:
   pipelines:
-    traces: { receivers: [otlp], exporters: [your_backend, otlp_http/logpak] }
-    logs:   { receivers: [otlp], exporters: [your_backend, otlp_http/logpak] }
+    traces: { receivers: [otlp], exporters: [your_backend, otlp_http/deltapack] }
+    logs:   { receivers: [otlp], exporters: [your_backend, otlp_http/deltapack] }
 ```
 
-- For gRPC, use `otlp_grpc/logpak` with `endpoint: logpak-collect:4317` and
+- For gRPC, use `otlp_grpc/deltapack` with `endpoint: deltapack-collect:4317` and
   `tls: { insecure: true }`.
 - The collector's own OTLP receiver caps HTTP bodies at 20 MiB (`max_request_body_size`). Raise it,
   and gRPC's `max_recv_msg_size_mib`, for long agent prompts.
@@ -1742,12 +1742,12 @@ Docs: [otlphttp exporter](https://github.com/open-telemetry/opentelemetry-collec
 ### Grafana Alloy
 
 ```alloy
-otelcol.exporter.otlphttp "logpak" {
-  client { endpoint = "http://logpak-collect:4318" }
+otelcol.exporter.otlphttp "deltapack" {
+  client { endpoint = "http://deltapack-collect:4318" }
 }
 ```
 
-Add `otelcol.exporter.otlphttp.logpak.input` to the `output` lists of the component that feeds
+Add `otelcol.exporter.otlphttp.deltapack.input` to the `output` lists of the component that feeds
 your current exporter.
 
 Docs: [otelcol.exporter.otlphttp](https://grafana.com/docs/alloy/latest/reference/components/otelcol/otelcol.exporter.otlphttp/).
@@ -1759,7 +1759,7 @@ pipeline:
   outputs:
     - name: http
       match: '*'
-      host: logpak-collect
+      host: deltapack-collect
       port: 4318
       uri: /fluent-bit
       format: json_lines
@@ -1774,10 +1774,10 @@ Docs: [http output](https://docs.fluentbit.io/manual/data-pipeline/outputs/http)
 
 ```yaml
 sinks:
-  logpak:
+  deltapack:
     type: http
     inputs: [llm_logs]
-    uri: http://logpak-collect:4318/vector
+    uri: http://deltapack-collect:4318/vector
     encoding: { codec: json }
     framing: { method: newline_delimited }
     batch: { max_events: 1 }          # one event per record; omit to store batches
@@ -1791,7 +1791,7 @@ Docs: [http sink](https://vector.dev/docs/reference/configuration/sinks/http/).
 ### Logstash
 
 ```
-output { http { url => "http://logpak-collect:4318/logstash" http_method => "post" format => "json" http_compression => true } }
+output { http { url => "http://deltapack-collect:4318/logstash" http_method => "post" format => "json" http_compression => true } }
 ```
 
 ### Filebeat
@@ -1803,7 +1803,7 @@ result.
 
 ## Forwarding to an observability backend
 
-`logpak collect --forward URL` sends each request on as received, with the exporter's headers,
+`deltapack collect --forward URL` sends each request on as received, with the exporter's headers,
 after storing it. It appends the request's path (`/v1/traces`) to `URL`. gRPC exports go on as
 OTLP/HTTP protobuf. Put the backend's auth in `OTEL_EXPORTER_OTLP_HEADERS` on the exporter; it is
 forwarded and never stored.
@@ -1847,7 +1847,7 @@ Watch for these:
 Record what is sent to a local model with B. `--upstream` is the server's origin, and the client
 keeps its usual path.
 
-| Server | `--upstream` | Client base URL via Logpak | Its own prompt logging |
+| Server | `--upstream` | Client base URL via Deltapack | Its own prompt logging |
 |---|---|---|---|
 | vLLM | `http://localhost:8000` | `http://127.0.0.1:8080/v1` | `--enable-log-requests`, prompts only at debug level, truncated; OTel spans carry no prompt text |
 | SGLang | `http://localhost:30000` | `.../v1` | `--log-requests --log-requests-level 3` (full) |
@@ -1855,7 +1855,7 @@ keeps its usual path.
 | llama.cpp `llama-server` | `http://localhost:9931` (newer default; often run with `--port 8080`) | `.../v1` | `--log-prompts-dir` (debugging) |
 | Hugging Face TGI | `http://localhost:3000` | `.../v1` | raise `--payload-limit` (2 MB default) for long prompts |
 | LM Studio | `http://localhost:1234` | `.../v1` | `lms log stream --json` |
-| LocalAI | `http://localhost:8080` (run Logpak on another port) | `.../v1` | UI tracing of recent calls |
+| LocalAI | `http://localhost:8080` (run Deltapack on another port) | `.../v1` | UI tracing of recent calls |
 | NVIDIA NIM | `http://localhost:8000` | `.../v1` | OTel via `NIM_ENABLE_OTEL` (1.x); content *(unverified)* |
 | Triton OpenAI frontend | `http://localhost:9000` | `.../v1` | none |
 | KServe | the service URL | `.../openai/v1` | none |
@@ -1865,7 +1865,7 @@ keeps its usual path.
 
 ## Provider upstreams
 
-| Provider | `--upstream` | Client base URL via Logpak | Auth header (passed through) |
+| Provider | `--upstream` | Client base URL via Deltapack | Auth header (passed through) |
 |---|---|---|---|
 | Anthropic | `https://api.anthropic.com` | `http://127.0.0.1:8080` | `x-api-key` or `Authorization: Bearer` |
 | OpenAI | `https://api.openai.com` | `http://127.0.0.1:8080/v1` | `Authorization: Bearer` |
@@ -1890,7 +1890,7 @@ AWS Bedrock is not on this list: its SigV4 signature covers the host name. Use i
 |---|---|---|
 | Cursor | Requests with your own key are "routed through Cursor's servers for final prompt building", so a local base URL is never called | none locally |
 | Amp | Bring-your-own-key was removed; inference goes through Amp's servers | none |
-| Codex over WebSocket | `logpak server` does not proxy WebSocket | a custom provider without `supports_websockets` |
+| Codex over WebSocket | `deltapack server` does not proxy WebSocket | a custom provider without `supports_websockets` |
 | Splunk Observability Cloud as `--forward` | its OTLP path is not `/v1/traces` | tee through an OpenTelemetry Collector |
 
 Missing a tool, or found a key that changed? Open an issue or a pull request against this file.

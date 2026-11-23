@@ -2,7 +2,7 @@
 //!
 //! ```no_run
 //! # fn send(body: &[u8], headers: &[(&str, &str)]) -> (u16, Option<String>, Option<String>) { todo!() }
-//! use logpak::client::Client;
+//! use deltapack::client::Client;
 //! let client = Client::new(4);
 //! # let body = bytes::Bytes::from_static(b"{}");
 //! let request = client.prepare(body);
@@ -22,7 +22,7 @@ use bytes::Bytes;
 use crate::codec::{self, Hash};
 use crate::{ENCODING, KEEP};
 
-/// The bodies the server confirmed it kept (`lpd1-kept`), most recent first. It is `Sync`: one
+/// The bodies the server confirmed it kept (`dpd1-kept`), most recent first. It is `Sync`: one
 /// client serves concurrent requests, and each picks the base it shares the most bytes with.
 #[derive(Debug)]
 pub struct Client {
@@ -57,7 +57,7 @@ impl Client {
         Prepared { body, target, delta }
     }
 
-    /// Records the server's answer to `request`: its `lpd1-kept` header, if it had one.
+    /// Records the server's answer to `request`: its `dpd1-kept` header, if it had one.
     pub fn confirm(&self, request: &Prepared, kept: Option<&str>) {
         if kept != Some(crate::hex(&request.target).as_str()) {
             return;
@@ -134,7 +134,7 @@ mod tests {
         let p = c.prepare(conversation("a", 1));
         assert!(!p.is_delta());
         assert_eq!(p.wire_body(), p.body());
-        assert_eq!(p.headers(), [("lpd1-keep", "?1")]);
+        assert_eq!(p.headers(), [("dpd1-keep", "?1")]);
     }
 
     #[test]
@@ -144,8 +144,8 @@ mod tests {
         let p = c.prepare(conversation("a", 2));
         assert!(p.is_delta());
         assert!(small(&p), "{} of {}", p.wire_body().len(), p.body().len());
-        assert_eq!(p.headers(), [("lpd1-keep", "?1"), ("content-encoding", "lpd1")]);
-        assert_eq!(p.plain_headers(), [("lpd1-keep", "?1")]);
+        assert_eq!(p.headers(), [("dpd1-keep", "?1"), ("content-encoding", "dpd1")]);
+        assert_eq!(p.plain_headers(), [("dpd1-keep", "?1")]);
     }
 
     #[test]

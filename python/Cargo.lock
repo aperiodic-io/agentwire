@@ -55,6 +55,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "deltapack"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "sha2",
+ "zstd-safe",
+]
+
+[[package]]
+name = "deltapack-python"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "deltapack",
+ "pyo3",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -112,24 +130,6 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
-
-[[package]]
-name = "logpak"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "sha2",
- "zstd-safe",
-]
-
-[[package]]
-name = "logpak-python"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "logpak",
- "pyo3",
-]
 
 [[package]]
 name = "once_cell"

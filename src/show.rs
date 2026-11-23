@@ -1,4 +1,4 @@
-//! `logpak log show`: records as JSON lines. An OTLP export (JSON or protobuf) becomes one line per
+//! `deltapack log show`: records as JSON lines. An OTLP export (JSON or protobuf) becomes one line per
 //! span or log record, attributes as plain JSON; any other record comes out whole. Also the trace
 //! ids `collect` lists in a record's meta, so `show --trace` skips the records of other traces.
 
@@ -64,7 +64,7 @@ fn proto_ids(mut buf: &[u8], path: &[u64], leaf: u64, ids: &mut Vec<String>) -> 
         let Some((n, wire)) = next_field(&mut buf) else { return false };
         let read = match (path.split_first(), wire) {
             (Some((&step, rest)), Wire::Bytes(b)) if n == step => proto_ids(b, rest, leaf, ids),
-            (None, Wire::Bytes(b)) if n == leaf => b.len() != 16 || add(ids, logpak::hex(b)),
+            (None, Wire::Bytes(b)) if n == leaf => b.len() != 16 || add(ids, deltapack::hex(b)),
             (Some((&step, _)), _) if n == step => false,
             (None, _) if n == leaf => false,
             _ => true,
@@ -460,7 +460,7 @@ fn next_field<'a>(buf: &mut &'a [u8]) -> Option<(u64, Wire<'a>)> {
 fn value(kind: Kind, wire: Wire, depth: u32) -> Option<Value> {
     Some(match (kind, wire) {
         (Kind::Str, Wire::Bytes(b)) => String::from_utf8_lossy(b).into(),
-        (Kind::Hex, Wire::Bytes(b)) => logpak::hex(b).into(),
+        (Kind::Hex, Wire::Bytes(b)) => deltapack::hex(b).into(),
         (Kind::U64, Wire::Varint(v)) => v.into(),
         (Kind::I64, Wire::Varint(v)) => (v as i64).into(),
         (Kind::Bool, Wire::Varint(v)) => (v != 0).into(),
@@ -809,7 +809,7 @@ mod tests {
             let row = &rows(&body, Some(Signal::Traces)).unwrap()[0];
             let listed = trace_ids(Signal::Traces, &body);
             assert_eq!(row["trace_id"].as_str().unwrap_or("-"), listed, "{row}");
-            let span_id = (span.len() == 8).then(|| logpak::hex(span));
+            let span_id = (span.len() == 8).then(|| deltapack::hex(span));
             assert_eq!(row["span_id"].as_str(), span_id.as_deref(), "a span id is 8 bytes");
         }
     }

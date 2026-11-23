@@ -1,5 +1,5 @@
 [package]
-name = "logpak-fuzz"
+name = "deltapack-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -8,7 +8,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-logpak = { path = "..", default-features = false }
+deltapack = { path = "..", default-features = false }
 arbitrary = { version = "1", features = ["derive"] }
 libfuzzer-sys = "0.4"
 

@@ -448,6 +448,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "deltapack"
+version = "0.1.0"
+dependencies = [
+ "brotli",
+ "brotli-decompressor",
+ "bytes",
+ "clap",
+ "cucumber",
+ "flate2",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "proptest",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "snap",
+ "tokio",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+ "tracing-subscriber",
+ "zstd-safe",
+]
+
+[[package]]
 name = "derive_more"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1150,35 +1179,6 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
-
-[[package]]
-name = "logpak"
-version = "0.1.0"
-dependencies = [
- "brotli",
- "brotli-decompressor",
- "bytes",
- "clap",
- "cucumber",
- "flate2",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "proptest",
- "reqwest",
- "serde_json",
- "sha2",
- "snap",
- "tokio",
- "tower-layer",
- "tower-service",
- "tracing",
- "tracing-subscriber",
- "zstd-safe",
-]
 
 [[package]]
 name = "lru-slab"

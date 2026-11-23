@@ -1,4 +1,4 @@
-//! Acceptance: `logpak client` and `logpak server` as real processes, between a tool (this
+//! Acceptance: `deltapack client` and `deltapack server` as real processes, between a tool (this
 //! test) and a recording upstream API, with a byte-counting TCP relay on the network between them.
 
 use std::collections::HashMap;
@@ -11,11 +11,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cucumber::{World, given, then, when};
+use deltapack::{KEEP, KEPT, codec, hex};
 use http::{HeaderMap, Request, Response};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use logpak::{KEEP, KEPT, codec, hex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
@@ -153,12 +153,12 @@ async fn relay(target: SocketAddr) -> (SocketAddr, Arc<Mutex<SocketAddr>>, Arc<A
     (addr, to, up)
 }
 
-/// Starts `logpak <args>` on a free port and reads the addresses it logs.
+/// Starts `deltapack <args>` on a free port and reads the addresses it logs.
 async fn spawn(args: &[&str]) -> Proc {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_logpak"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_deltapack"))
         .args(args)
         .args(["--listen", "127.0.0.1:0", "--metrics", "127.0.0.1:0"])
-        .env("RUST_LOG", "logpak=debug")
+        .env("RUST_LOG", "deltapack=debug")
         .env("NO_COLOR", "1")
         .stdout(Stdio::piped())
         .kill_on_drop(true)
@@ -241,12 +241,12 @@ async fn an_upstream(w: &mut Proxies) {
     w.upstream = Some(upstream().await);
 }
 
-#[given("a logpak server in front of it")]
+#[given("a deltapack server in front of it")]
 async fn a_server(w: &mut Proxies) {
     w.start_server().await;
 }
 
-#[given("a logpak client in front of that server")]
+#[given("a deltapack client in front of that server")]
 async fn a_client(w: &mut Proxies) {
     let relayed = relay(w.server.as_ref().unwrap().addr).await;
     let upstream = format!("http://{}", relayed.0);
@@ -290,7 +290,7 @@ async fn two_conversations(w: &mut Proxies, turns: usize) {
     }
 }
 
-#[when("the logpak server restarts")]
+#[when("the deltapack server restarts")]
 async fn restart(w: &mut Proxies) {
     w.server = None; // killed on drop
     w.start_server().await;
@@ -316,22 +316,22 @@ async fn answered(w: &mut Proxies, status: u16) {
 
 #[then(expr = "the server reports {int} deltas and no refusals")]
 async fn server_reports(w: &mut Proxies, deltas: u64) {
-    assert_eq!(w.metric(&w.server, "logpak_server_deltas_total").await, deltas);
-    assert_eq!(w.metric(&w.server, "logpak_server_refused_total").await, 0);
+    assert_eq!(w.metric(&w.server, "deltapack_server_deltas_total").await, deltas);
+    assert_eq!(w.metric(&w.server, "deltapack_server_refused_total").await, 0);
     let (wire, rebuilt) = (
-        w.metric(&w.server, "logpak_server_delta_bytes_total").await,
-        w.metric(&w.server, "logpak_server_rebuilt_bytes_total").await,
+        w.metric(&w.server, "deltapack_server_delta_bytes_total").await,
+        w.metric(&w.server, "deltapack_server_rebuilt_bytes_total").await,
     );
     let later: u64 = w.sent.iter().filter(|s| !s.first_of_conversation).map(|s| s.body.len() as u64).sum();
     assert_eq!(rebuilt, later, "the deltas rebuilt every request after the first");
     assert!(wire > 0 && wire * 50 < rebuilt, "{wire} delta bytes for {rebuilt}");
-    assert!(w.metric(&w.server, "logpak_server_store_bytes").await > 0);
+    assert!(w.metric(&w.server, "deltapack_server_store_bytes").await > 0);
 }
 
 #[then(expr = "the client reports sending under {int}% of its requests' bytes")]
 async fn client_reports(w: &mut Proxies, percent: u64) {
-    let body = w.metric(&w.client, "logpak_client_body_bytes_total").await;
-    let wire = w.metric(&w.client, "logpak_client_wire_bytes_total").await;
+    let body = w.metric(&w.client, "deltapack_client_body_bytes_total").await;
+    let wire = w.metric(&w.client, "deltapack_client_wire_bytes_total").await;
     assert_eq!(body, w.sent.iter().map(|s| s.body.len() as u64).sum::<u64>());
     assert!(wire * 100 < body * percent, "{wire} bytes sent for {body}");
 }
@@ -352,7 +352,7 @@ async fn corrupt_delta(w: &mut Proxies) {
     );
     let mut delta = codec::encode(&base, &codec::hash(&base), &target, &codec::hash(&target));
     *delta.last_mut().unwrap() ^= 0xff;
-    w.last = Some(w.post_to_server(delta, &[("content-encoding", "lpd1")]).await);
+    w.last = Some(w.post_to_server(delta, &[("content-encoding", "dpd1")]).await);
 }
 
 #[then("the upstream received every request byte for byte")]
@@ -362,7 +362,7 @@ async fn byte_for_byte(w: &mut Proxies) {
     for (i, ((headers, body), sent)) in recorded.iter().zip(&w.sent).enumerate() {
         assert_eq!(body, &sent.body, "request {i}");
         assert_eq!(headers["content-length"], body.len().to_string());
-        assert!(headers.keys().all(|k| !k.as_str().starts_with("lpd1")), "request {i}: {headers:?}");
+        assert!(headers.keys().all(|k| !k.as_str().starts_with("dpd1")), "request {i}: {headers:?}");
         assert!(headers.get("content-encoding").is_none(), "request {i}");
     }
 }
@@ -387,20 +387,20 @@ async fn ratio(w: &mut Proxies, percent: u64) {
 
 #[then(expr = "the client resent {int} request(s) in full")]
 async fn resent(w: &mut Proxies, n: u64) {
-    assert_eq!(w.metric(&w.client, "logpak_client_resent_total").await, n);
+    assert_eq!(w.metric(&w.client, "deltapack_client_resent_total").await, n);
 }
 
-#[then("the response has no lpd1 headers")]
-async fn no_lpd1_headers(w: &mut Proxies) {
+#[then("the response has no dpd1 headers")]
+async fn no_dpd1_headers(w: &mut Proxies) {
     let (status, headers) = w.last.as_ref().unwrap();
     assert_eq!(*status, 200);
-    assert!(headers.keys().all(|k| !k.as_str().starts_with("lpd1")), "{headers:?}");
+    assert!(headers.keys().all(|k| !k.as_str().starts_with("dpd1")), "{headers:?}");
 }
 
-#[then(expr = "the server answers {int} with the lpd1-error {string}")]
+#[then(expr = "the server answers {int} with the dpd1-error {string}")]
 async fn refused(w: &mut Proxies, status: u16, code: String) {
     let (got, headers) = w.last.as_ref().unwrap();
-    assert_eq!((*got, headers["lpd1-error"].to_str().unwrap()), (status, code.as_str()));
+    assert_eq!((*got, headers["dpd1-error"].to_str().unwrap()), (status, code.as_str()));
 }
 
 #[then("the upstream received only the base")]
@@ -414,15 +414,15 @@ async fn only_the_base(w: &mut Proxies) {
 fn scratch(name: &str) -> std::path::PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("logpak-acceptance-{}-{name}-{n}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("deltapack-acceptance-{}-{name}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-/// `logpak log <args>`, its stdout; it must succeed.
+/// `deltapack log <args>`, its stdout; it must succeed.
 async fn log(args: &[&str], stdin: &[u8]) -> Vec<u8> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_logpak"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_deltapack"))
         .arg("log")
         .args(args)
         .stdin(Stdio::piped())
@@ -433,11 +433,11 @@ async fn log(args: &[&str], stdin: &[u8]) -> Vec<u8> {
     input.write_all(stdin).await.unwrap();
     drop(input);
     let out = child.wait_with_output().await.unwrap();
-    assert!(out.status.success(), "logpak log {args:?}: {}", out.status);
+    assert!(out.status.success(), "deltapack log {args:?}: {}", out.status);
     out.stdout
 }
 
-#[given("a logpak server in front of it, recording to a directory")]
+#[given("a deltapack server in front of it, recording to a directory")]
 async fn a_recording_server(w: &mut Proxies) {
     w.record_dir = Some(scratch("record"));
     w.start_server().await;
@@ -447,7 +447,7 @@ async fn a_recording_server(w: &mut Proxies) {
 fn recording(w: &Proxies) -> String {
     let files: Vec<_> = std::fs::read_dir(w.record_dir.as_ref().unwrap()).unwrap().map(|e| e.unwrap().path()).collect();
     assert_eq!(files.len(), 1, "{files:?}");
-    assert_eq!(files[0].extension().unwrap(), "lpk");
+    assert_eq!(files[0].extension().unwrap(), "dpk");
     files[0].to_str().unwrap().to_owned()
 }
 
@@ -488,9 +488,9 @@ async fn spans_as_json_lines(w: &mut Proxies, traces: usize, spans: usize) {
     }
 }
 
-#[when("they are packed with `logpak log pack`")]
+#[when("they are packed with `deltapack log pack`")]
 async fn pack(w: &mut Proxies) {
-    let file = scratch("pack").join("spans.lpk");
+    let file = scratch("pack").join("spans.dpk");
     log(&["pack", file.to_str().unwrap()], &jsonl(&w.lines)).await;
     w.packed = Some(file);
 }
@@ -499,13 +499,13 @@ fn jsonl(lines: &[Bytes]) -> Vec<u8> {
     lines.iter().flat_map(|l| [&l[..], b"\n"].concat()).collect()
 }
 
-#[then("`logpak log unpack` gives back the same lines")]
+#[then("`deltapack log unpack` gives back the same lines")]
 async fn unpack(w: &mut Proxies) {
     let file = w.packed.as_ref().unwrap().to_str().unwrap();
     assert!(log(&["unpack", file], b"").await == jsonl(&w.lines));
 }
 
-#[then(expr = "`logpak log get` gives back span {int} alone")]
+#[then(expr = "`deltapack log get` gives back span {int} alone")]
 async fn get_one(w: &mut Proxies, i: usize) {
     let file = w.packed.as_ref().unwrap().to_str().unwrap();
     assert_eq!(log(&["get", file, &i.to_string()], b"").await, w.lines[i]);
@@ -584,17 +584,17 @@ impl Proxies {
     }
 }
 
-#[given("a logpak collector recording to a directory")]
+#[given("a deltapack collector recording to a directory")]
 async fn a_collector(w: &mut Proxies) {
     w.start_collector(&[]).await;
 }
 
-#[given("a logpak collector in front of it, recording to a directory")]
+#[given("a deltapack collector in front of it, recording to a directory")]
 async fn a_forwarding_collector(w: &mut Proxies) {
     w.start_collector(&[]).await;
 }
 
-#[given(expr = "a logpak collector recording to a directory, starting a new file every {int} bytes")]
+#[given(expr = "a deltapack collector recording to a directory, starting a new file every {int} bytes")]
 async fn a_rotating_collector(w: &mut Proxies, bytes: u64) {
     w.start_collector(&["--rotate-bytes", &bytes.to_string()]).await;
 }
@@ -620,10 +620,10 @@ async fn recording_spans_files(w: &mut Proxies) {
 
 #[then(expr = "the collector reports {int} records stored in under {int}% of their bytes, and no failures")]
 async fn collector_reports(w: &mut Proxies, records: u64, percent: u64) {
-    assert_eq!(w.metric(&w.server, "logpak_recorded_total").await, records);
-    assert_eq!(w.metric(&w.server, "logpak_record_failures_total").await, 0);
-    let body = w.metric(&w.server, "logpak_recorded_body_bytes_total").await;
-    let stored = w.metric(&w.server, "logpak_recorded_file_bytes_total").await;
+    assert_eq!(w.metric(&w.server, "deltapack_recorded_total").await, records);
+    assert_eq!(w.metric(&w.server, "deltapack_record_failures_total").await, 0);
+    let body = w.metric(&w.server, "deltapack_recorded_body_bytes_total").await;
+    let stored = w.metric(&w.server, "deltapack_recorded_file_bytes_total").await;
     assert_eq!(body, w.sent.iter().map(|s| s.body.len() as u64).sum::<u64>());
     let on_disk: u64 =
         std::fs::read_dir(w.record_dir.as_ref().unwrap()).unwrap().map(|e| e.unwrap().metadata().unwrap().len()).sum();
@@ -631,7 +631,7 @@ async fn collector_reports(w: &mut Proxies, records: u64, percent: u64) {
     assert!(stored * 100 < body * percent, "{stored} stored for {body}");
 }
 
-#[given(expr = "a logpak collector recording to a directory, with a size limit of {int} bytes")]
+#[given(expr = "a deltapack collector recording to a directory, with a size limit of {int} bytes")]
 async fn a_small_collector(w: &mut Proxies, bytes: u64) {
     w.start_collector(&["--max-body", &bytes.to_string()]).await;
 }
@@ -648,7 +648,7 @@ async fn refused_as_a_base(w: &mut Proxies, status: u16) {
     refused_unrecorded(w, status).await;
 }
 
-#[given("a logpak client in front of that collector")]
+#[given("a deltapack client in front of that collector")]
 async fn a_client_before_the_collector(w: &mut Proxies) {
     a_client(w).await;
 }
@@ -875,7 +875,7 @@ async fn refused_unrecorded(w: &mut Proxies, status: u16) {
 
 #[when("a tool posts an lz4-encoded body through the client")]
 async fn lz4_through_client(w: &mut Proxies) {
-    // not real lz4 (a coding logpak does not decode): the client must not need to read it, only to leave it alone. Two turns, so
+    // not real lz4 (a coding deltapack does not decode): the client must not need to read it, only to leave it alone. Two turns, so
     // the second would have a base to delta against.
     let to = w.client.as_ref().unwrap().addr;
     for turn in [3, 4] {
@@ -895,7 +895,7 @@ async fn upstream_received_lz4(w: &mut Proxies) {
     }
 }
 
-/// `logpak log show <args> <the recording>`, one JSON value per line.
+/// `deltapack log show <args> <the recording>`, one JSON value per line.
 async fn show(w: &Proxies, args: &[&str]) -> Vec<serde_json::Value> {
     let file = match &w.packed {
         Some(f) => f.to_str().unwrap().to_owned(),
@@ -917,7 +917,7 @@ async fn meta_lists_traces(w: &mut Proxies) {
     }
 }
 
-#[then(expr = "`logpak log show --trace` of trace {int} gives its {int} spans in order, each with its prompt")]
+#[then(expr = "`deltapack log show --trace` of trace {int} gives its {int} spans in order, each with its prompt")]
 async fn show_trace(w: &mut Proxies, trace: usize, n: usize) {
     let id = format!("{trace:032x}");
     let rows = show(w, &["--trace", &id]).await;
@@ -932,7 +932,7 @@ async fn show_trace(w: &mut Proxies, trace: usize, n: usize) {
     }
 }
 
-#[then("`logpak log show` gives each line back as the body of its record")]
+#[then("`deltapack log show` gives each line back as the body of its record")]
 async fn show_raw(w: &mut Proxies) {
     let rows = show(w, &[]).await;
     assert_eq!(rows.len(), w.lines.len());
@@ -942,12 +942,12 @@ async fn show_raw(w: &mut Proxies) {
     }
 }
 
-#[then(expr = "`logpak log show --since {word}` gives {int} spans")]
+#[then(expr = "`deltapack log show --since {word}` gives {int} spans")]
 async fn show_since(w: &mut Proxies, since: String, n: usize) {
     assert_eq!(show(w, &["--since", &since]).await.len(), n);
 }
 
-#[then(expr = "`logpak log show --until {word}` gives none")]
+#[then(expr = "`deltapack log show --until {word}` gives none")]
 async fn show_until(w: &mut Proxies, until: String) {
     assert_eq!(show(w, &["--until", &until]).await, Vec::<serde_json::Value>::new());
 }
@@ -1009,7 +1009,7 @@ async fn grpc_protobuf_exports(w: &mut Proxies, n: usize, traces: usize) {
     }
 }
 
-#[then(expr = "`logpak log show` gives {int} spans, each with its trace id, name, times and attributes")]
+#[then(expr = "`deltapack log show` gives {int} spans, each with its trace id, name, times and attributes")]
 async fn show_protobuf(w: &mut Proxies, n: usize) {
     let rows = show(w, &[]).await;
     assert_eq!(rows.len(), n, "{rows:?}");
@@ -1026,7 +1026,7 @@ async fn show_protobuf(w: &mut Proxies, n: usize) {
     }
 }
 
-#[then("`logpak log show --trace` in capitals finds the same spans")]
+#[then("`deltapack log show --trace` in capitals finds the same spans")]
 async fn show_trace_in_capitals(w: &mut Proxies) {
     let lower = show(w, &["--trace", &format!("{:032x}", 1)]).await;
     let upper = show(w, &["--trace", &format!("{:032X}", 1)]).await;
@@ -1034,7 +1034,7 @@ async fn show_trace_in_capitals(w: &mut Proxies) {
     assert_eq!(upper, lower);
 }
 
-#[when(expr = "an exporter posts a batch of spans to {string} in a coding logpak does not decode")]
+#[when(expr = "an exporter posts a batch of spans to {string} in a coding deltapack does not decode")]
 async fn exporter_posts_lz4(w: &mut Proxies, path: String) {
     let to = w.server.as_ref().unwrap().addr;
     let body = batch(1);
@@ -1050,7 +1050,7 @@ async fn meta_lists_unknown(w: &mut Proxies) {
     assert_eq!(fields[7..], ["lz4", "?"], "{listed}");
 }
 
-#[then("`logpak log show` gives the record whole")]
+#[then("`deltapack log show` gives the record whole")]
 async fn show_gives_whole(w: &mut Proxies) {
     let rows = show(w, &[]).await;
     assert_eq!(rows.len(), 1, "{rows:?}");

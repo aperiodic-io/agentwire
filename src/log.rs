@@ -1,9 +1,9 @@
-//! LPK1 (SPEC.md §7): a log of bodies, each stored as an LPD1 delta against one of the records
+//! DPK1 (SPEC.md §7): a log of bodies, each stored as a DPD1 delta against one of the records
 //! before it. Gateway request logs and trace spans re-send the whole prompt every call, so a record
 //! costs about its new bytes. Every record is checked by SHA-256 when read back.
 //!
 //! ```
-//! use logpak::log::{Reader, Writer};
+//! use deltapack::log::{Reader, Writer};
 //! let mut w = Writer::new(Vec::new(), 8)?;
 //! w.append(b"req 1", bytes::Bytes::from_static(br#"{"messages":["hi"]}"#))?;
 //! w.append(b"req 2", bytes::Bytes::from_static(br#"{"messages":["hi","more"]}"#))?;
@@ -20,7 +20,7 @@ use bytes::Bytes;
 
 use crate::codec::{self, Hash};
 
-const MAGIC: &[u8; 4] = b"LPK1";
+const MAGIC: &[u8; 4] = b"DPK1";
 const VERSION: u8 = 1;
 /// Reading one record rebuilds at most this many bodies, and at most `MAX_CHAIN_BYTES` of them; the
 /// writer then stores a record whole. Small spans chain for long, multi-MB requests restart sooner.
@@ -28,10 +28,10 @@ const VERSION: u8 = 1;
 const MAX_DEPTH: usize = 4096;
 const MAX_CHAIN_BYTES: usize = if cfg!(test) { 1_048_576 } else { 1_073_741_824 }; // 1 MiB, 1 GiB
 
-/// (records back to the base, depth, bytes its chain rebuilds, the LPD1 delta)
+/// (records back to the base, depth, bytes its chain rebuilds, the DPD1 delta)
 type Encoded = (u64, usize, usize, Vec<u8>);
 
-/// Appends records to an LPK1 file. Write it through a `BufWriter`; the file is readable up to
+/// Appends records to a DPK1 file. Write it through a `BufWriter`; the file is readable up to
 /// the last complete record at any time, so flush when a record must survive a crash.
 #[derive(Debug)]
 pub struct Writer<W: Write> {
@@ -131,7 +131,7 @@ pub struct Record {
     offset: u64,
 }
 
-/// Reads an LPK1 file. `open` indexes it; records are decoded only when asked for.
+/// Reads a DPK1 file. `open` indexes it; records are decoded only when asked for.
 #[derive(Debug)]
 pub struct Reader<R> {
     src: BufReader<R>,
@@ -207,12 +207,12 @@ impl<R: Read + Seek> Reader<R> {
 /// The file header: its magic and version, then the window.
 fn header(src: &mut impl Read) -> io::Result<u64> {
     let mut magic = [0; 5];
-    src.read_exact(&mut magic).map_err(|_| invalid("not an LPK1 file"))?;
+    src.read_exact(&mut magic).map_err(|_| invalid("not a DPK1 file"))?;
     if &magic[..4] != MAGIC {
-        return Err(invalid("not an LPK1 file"));
+        return Err(invalid("not a DPK1 file"));
     }
     if magic[4] != VERSION {
-        return Err(invalid("unsupported LPK1 version"));
+        return Err(invalid("unsupported DPK1 version"));
     }
     read_varint(src)?.ok_or_else(|| invalid("truncated header"))
 }
@@ -628,10 +628,10 @@ mod tests {
     #[test]
     fn the_layout_is_the_spec() {
         let file = write(8, &[(b"m".to_vec(), Bytes::from_static(b"hello"))]);
-        assert_eq!(&file[..6], b"LPK1\x01\x08");
-        // back 0, meta "m", then the LPD1 delta against the empty body
+        assert_eq!(&file[..6], b"DPK1\x01\x08");
+        // back 0, meta "m", then the DPD1 delta against the empty body
         assert_eq!(&file[6..9], b"\x00\x01m");
-        assert_eq!(&file[10..14], b"LPD1");
+        assert_eq!(&file[10..14], b"DPD1");
         assert_eq!(file[9] as usize, file.len() - 10);
         assert_eq!(&file[15..47], &codec::hash(b""));
     }
@@ -650,12 +650,12 @@ mod tests {
     }
 
     #[test]
-    fn what_is_not_an_lpk1_file_is_refused() {
-        for bad in [&b""[..], b"LPK", b"LPD1\x01\x00", b"LPK1\x02\x00", b"LPK1\x01"] {
+    fn what_is_not_a_dpk1_file_is_refused() {
+        for bad in [&b""[..], b"DPK", b"DPD1\x01\x00", b"DPK1\x02\x00", b"DPK1\x01"] {
             assert_eq!(open(bad).unwrap_err().kind(), io::ErrorKind::InvalidData, "{bad:?}");
         }
         // a record naming a base before the first record, or beyond the window
-        assert!(open(b"LPK1\x01\x02\x01\x00\x00").is_err());
+        assert!(open(b"DPK1\x01\x02\x01\x00\x00").is_err());
         let mut file = write(1, &[(vec![], request("a", 1)), (vec![], request("a", 2))]);
         file.extend_from_slice(b"\x02\x00\x00");
         assert!(open(&file).is_err(), "back 2 over a window of 1");

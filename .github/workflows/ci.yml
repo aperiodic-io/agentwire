@@ -54,9 +54,9 @@ jobs:
         with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
       - run: cargo test --locked --all-features --test acceptance
 
-  # logpak with LiteLLM, Kong AI Gateway and Portkey as their real containers (tests/gateways/):
-  # requests through logpak client and server reach a mock model through each gateway, and each
-  # gateway's logs are stored in LPK1
+  # deltapack with LiteLLM, Kong AI Gateway and Portkey as their real containers (tests/gateways/):
+  # requests through deltapack client and server reach a mock model through each gateway, and each
+  # gateway's logs are stored in DPK1
   gateways:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -66,7 +66,7 @@ jobs:
         with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
       - run: cargo build --locked --features proxy
       - run: python3 -m unittest tests/gateways/test_gateways.py -v
-        env: { LOGPAK_BIN: target/debug/logpak }
+        env: { DELTAPACK_BIN: target/debug/deltapack }
 
   # the Python bindings (python/, a workspace of its own): built as a wheel and tested from Python,
   # on the oldest Python the abi3 wheel claims, against files the CLI packs
@@ -85,7 +85,7 @@ jobs:
       - run: pip install dist/*.whl
       - run: cargo build --features proxy
       - run: python -m unittest discover -s python/tests -v
-        env: { LOGPAK_BIN: target/debug/logpak }
+        env: { DELTAPACK_BIN: target/debug/deltapack }
 
   mutants-plan:
     if: github.event_name == 'pull_request' && !github.event.pull_request.draft
@@ -203,7 +203,7 @@ jobs:
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          tags: logpak:smoke
+          tags: deltapack:smoke
           load: true
           cache-from: type=gha,scope=image
-      - run: docker run --rm logpak:smoke --version
+      - run: docker run --rm deltapack:smoke --version

@@ -138,7 +138,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "logpak"
+name = "deltapack"
 version = "0.1.0"
 dependencies = [
  "bytes",
@@ -147,12 +147,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "logpak-fuzz"
+name = "deltapack-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
  "libfuzzer-sys",
- "logpak",
+ "deltapack",
 ]
 
 [[package]]

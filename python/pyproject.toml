@@ -3,8 +3,8 @@ requires = ["maturin>=1.8,<2"]
 build-backend = "maturin"
 
 [project]
-name = "logpak"
-description = "LPK1: LLM request logs and trace spans stored as deltas against earlier records, every one checked by SHA-256."
+name = "deltapack"
+description = "DPK1: LLM request logs and trace spans stored as deltas against earlier records, every one checked by SHA-256."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.9"
@@ -17,4 +17,4 @@ classifiers = [
 dynamic = ["version"]
 
 [project.urls]
-Repository = "https://github.com/aperiodic-io/logpak"
+Repository = "https://github.com/aperiodic-io/deltapack"
