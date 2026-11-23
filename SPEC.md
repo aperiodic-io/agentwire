@@ -128,10 +128,10 @@ window  = varint            ; how many of the latest records a record may name a
 record  = back meta_len meta delta_len delta
 back    = varint            ; records back to the base; 0: the base is the empty body
 meta    = meta_len bytes    ; stored as is (a time, an id, a method and path)
-delta   = delta_len bytes   ; an DPD1 body (§3) whose base is that record's body
+delta   = delta_len bytes   ; a DPD1 body (§3) whose base is that record's body
 ```
 
-Every record is an DPD1 delta. One stored whole is a delta against the empty body (`back = 0`).
+Every record is a DPD1 delta. One stored whole is a delta against the empty body (`back = 0`).
 
 A reader rebuilds record *i* from the record `back` before it, and so on down to one with `back = 0`.
 It MUST reject a file whose magic or version it does not know, and a `back` greater than *i* or

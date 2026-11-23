@@ -114,7 +114,7 @@ class AwlTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             list(r)
 
-    def test_what_is_not_an_dpk1_file_is_refused(self):
+    def test_what_is_not_a_dpk1_file_is_refused(self):
         with open(self.path, "wb") as f:
             f.write(b"not a log")
         with self.assertRaises(ValueError):

@@ -115,7 +115,7 @@ enum Mode {
     Client {
         #[arg(long, env = "DELTAPACK_LISTEN", default_value = "127.0.0.1:8787")]
         listen: SocketAddr,
-        /// The `deltapack server` (or an DPD1-aware API) to send to.
+        /// The `deltapack server` (or a DPD1-aware API) to send to.
         #[arg(long, env = "DELTAPACK_UPSTREAM")]
         upstream: reqwest::Url,
         /// Bodies remembered as bases: about one per conversation in flight.

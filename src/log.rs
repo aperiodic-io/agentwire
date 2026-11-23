@@ -1,4 +1,4 @@
-//! DPK1 (SPEC.md §7): a log of bodies, each stored as an DPD1 delta against one of the records
+//! DPK1 (SPEC.md §7): a log of bodies, each stored as a DPD1 delta against one of the records
 //! before it. Gateway request logs and trace spans re-send the whole prompt every call, so a record
 //! costs about its new bytes. Every record is checked by SHA-256 when read back.
 //!
@@ -31,7 +31,7 @@ const MAX_CHAIN_BYTES: usize = if cfg!(test) { 1_048_576 } else { 1_073_741_824 
 /// (records back to the base, depth, bytes its chain rebuilds, the DPD1 delta)
 type Encoded = (u64, usize, usize, Vec<u8>);
 
-/// Appends records to an DPK1 file. Write it through a `BufWriter`; the file is readable up to
+/// Appends records to a DPK1 file. Write it through a `BufWriter`; the file is readable up to
 /// the last complete record at any time, so flush when a record must survive a crash.
 #[derive(Debug)]
 pub struct Writer<W: Write> {
@@ -131,7 +131,7 @@ pub struct Record {
     offset: u64,
 }
 
-/// Reads an DPK1 file. `open` indexes it; records are decoded only when asked for.
+/// Reads a DPK1 file. `open` indexes it; records are decoded only when asked for.
 #[derive(Debug)]
 pub struct Reader<R> {
     src: BufReader<R>,
@@ -207,9 +207,9 @@ impl<R: Read + Seek> Reader<R> {
 /// The file header: its magic and version, then the window.
 fn header(src: &mut impl Read) -> io::Result<u64> {
     let mut magic = [0; 5];
-    src.read_exact(&mut magic).map_err(|_| invalid("not an DPK1 file"))?;
+    src.read_exact(&mut magic).map_err(|_| invalid("not a DPK1 file"))?;
     if &magic[..4] != MAGIC {
-        return Err(invalid("not an DPK1 file"));
+        return Err(invalid("not a DPK1 file"));
     }
     if magic[4] != VERSION {
         return Err(invalid("unsupported DPK1 version"));
@@ -650,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn what_is_not_an_dpk1_file_is_refused() {
+    fn what_is_not_a_dpk1_file_is_refused() {
         for bad in [&b""[..], b"DPK", b"DPD1\x01\x00", b"DPK1\x02\x00", b"DPK1\x01"] {
             assert_eq!(open(bad).unwrap_err().kind(), io::ErrorKind::InvalidData, "{bad:?}");
         }

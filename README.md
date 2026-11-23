@@ -270,7 +270,7 @@ API keys pass straight through. Headers are never written to the file.
 
 ### On files you already have
 
-One JSON object per line in, an `.dpk` file out: exported spans, a gateway's JSON-lines log, an
+One JSON object per line in, a `.dpk` file out: exported spans, a gateway's JSON-lines log, an
 eval run's requests. Pack before you ship to object storage and the bucket holds about a hundredth
 of the bytes.
 

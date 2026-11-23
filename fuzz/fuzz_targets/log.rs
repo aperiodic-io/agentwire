@@ -1,4 +1,4 @@
-//! Any bytes as an DPK1 file: refused, or read without panicking, and every record that reads
+//! Any bytes as a DPK1 file: refused, or read without panicking, and every record that reads
 //! reads the same by index as in a scan.
 #![no_main]
 

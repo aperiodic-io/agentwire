@@ -5,19 +5,13 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
-- Renamed from Logpak to **Deltapack**, before any release: the crate, binary, Python module and
-  image are `deltapack` (`ghcr.io/aperiodic-io/deltapack`), environment variables `DELTAPACK_*`,
-  metrics `deltapack_*`. The formats take the new prefixes: the file format LPK1 is **DPK1** (files
-  `.dpk`) and the wire format LPD1 is **DPD1** (headers `dpd1-keep`, `dpd1-kept`, `dpd1-error`,
-  `content-encoding: dpd1`). Nothing else in either layout changed; files and clients from before
-  are not read.
 - `deltapack log show` writes records as JSON lines: one per span or log record of an OTLP export
   (JSON or protobuf), attributes as plain JSON, any other record whole; filtered by `--trace`,
   `--since` and `--until`. `collect` and `server --record-dir` add the trace ids of each OTLP trace
   or log batch to its record's meta, as a sixth field (`-`: none; `?`: still encoded, not OTLP, or
   more than 64), so `--trace` skips the batches of other traces. Files written before this change are read, their bodies decoded to
   find a trace.
-- Renamed from agentwire to **Deltapack**. The crate, binary, Python module and Docker image are
+- Renamed from agentwire to **Deltapack** (briefly Logpak, never released). The crate, binary, Python module and Docker image are
   `deltapack` (`ghcr.io/aperiodic-io/deltapack`); environment variables are `DELTAPACK_*` (were
   `AGENTWIRE_*`) and metrics `deltapack_*` (were `agentwire_*`).
 - The wire and file formats take Deltapack's prefixes: AWD1 is now **DPD1** (magic `DPD1`, headers
@@ -50,7 +44,7 @@ version byte (SPEC.md); a crate release that changes it says so here.
   `--rotate-bytes` (1 GiB), moves to a new file after a failed write, and reports
   `deltapack_recorded_*` and `deltapack_record_failures_total` metrics.
 - `deltapack client` decodes gzip request bodies before it deltas them, and sends a body in any
-  other content coding as is (an `dpd1` delta of it used to drop that coding).
+  other content coding as is (a `dpd1` delta of it used to drop that coding).
 
 ## [0.1.0]
 

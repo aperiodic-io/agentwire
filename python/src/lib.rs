@@ -69,7 +69,7 @@ impl Writer {
     }
 }
 
-/// Reads an DPK1 file: `len(r)`, `r[i]` (one record's body), `r.meta(i)`, `r.records()`, and
+/// Reads a DPK1 file: `len(r)`, `r[i]` (one record's body), `r.meta(i)`, `r.records()`, and
 /// `for meta, body in r` (every record, in order, each rebuilt once). `max_body` caps any body it
 /// will rebuild.
 #[pyclass(module = "deltapack")]

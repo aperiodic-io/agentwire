@@ -120,7 +120,7 @@ pub fn parse(delta: &[u8], max_len: usize) -> Result<(Header, &[u8]), Error> {
         return Err(Error::Malformed("truncated header"));
     }
     if &delta[..4] != MAGIC {
-        return Err(Error::Malformed("not an DPD1 body"));
+        return Err(Error::Malformed("not a DPD1 body"));
     }
     if delta[4] != VERSION {
         return Err(Error::UnsupportedVersion(delta[4]));
@@ -489,7 +489,7 @@ mod tests {
         );
         let mut bad = d.clone();
         bad[0] = b'X';
-        assert_eq!(parse(&bad, 1 << 20).unwrap_err(), Error::Malformed("not an DPD1 body"));
+        assert_eq!(parse(&bad, 1 << 20).unwrap_err(), Error::Malformed("not a DPD1 body"));
         let mut bad = d.clone();
         bad[4] = 2;
         assert_eq!(parse(&bad, 1 << 20).unwrap_err(), Error::UnsupportedVersion(2));
