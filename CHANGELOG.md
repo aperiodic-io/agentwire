@@ -5,6 +5,11 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- `collect` and `server --record-dir` take `--keep-bytes` and `--keep-days`, which delete the
+  oldest closed files, and `--on-rotate`, which runs a command on each file once it is closed, one at
+  a time (and at start on files left from an earlier run or whose command failed; retention keeps a
+  file until its command succeeds). New metric: `deltapack_rotate_command_failures_total`. A record
+  directory is locked: a second process recording to it refuses to start.
 - `deltapack log show` writes records as JSON lines: one per span or log record of an OTLP export
   (JSON or protobuf), attributes as plain JSON, any other record whole; filtered by `--trace`,
   `--since` and `--until`. `collect` and `server --record-dir` add the trace ids of each OTLP trace

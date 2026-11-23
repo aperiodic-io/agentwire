@@ -4,6 +4,7 @@
 //! request body in DPK1, and forwards it unchanged when given a backend.
 //! `deltapack log`: pack, list and read DPK1 files (what `--record-dir` and `collect` write).
 
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fs::File;
 use std::future::Future;
@@ -82,6 +83,8 @@ enum Mode {
         /// Start a new DPK1 file once one reaches this size; every file reads on its own.
         #[arg(long, env = "DELTAPACK_ROTATE_BYTES", default_value_t = 1 << 30)]
         rotate_bytes: u64,
+        #[command(flatten)]
+        retention: Retention,
     },
     /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
     /// DPK1, decoded (gzip, deflate, br, zstd, snappy); forward each request as received when given a backend. Also accepts
@@ -110,6 +113,8 @@ enum Mode {
         max_body: usize,
         #[arg(long, env = "DELTAPACK_METRICS")]
         metrics: Option<SocketAddr>,
+        #[command(flatten)]
+        retention: Retention,
     },
     /// Accept plain requests from a local tool and send them to a `deltapack server` as deltas.
     Client {
@@ -130,6 +135,27 @@ enum Mode {
     /// Read and write DPK1 files: bodies stored as deltas against earlier ones.
     #[command(subcommand)]
     Log(LogCmd),
+}
+
+/// What happens to a record directory's closed files. Files are deleted oldest first; the open file
+/// is never deleted, nor a file whose `--on-rotate` command is still running. Give each collector
+/// its own directory: retention counts every `.dpk` file in it.
+#[derive(clap::Args, Clone, Default)]
+struct Retention {
+    /// Delete the oldest closed files while the directory holds more than this many bytes (checked
+    /// at start and at each new file).
+    #[arg(long, env = "DELTAPACK_KEEP_BYTES")]
+    keep_bytes: Option<u64>,
+    /// Delete closed files last written more than this many days ago (checked at start, at each new
+    /// file, and hourly).
+    #[arg(long, env = "DELTAPACK_KEEP_DAYS")]
+    keep_days: Option<u64>,
+    /// Run this with `sh -c` once a file is closed, the file's path as $1, e.g.
+    /// 'aws s3 mv "$1" s3://bucket/deltapack/'. It should move or delete the file. Commands run one at
+    /// a time, in order; wrap a slow one in `timeout`. Files left from an earlier run, and those
+    /// whose command failed, get it again at start; retention keeps a file until its command succeeds.
+    #[arg(long, env = "DELTAPACK_ON_ROTATE")]
+    on_rotate: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -203,9 +229,10 @@ async fn main() -> Result<(), BoxError> {
             record_dir,
             record_window,
             rotate_bytes,
+            retention,
         } => {
             let record = match record_dir {
-                Some(dir) => Some(Arc::new(Mutex::new(Recording::open(dir, record_window, rotate_bytes)?))),
+                Some(dir) => Some(Recording::start(dir, record_window, rotate_bytes, retention)?),
                 None => None,
             };
             let store = Store::new(store_bytes, Duration::from_secs(ttl_seconds));
@@ -214,8 +241,8 @@ async fn main() -> Result<(), BoxError> {
             let forward = Forward { http, upstream: Some(Arc::new(upstream)), record, max_body, grpc: false };
             run_server(vec![listen], store, Config { max_body, scope_headers }, metrics, forward).await
         }
-        Mode::Collect { listen, record_dir, forward, record_window, rotate_bytes, max_body, metrics } => {
-            let record = Some(Arc::new(Mutex::new(Recording::open(record_dir, record_window, rotate_bytes)?)));
+        Mode::Collect { listen, record_dir, forward, record_window, rotate_bytes, max_body, metrics, retention } => {
+            let record = Some(Recording::start(record_dir, record_window, rotate_bytes, retention)?);
             let forward = Forward { http, upstream: forward.map(Arc::new), record, max_body, grpc: true };
             let config = Config { max_body, ..Config::default() };
             run_server(listen, Store::new(1 << 30, Duration::from_secs(1800)), config, metrics, forward).await
@@ -333,13 +360,55 @@ struct Recording {
     recorded: u64,
     body_bytes: u64,
     failures: u64,
+    retention: Retention,
+    /// closed files retention leaves alone: their `--on-rotate` command is waiting, running, or
+    /// failed (it runs again at the next start)
+    held: Arc<Mutex<HashSet<PathBuf>>>,
+    /// files for the `--on-rotate` command, run one at a time in order
+    commands: Option<std::sync::mpsc::Sender<PathBuf>>,
+    command_failures: Arc<AtomicU64>,
+    /// held while recording: one process per directory
+    _lock: File,
 }
 
 impl Recording {
-    fn open(dir: PathBuf, window: usize, rotate_bytes: u64) -> io::Result<Self> {
+    /// Opens a new file in `dir`; hands the files already there to `--on-rotate`, and applies
+    /// retention now, at each new file, and hourly when it keeps by age.
+    fn start(dir: PathBuf, window: usize, rotate_bytes: u64, retention: Retention) -> io::Result<Recorder> {
         std::fs::create_dir_all(&dir)?;
+        // the directory itself is locked (flock), so it holds nothing but its files
+        let dir_lock = File::open(&dir)?;
+        if dir_lock.try_lock().is_err() {
+            let e = format!("{} is recorded to by another process: give each its own directory", dir.display());
+            return Err(io::Error::other(e));
+        }
+        let earlier = dpk_files(&dir)?;
         let (path, writer) = Self::create(&dir, window, 0)?;
-        Ok(Recording {
+        let by_age = retention.keep_days.is_some();
+        let (held, command_failures) = (Arc::<Mutex<HashSet<PathBuf>>>::default(), Arc::<AtomicU64>::default());
+        let commands = retention.on_rotate.clone().map(|command| {
+            let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+            let (held, failures) = (held.clone(), command_failures.clone());
+            std::thread::spawn(move || {
+                for file in rx {
+                    let status = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&command)
+                        .arg("deltapack-on-rotate")
+                        .arg(&file)
+                        .stdin(std::process::Stdio::null())
+                        .status();
+                    if status.as_ref().is_ok_and(|s| s.success()) {
+                        lock_set(&held).remove(&file);
+                    } else {
+                        tracing::warn!(path = %file.display(), ?status, "the --on-rotate command failed; the file is kept");
+                        failures.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+            tx
+        });
+        let r = Recording {
             dir,
             window,
             rotate_bytes,
@@ -350,7 +419,55 @@ impl Recording {
             recorded: 0,
             body_bytes: 0,
             failures: 0,
-        })
+            retention,
+            held,
+            commands,
+            command_failures,
+            _lock: dir_lock,
+        };
+        for (file, ..) in earlier {
+            r.hand_over(file);
+        }
+        r.prune();
+        let r = Arc::new(Mutex::new(r));
+        if by_age {
+            let r = r.clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_secs(3600));
+                    lock(&r).prune();
+                }
+            });
+        }
+        Ok(r)
+    }
+
+    /// Queues a closed file for `--on-rotate`; retention holds it until its command succeeds.
+    fn hand_over(&self, file: PathBuf) {
+        let Some(commands) = &self.commands else { return };
+        lock_set(&self.held).insert(file.clone());
+        // the worker only stops with the process
+        let _ = commands.send(file);
+    }
+
+    /// Deletes what `--keep-bytes` and `--keep-days` say is past keeping.
+    fn prune(&self) {
+        let Retention { keep_bytes, keep_days, .. } = self.retention;
+        if keep_bytes.is_none() && keep_days.is_none() {
+            return;
+        }
+        let files = match dpk_files(&self.dir) {
+            Ok(files) => files,
+            Err(e) => return tracing::warn!(error = %e, "retention could not list the record directory"),
+        };
+        let total = files.iter().map(|f| f.1).sum();
+        let held = lock_set(&self.held);
+        let closed: Vec<_> = files.into_iter().filter(|f| f.0 != self.path && !held.contains(&f.0)).collect();
+        drop(held);
+        let cutoff = cutoff(keep_days, std::time::SystemTime::now());
+        for file in delete_expired(&closed, total, keep_bytes, cutoff, |f| std::fs::remove_file(f)) {
+            tracing::info!(path = %file.display(), "deleted by retention");
+        }
     }
 
     fn create(dir: &std::path::Path, window: usize, seq: u64) -> io::Result<(PathBuf, log::Writer<BufWriter<File>>)> {
@@ -365,7 +482,10 @@ impl Recording {
     fn next_file(&mut self) -> io::Result<()> {
         let len = std::fs::metadata(&self.path).map_or(0, |m| m.len());
         let (path, writer) = Self::create(&self.dir, self.window, self.seq + 1)?;
-        (self.closed, self.seq, self.path, self.writer) = (self.closed + len, self.seq + 1, path, writer);
+        let old = std::mem::replace(&mut self.path, path);
+        (self.closed, self.seq, self.writer) = (self.closed + len, self.seq + 1, writer);
+        self.hand_over(old);
+        self.prune();
         Ok(())
     }
 
@@ -395,10 +515,63 @@ impl Recording {
             "# TYPE deltapack_recorded_total counter\ndeltapack_recorded_total {}\n\
              # TYPE deltapack_recorded_body_bytes_total counter\ndeltapack_recorded_body_bytes_total {}\n\
              # TYPE deltapack_recorded_file_bytes_total counter\ndeltapack_recorded_file_bytes_total {on_disk}\n\
-             # TYPE deltapack_record_failures_total counter\ndeltapack_record_failures_total {}\n",
-            self.recorded, self.body_bytes, self.failures,
+             # TYPE deltapack_record_failures_total counter\ndeltapack_record_failures_total {}\n\
+             # TYPE deltapack_rotate_command_failures_total counter\ndeltapack_rotate_command_failures_total {}\n",
+            self.recorded,
+            self.body_bytes,
+            self.failures,
+            self.command_failures.load(Ordering::Relaxed),
         )
     }
+}
+
+fn lock_set(s: &Mutex<HashSet<PathBuf>>) -> std::sync::MutexGuard<'_, HashSet<PathBuf>> {
+    s.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// The `.dpk` files in `dir`, oldest first (their names start with the time each was opened), with
+/// their bytes and when each was last written.
+fn dpk_files(dir: &std::path::Path) -> io::Result<Vec<(PathBuf, u64, std::time::SystemTime)>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == "dpk") {
+            let m = match std::fs::metadata(&path) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue, // moved or deleted meanwhile
+                m => m?,
+            };
+            files.push((path, m.len(), m.modified()?));
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// Deletes from `closed` (oldest first) the oldest while the directory's `total` bytes exceed
+/// `keep_bytes`, and any last written before `cutoff`; returns those deleted. A file `delete` fails
+/// on frees nothing, and is logged.
+fn delete_expired(
+    closed: &[(PathBuf, u64, std::time::SystemTime)],
+    mut total: u64,
+    keep_bytes: Option<u64>,
+    cutoff: Option<std::time::SystemTime>,
+    mut delete: impl FnMut(&std::path::Path) -> io::Result<()>,
+) -> Vec<PathBuf> {
+    let mut deleted = Vec::new();
+    for (path, bytes, written) in closed {
+        if keep_bytes.is_some_and(|k| total > k) || cutoff.is_some_and(|c| *written < c) {
+            match delete(path) {
+                Ok(()) => (total, _) = (total - bytes, deleted.push(path.clone())),
+                Err(e) => tracing::warn!(path = %path.display(), error = %e, "retention could not delete"),
+            }
+        }
+    }
+    deleted
+}
+
+/// The time before which `--keep-days` deletes; none when it reaches past the epoch.
+fn cutoff(keep_days: Option<u64>, now: std::time::SystemTime) -> Option<std::time::SystemTime> {
+    now.checked_sub(Duration::from_secs(keep_days?.checked_mul(86_400)?))
 }
 
 fn unix_ms() -> u128 {
@@ -1079,7 +1252,8 @@ mod tests {
     fn a_failed_write_moves_recording_to_a_new_file_and_loses_nothing_after_it() {
         let dir = std::env::temp_dir().join(format!("deltapack-recording-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut r = Recording::open(dir.clone(), 4, 1 << 30).unwrap();
+        let r = Recording::start(dir.clone(), 4, 1 << 30, Retention::default()).unwrap();
+        let mut r = lock(&r);
         r.append(b"m", Bytes::from_static(b"before")).unwrap();
         // the disk fills up: /dev/full fails every write with ENOSPC
         let full = File::options().write(true).open("/dev/full").unwrap();
@@ -1105,7 +1279,8 @@ mod tests {
     fn files_rotated_within_a_millisecond_get_their_own_names_in_order() {
         let dir = std::env::temp_dir().join(format!("deltapack-rotation-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut r = Recording::open(dir.clone(), 1, 1).unwrap(); // every record fills its file
+        let r = Recording::start(dir.clone(), 1, 1, Retention::default()).unwrap(); // every record fills its file
+        let mut r = lock(&r);
         for body in ["a", "b", "c"] {
             r.append(b"", Bytes::from(body)).unwrap();
         }
@@ -1114,6 +1289,68 @@ mod tests {
         names.sort();
         let seqs: Vec<&str> = names.iter().map(|n| &n[n.len() - 10..n.len() - 4]).collect();
         assert_eq!(seqs, ["000000", "000001", "000002", "000003"], "{names:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn retention_deletes_the_oldest_past_the_size_and_any_past_the_age() {
+        let t = |s| std::time::UNIX_EPOCH + Duration::from_secs(s);
+        let files = [("a", 10, 100), ("b", 20, 200), ("c", 30, 300)].map(|(p, n, w)| (PathBuf::from(p), n, t(w)));
+        let run = |keep, cutoff, fails: &str| {
+            let deleted = delete_expired(&files, 75, keep, cutoff, |p| match p.to_str() == Some(fails) {
+                true => Err(io::Error::other("busy")),
+                false => Ok(()),
+            });
+            deleted.into_iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
+        };
+        // 70 bytes closed and 5 open
+        assert_eq!(run(None, None, ""), Vec::<String>::new());
+        assert_eq!(run(Some(75), None, ""), Vec::<String>::new(), "at the limit is kept");
+        assert_eq!(run(Some(74), None, ""), ["a"]);
+        assert_eq!(run(Some(45), None, ""), ["a", "b"]);
+        assert_eq!(run(Some(0), None, ""), ["a", "b", "c"]);
+        assert_eq!(run(None, Some(t(200)), ""), ["a"], "written at the cutoff is kept");
+        assert_eq!(run(None, Some(t(201)), ""), ["a", "b"]);
+        assert_eq!(run(Some(60), Some(t(150)), ""), ["a", "b"], "either reason deletes");
+        assert_eq!(run(Some(45), None, "a"), ["b", "c"], "a file not deleted frees nothing");
+    }
+
+    #[test]
+    fn days_kept_past_the_epoch_keep_everything() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(86_400 * 10);
+        assert_eq!(cutoff(Some(3), now), Some(std::time::UNIX_EPOCH + Duration::from_secs(86_400 * 7)));
+        assert_eq!(cutoff(Some(10), now), Some(std::time::UNIX_EPOCH));
+        assert_eq!(cutoff(Some(u64::MAX), now), None);
+        assert_eq!(cutoff(None, now), None);
+    }
+
+    #[test]
+    fn a_directory_is_recorded_to_by_one_process_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("deltapack-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = Recording::start(dir.clone(), 1, 1 << 30, Retention::default()).unwrap();
+        let second = Recording::start(dir.clone(), 1, 1 << 30, Retention::default()).map(|_| ());
+        assert!(second.unwrap_err().to_string().contains("another process"), "the second is refused");
+        drop(first);
+        std::thread::sleep(Duration::from_millis(2)); // a file name of its own: the same pid, a new ms
+        Recording::start(dir.clone(), 1, 1 << 30, Retention::default()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_dpk_files_are_listed_oldest_first() {
+        let dir = std::env::temp_dir().join(format!("deltapack-listing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["2-x.dpk", "1-x.dpk", "notes.txt", "3-x.dpk.part"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        // gone between the listing and its size (a command moved it): skipped
+        std::os::unix::fs::symlink(dir.join("missing"), dir.join("0-x.dpk")).unwrap();
+        let listed: Vec<_> =
+            dpk_files(&dir).unwrap().into_iter().map(|f| (f.0.file_name().unwrap().to_owned(), f.1)).collect();
+        assert_eq!(listed, [("1-x.dpk".into(), 7), ("2-x.dpk".into(), 7)]);
+        assert!(dpk_files(&dir.join("missing")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

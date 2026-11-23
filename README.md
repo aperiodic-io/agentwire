@@ -351,8 +351,9 @@ ms or a duration ago (`90s`, `15m`, `2h`, `7d`).
 - A crash loses at most the record being written. A file that ends mid-record still holds every
   record before it, and each record is flushed before its request goes on.
 - Files are self-contained and rotate at `--rotate-bytes` (1 GiB). A restart starts a new file and
-  never appends to or replaces an old one, so shipping or deleting old files is a `mv` or an `rm`
-  on your schedule.
+  never appends to or replaces an old one. `--keep-bytes` and `--keep-days` delete the oldest, and
+  `--on-rotate` hands each closed file to a command of yours, such as one that moves it to object
+  storage. A directory is recorded to by one process at a time: a second one refuses to start.
 - Compressed bodies (gzip, deflate, brotli, zstd, snappy) are stored decoded, so the delta sees the content. Headers, and so credentials, are
   never stored.
 - Recording never takes your traffic down: a failed write is counted in
@@ -524,6 +525,9 @@ client.confirm(&request, response.headers().get(deltapack::KEPT).and_then(|v| v.
 | `--record-dir` | `DELTAPACK_RECORD_DIR` | off | Store every request body forwarded in a new DPK1 file here. Requests are then buffered (up to `--max-body`). |
 | `--record-window` | `DELTAPACK_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per conversation in flight. |
 | `--rotate-bytes` | `DELTAPACK_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. |
+| `--keep-bytes` | `DELTAPACK_KEEP_BYTES` | off | Delete the oldest closed files while the directory holds more than this. |
+| `--keep-days` | `DELTAPACK_KEEP_DAYS` | off | Delete closed files last written more than this many days ago (checked at start, at each new file, and hourly). |
+| `--on-rotate` | `DELTAPACK_ON_ROTATE` | off | Run this with `sh -c` once a file is closed, its path as `$1`: `'aws s3 mv "$1" s3://bucket/deltapack/'`. It should move or delete the file. One runs at a time, in order; wrap a slow one in `timeout`. Retention keeps a file until its command succeeds; files left from an earlier run, or whose command failed, get it again at start. |
 
 **`deltapack collect`**: a log sink that stores what is posted to it in DPK1 ([above](#quick-start-point-your-opentelemetry-exporter-at-deltapack)).
 
@@ -533,7 +537,10 @@ client.confirm(&request, response.headers().get(deltapack::KEPT).and_then(|v| v.
 | `--forward` | `DELTAPACK_FORWARD` | none | The backend each request is sent on to: as received, or a gRPC Export as OTLP/HTTP protobuf. Without one, each is acknowledged. |
 | `--listen` | `DELTAPACK_LISTEN` | `127.0.0.1:4318,127.0.0.1:4317` | Where to listen; each address takes OTLP/HTTP and OTLP/gRPC. On loopback: whoever reaches it can fill the disk. In a container, `0.0.0.0:4318,0.0.0.0:4317` on a private network. |
 | `--record-window` | `DELTAPACK_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per trace or exporter interleaved. |
-| `--rotate-bytes` | `DELTAPACK_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. Every file reads on its own; deleting old ones (or shipping them to object storage) is yours to schedule. |
+| `--rotate-bytes` | `DELTAPACK_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. Every file reads on its own. |
+| `--keep-bytes` | `DELTAPACK_KEEP_BYTES` | off | Delete the oldest closed files while the directory holds more than this. |
+| `--keep-days` | `DELTAPACK_KEEP_DAYS` | off | Delete closed files last written more than this many days ago (checked at start, at each new file, and hourly). |
+| `--on-rotate` | `DELTAPACK_ON_ROTATE` | off | Run this with `sh -c` once a file is closed, its path as `$1`: `'aws s3 mv "$1" s3://bucket/deltapack/'`. It should move or delete the file. One runs at a time, in order; wrap a slow one in `timeout`. Retention keeps a file until its command succeeds; files left from an earlier run, or whose command failed, get it again at start. |
 | `--max-body` | `DELTAPACK_MAX_BODY` | 64 MiB | The largest body stored, after decoding; larger ones are answered 413. |
 | `--metrics` | `DELTAPACK_METRICS` | off | |
 
@@ -559,6 +566,7 @@ deltas on.
 | `deltapack_client_body_bytes_total`, `deltapack_client_wire_bytes_total` | Request bytes, and what was sent for them. Their ratio is your saving. |
 | `deltapack_recorded_total`, `deltapack_recorded_body_bytes_total`, `deltapack_recorded_file_bytes_total` | Records stored (`--record-dir`, `collect`), their bytes, and the bytes of the files holding them. Their ratio is the storage saving. |
 | `deltapack_record_failures_total` | Records that could not be written (disk full, I/O error). The request was still forwarded; the next record goes to a new file. |
+| `deltapack_rotate_command_failures_total` | `--on-rotate` commands that exited non-zero or could not start. The file stays in the directory, kept from retention, and gets the command again at the next start. |
 
 ### Deploying
 
