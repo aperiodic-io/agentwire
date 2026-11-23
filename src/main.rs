@@ -83,7 +83,7 @@ enum Mode {
         rotate_bytes: u64,
     },
     /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
-    /// AWL1, gzip decoded; forward each request as received when given a backend. Also accepts
+    /// AWL1, decoded (gzip, deflate, br, zstd, snappy); forward each request as received when given a backend. Also accepts
     /// AWD1 deltas from `logpak client`.
     Collect {
         /// Where to listen (repeat, or comma-separate); each address takes OTLP/HTTP and OTLP/gRPC.
@@ -104,7 +104,7 @@ enum Mode {
         /// Start a new AWL1 file once one reaches this size; every file reads on its own.
         #[arg(long, env = "LOGPAK_ROTATE_BYTES", default_value_t = 1 << 30)]
         rotate_bytes: u64,
-        /// The largest body stored, after gzip decoding.
+        /// The largest body stored, after decoding.
         #[arg(long, env = "LOGPAK_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
         #[arg(long, env = "LOGPAK_METRICS")]
@@ -471,16 +471,9 @@ async fn export(
         Err(code) => return grpc::error(code, "not one length-prefixed message"),
     };
     let message = if compressed {
-        let gzip = parts.headers.get("grpc-encoding").is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"gzip"));
-        if !gzip {
-            return grpc::error(grpc::Code::Unimplemented, "only gzip compression is supported");
-        }
-        match gunzip(message, max_body) {
+        match grpc_decoded(&parts.headers, message, max_body) {
             Ok(m) => m,
-            Err(StatusCode::PAYLOAD_TOO_LARGE) => {
-                return grpc::error(grpc::Code::ResourceExhausted, "the export exceeds the size limit");
-            }
-            Err(_) => return grpc::error(grpc::Code::InvalidArgument, "the message is not gzip"),
+            Err((code, why)) => return grpc::error(code, why),
         }
     } else {
         body.slice_ref(message)
@@ -604,30 +597,98 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
     }
 }
 
-/// The body as stored and delta'd: gzip decoded (at most `max` bytes), with "-" for its encoding;
-/// any other encoding kept as sent, and named.
+/// The body as stored and delta'd: decoded from every content coding it names (gzip, deflate, br,
+/// zstd, snappy), at most `max` bytes, with "-" for its encoding. A coding none of these is kept as
+/// sent, and named.
 fn decoded(headers: &HeaderMap, body: Bytes, max: usize) -> Result<(Bytes, String), StatusCode> {
     let encoding = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).unwrap_or("").trim();
-    if encoding.is_empty() || encoding.eq_ignore_ascii_case("identity") {
-        return Ok((body, "-".to_owned()));
+    let mut out = body.clone();
+    // codings are listed in the order they were applied
+    for coding in encoding.rsplit(',').map(str::trim) {
+        if coding.is_empty() || coding.eq_ignore_ascii_case("identity") {
+            continue;
+        }
+        match decompress(coding, &out, max) {
+            Some(decoded) => out = decoded?,
+            None => return Ok((body, encoding.replace(' ', ""))),
+        }
     }
-    if !encoding.eq_ignore_ascii_case("gzip") && !encoding.eq_ignore_ascii_case("x-gzip") {
-        return Ok((body, encoding.replace(' ', "")));
-    }
-    Ok((gunzip(&body, max)?, "-".to_owned()))
+    Ok((out, "-".to_owned()))
 }
 
-/// Gzip (one member or several) decoded to at most `max` bytes: 413 past it, 400 for what is not gzip.
-fn gunzip(body: &[u8], max: usize) -> Result<Bytes, StatusCode> {
+/// A compressed gRPC message, decoded by the request's `grpc-encoding`.
+fn grpc_decoded(headers: &HeaderMap, message: &[u8], max: usize) -> Result<Bytes, (grpc::Code, &'static str)> {
+    let coding = headers.get("grpc-encoding").and_then(|v| v.to_str().ok()).unwrap_or("");
+    match decompress(coding, message, max) {
+        None => Err((grpc::Code::Unimplemented, "unsupported grpc-encoding")),
+        Some(Ok(m)) => Ok(m),
+        Some(Err(StatusCode::PAYLOAD_TOO_LARGE)) => {
+            Err((grpc::Code::ResourceExhausted, "the export exceeds the size limit"))
+        }
+        Some(Err(_)) => Err((grpc::Code::InvalidArgument, "the message does not decode")),
+    }
+}
+
+/// `data` decoded from one coding, to at most `max` bytes: 413 past it, 400 for what does not decode;
+/// `None` for a coding not known here.
+fn decompress(coding: &str, data: &[u8], max: usize) -> Option<Result<Bytes, StatusCode>> {
+    Some(match coding.to_ascii_lowercase().as_str() {
+        "gzip" | "x-gzip" => bounded(flate2::read::MultiGzDecoder::new(data), max), // one member or several
+        // RFC 9110's deflate is zlib; some senders send the bare deflate stream
+        "deflate" => bounded(flate2::read::ZlibDecoder::new(data), max).or_else(|code| match code {
+            StatusCode::BAD_REQUEST => bounded(flate2::read::DeflateDecoder::new(data), max),
+            code => Err(code),
+        }),
+        "br" => bounded(brotli_decompressor::Decompressor::new(data, 4096), max),
+        "zstd" => unzstd(data, max),
+        // the framing format opens with its stream identifier; without it, `snappy` is one raw block
+        "x-snappy-framed" => bounded(snap::read::FrameDecoder::new(data), max),
+        "snappy" if data.starts_with(b"\xff\x06\x00\x00sNaPpY") => bounded(snap::read::FrameDecoder::new(data), max),
+        "snappy" => match snap::raw::decompress_len(data) {
+            Ok(n) if n > max => Err(StatusCode::PAYLOAD_TOO_LARGE),
+            Ok(_) => {
+                snap::raw::Decoder::new().decompress_vec(data).map(Bytes::from).map_err(|_| StatusCode::BAD_REQUEST)
+            }
+            Err(_) => Err(StatusCode::BAD_REQUEST),
+        },
+        _ => return None,
+    })
+}
+
+/// Reads a decoder to its end, but never past `max` bytes.
+fn bounded(decoder: impl Read, max: usize) -> Result<Bytes, StatusCode> {
     let mut out = Vec::new();
-    flate2::read::MultiGzDecoder::new(body)
-        .take(max as u64 + 1)
-        .read_to_end(&mut out)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    decoder.take(max as u64 + 1).read_to_end(&mut out).map_err(|_| StatusCode::BAD_REQUEST)?;
     if out.len() > max {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     Ok(Bytes::from(out))
+}
+
+/// Zstandard frames, one or several, whether or not they state their size, in a window no larger
+/// than AWD1's own (2^27).
+fn unzstd(data: &[u8], max: usize) -> Result<Bytes, StatusCode> {
+    let mut dctx = zstd_safe::DCtx::create();
+    dctx.set_parameter(zstd_safe::DParameter::WindowLogMax(27)).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut input = zstd_safe::InBuffer::around(data);
+    let mut out = Vec::new();
+    loop {
+        // one block at a time: at most a block past `max` before it is refused
+        out.reserve(zstd_safe::DCtx::out_size());
+        let pos = out.len();
+        let (hint, full) = {
+            let mut buf = zstd_safe::OutBuffer::around_pos(&mut out, pos);
+            let hint = dctx.decompress_stream(&mut buf, &mut input).map_err(|_| StatusCode::BAD_REQUEST)?;
+            (hint, buf.pos() == buf.capacity())
+        };
+        if out.len() > max {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        if input.pos() == data.len() && !full {
+            // all read and all flushed: done at a frame's end, cut short inside one
+            return if hint == 0 { Ok(Bytes::from(out)) } else { Err(StatusCode::BAD_REQUEST) };
+        }
+    }
 }
 
 /// A collector's answer: OTLP/HTTP's empty success, in the request's content type.
@@ -672,7 +733,7 @@ impl ClientProxy {
             Ok(b) => b.to_bytes(),
             Err(_) => return status(StatusCode::PAYLOAD_TOO_LARGE),
         };
-        // a delta of gzip bytes finds nothing: decode first. A body in another encoding goes as is
+        // a delta of compressed bytes finds nothing: decode first. A body in a coding not known here goes as is
         // (`awd1` must be its only content coding)
         let body = match decoded(&parts.headers, body, self.max_body) {
             Ok((body, encoding)) if encoding == "-" => {
@@ -822,7 +883,119 @@ mod tests {
         assert_eq!(decoded(&with("gzip"), two_members.into(), 5), Ok((plain.clone(), "-".into())));
         assert_eq!(decoded(&with("gzip"), gz(b"hello!"), 5), Err(StatusCode::PAYLOAD_TOO_LARGE));
         assert_eq!(decoded(&with("gzip"), plain.clone(), 5), Err(StatusCode::BAD_REQUEST), "not gzip");
-        assert_eq!(decoded(&with("br"), plain.clone(), 5), Ok((plain, "br".into())));
+        assert_eq!(decoded(&with("lz4"), plain.clone(), 5), Ok((plain, "lz4".into())));
+    }
+
+    /// Every coding an exporter or log shipper may pick, so no batch is stored still compressed
+    /// (which leaves a delta nothing to find).
+    fn encoded(coding: &str, b: &[u8]) -> Bytes {
+        let mut out = Vec::new();
+        match coding {
+            "deflate" => {
+                let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                e.write_all(b).unwrap();
+                out = e.finish().unwrap();
+            }
+            "raw-deflate" => {
+                let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+                e.write_all(b).unwrap();
+                out = e.finish().unwrap();
+            }
+            "br" => {
+                brotli::BrotliCompress(&mut &b[..], &mut out, &Default::default()).unwrap();
+            }
+            "zstd" => {
+                out = vec![0; zstd_safe::compress_bound(b.len())];
+                let n = zstd_safe::compress(&mut out[..], b, 3).unwrap();
+                out.truncate(n);
+            }
+            "snappy" => out = snap::raw::Encoder::new().compress_vec(b).unwrap(),
+            "snappy-framed" => {
+                let mut w = snap::write::FrameEncoder::new(Vec::new());
+                w.write_all(b).unwrap();
+                out = w.into_inner().unwrap();
+            }
+            _ => unreachable!(),
+        }
+        Bytes::from(out)
+    }
+
+    #[test]
+    fn deflate_brotli_zstd_and_snappy_are_decoded_within_the_limit() {
+        let with = |enc: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::CONTENT_ENCODING, enc.parse().unwrap());
+            h
+        };
+        let plain = Bytes::from_static(b"hello");
+        for (fixture, name) in [
+            ("deflate", "deflate"),
+            ("raw-deflate", "deflate"), // RFC 9110 says zlib; some senders send it bare
+            ("br", "br"),
+            ("zstd", "zstd"),
+            ("zstd", "ZSTD"),
+            ("snappy", "snappy"),
+            ("snappy-framed", "snappy"),
+            ("snappy-framed", "x-snappy-framed"),
+        ] {
+            assert_eq!(
+                decoded(&with(name), encoded(fixture, b"hello"), 5),
+                Ok((plain.clone(), "-".into())),
+                "{fixture}"
+            );
+            assert_eq!(
+                decoded(&with(name), encoded(fixture, b"hello!"), 5),
+                Err(StatusCode::PAYLOAD_TOO_LARGE),
+                "{fixture} past the limit"
+            );
+            // raw snappy opens with the decoded length: these bytes claim more than the limit
+            let refused = if name == "snappy" { StatusCode::PAYLOAD_TOO_LARGE } else { StatusCode::BAD_REQUEST };
+            assert_eq!(decoded(&with(name), Bytes::from_static(b"\xff\xfe not it"), 5), Err(refused), "{fixture}");
+        }
+        // zstd: frames back to back, and one cut short
+        let two_frames = [encoded("zstd", b"hel"), encoded("zstd", b"lo")].concat();
+        assert_eq!(decoded(&with("zstd"), two_frames.into(), 5), Ok((plain.clone(), "-".into())));
+        // a body many output blocks long, within the limit and past it
+        let big: Vec<u8> = (0..1_000_000u32).flat_map(|i| (i % 251).to_le_bytes()).collect();
+        let packed = encoded("zstd", &big);
+        assert_eq!(decoded(&with("zstd"), packed.clone(), big.len()), Ok((Bytes::from(big.clone()), "-".into())));
+        assert_eq!(decoded(&with("zstd"), packed, big.len() - 1), Err(StatusCode::PAYLOAD_TOO_LARGE));
+        let cut = encoded("zstd", b"hello");
+        assert_eq!(decoded(&with("zstd"), cut.slice(..cut.len() - 2), 5), Err(StatusCode::BAD_REQUEST));
+        // codings applied in order are undone in reverse; one unknown keeps the body as sent
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&encoded("br", b"hello")).unwrap();
+        let br_then_gzip = Bytes::from(gz.finish().unwrap());
+        // (every layer is held to the limit: the brotli layer is longer than "hello")
+        assert_eq!(decoded(&with("br, gzip"), br_then_gzip.clone(), 64), Ok((plain, "-".into())));
+        assert_eq!(decoded(&with("lz4, gzip"), br_then_gzip.clone(), 64), Ok((br_then_gzip, "lz4,gzip".into())));
+    }
+
+    #[test]
+    fn a_grpc_message_is_decoded_by_its_grpc_encoding() {
+        let with = |enc: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("grpc-encoding", enc.parse().unwrap());
+            h
+        };
+        for coding in ["deflate", "zstd", "snappy"] {
+            assert_eq!(
+                grpc_decoded(&with(coding), &encoded(coding, b"hello"), 5),
+                Ok(Bytes::from_static(b"hello")),
+                "{coding}"
+            );
+        }
+        assert_eq!(
+            grpc_decoded(&with("zstd"), &encoded("zstd", b"hello!"), 5).unwrap_err().0,
+            grpc::Code::ResourceExhausted
+        );
+        assert_eq!(grpc_decoded(&with("zstd"), b"not it", 5).unwrap_err().0, grpc::Code::InvalidArgument);
+        assert_eq!(grpc_decoded(&with("lz4"), b"hello", 5).unwrap_err().0, grpc::Code::Unimplemented);
+        assert_eq!(
+            grpc_decoded(&HeaderMap::new(), b"hello", 5).unwrap_err().0,
+            grpc::Code::Unimplemented,
+            "compressed, no encoding"
+        );
     }
 
     #[test]

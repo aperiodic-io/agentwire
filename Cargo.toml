@@ -20,10 +20,12 @@ proxy = [
   "server",
   "dep:clap",
   "dep:flate2",
+  "dep:brotli-decompressor",
   "dep:futures-util",
   "dep:hyper",
   "dep:hyper-util",
   "dep:reqwest",
+  "dep:snap",
   "dep:tokio",
   "dep:tracing",
   "dep:tracing-subscriber",
@@ -41,8 +43,11 @@ tower-layer = { version = "0.3", optional = true }
 tower-service = { version = "0.3", optional = true }
 
 clap = { version = "4", features = ["derive", "env"], optional = true }
-# gzip request bodies (OTLP exporters' default) are decoded before they are deltas or records
+# compressed request bodies (gzip, deflate, br, zstd, snappy) are decoded before they are deltas
+# or records; zstd is zstd-safe's
 flate2 = { version = "1", optional = true }
+brotli-decompressor = { version = "6", optional = true }
+snap = { version = "1", optional = true }
 futures-util = { version = "0.3", default-features = false, optional = true }
 hyper = { version = "1", features = ["server", "http1", "http2"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful", "service"], optional = true }
@@ -52,6 +57,7 @@ tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
 
 [dev-dependencies]
+brotli = "9"                 # brotli fixtures for the decoding tests
 cucumber = "0.23"
 flate2 = "1"
 futures-util = { version = "0.3", default-features = false }

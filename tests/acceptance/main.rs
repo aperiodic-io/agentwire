@@ -836,18 +836,18 @@ async fn grpc_sized(w: &mut Proxies, kind: String, n: usize) {
 }
 
 #[when(
-    regex = r"^a gRPC exporter sends (an export compressed with deflate|an export flagged as gzip that is not gzip|a call to a method other than Export)$"
+    regex = r"^a gRPC exporter sends (an export compressed with lz4|an export flagged as gzip that is not gzip|a call to a method other than Export)$"
 )]
 async fn grpc_refused(w: &mut Proxies, call: String) {
     let to = w.server.as_ref().unwrap().addr;
     let (path, framed, gz) = match call.as_str() {
-        "an export compressed with deflate" => (TRACE_EXPORT, grpc_frame(true, b"deflated"), false),
+        "an export compressed with lz4" => (TRACE_EXPORT, grpc_frame(true, b"lz4 frame"), false),
         "an export flagged as gzip that is not gzip" => (TRACE_EXPORT, grpc_frame(true, b"not gzip"), true),
         _ => ("/grpc.health.v1.Health/Check", grpc_frame(false, b""), false),
     };
-    // `false` for gzip with a compressed frame: grpc_call sends no grpc-encoding, so say deflate
-    let (status, body) = if call.contains("deflate") {
-        grpc_call_with(to, path, framed, Some("deflate")).await
+    // `false` for gzip with a compressed frame: grpc_call sends no grpc-encoding, so say lz4
+    let (status, body) = if call.contains("lz4") {
+        grpc_call_with(to, path, framed, Some("lz4")).await
     } else {
         grpc_call(to, path, framed, gz).await
     };
@@ -873,25 +873,25 @@ async fn refused_unrecorded(w: &mut Proxies, status: u16) {
     assert!(listed.is_empty(), "{}", String::from_utf8_lossy(&listed));
 }
 
-#[when("a tool posts a brotli-encoded body through the client")]
-async fn brotli_through_client(w: &mut Proxies) {
-    // not real brotli: the client must not need to read it, only to leave it alone. Two turns, so
+#[when("a tool posts an lz4-encoded body through the client")]
+async fn lz4_through_client(w: &mut Proxies) {
+    // not real lz4 (a coding logpak does not decode): the client must not need to read it, only to leave it alone. Two turns, so
     // the second would have a base to delta against.
     let to = w.client.as_ref().unwrap().addr;
     for turn in [3, 4] {
-        let body = conversation("br", turn);
-        w.post_batch(to, "/v1/messages", body.clone(), &[("content-encoding", "br")]).await;
+        let body = conversation("lz4", turn);
+        w.post_batch(to, "/v1/messages", body.clone(), &[("content-encoding", "lz4")]).await;
         w.gzipped.push(body);
     }
 }
 
-#[then("the upstream received it unchanged, still brotli-encoded")]
-async fn upstream_received_brotli(w: &mut Proxies) {
+#[then("the upstream received it unchanged, still lz4-encoded")]
+async fn upstream_received_lz4(w: &mut Proxies) {
     let recorded = w.recorded();
     assert_eq!(recorded.len(), 2);
     for ((headers, body), sent) in recorded.iter().zip(&w.gzipped) {
         assert!(body == sent);
-        assert_eq!(headers["content-encoding"], "br");
+        assert_eq!(headers["content-encoding"], "lz4");
     }
 }
 

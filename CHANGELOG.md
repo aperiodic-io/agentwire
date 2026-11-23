@@ -9,6 +9,9 @@ version byte (SPEC.md); a crate release that changes it says so here.
   `logpak` (`ghcr.io/aperiodic-io/logpak`); environment variables are `LOGPAK_*` (were
   `AGENTWIRE_*`) and metrics `logpak_*` (were `agentwire_*`). The AWD1 wire format, the AWL1 file
   format, the `awd1-*` headers and `.awl` files are unchanged, so existing recordings read as before.
+- `collect`, `server --record-dir` and `client` decode deflate, brotli, zstd and snappy request
+  bodies, as well as gzip, and a list of codings in order; `collect` does the same for gRPC
+  messages by their `grpc-encoding`. A body in another coding is still stored or sent as is.
 - Python bindings for AWL1 (`python/`, built with maturin, one abi3 wheel for CPython 3.9+):
   `logpak.Writer` and `logpak.Reader`, reading and writing the same files as the CLI and
   `collect`.

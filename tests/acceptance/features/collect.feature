@@ -84,6 +84,6 @@ Feature: Logs and traces cross the network as deltas and are stored as deltas
       | an uncompressed export of 1001 bytes               | 8      | 0       |
       | a gzip export that inflates to 1000 bytes          | 0      | 1       |
       | a gzip export that inflates to 1001 bytes          | 8      | 0       |
-      | an export compressed with deflate                  | 12     | 0       |
+      | an export compressed with lz4                      | 12     | 0       |
       | an export flagged as gzip that is not gzip         | 3      | 0       |
       | a call to a method other than Export               | 12     | 0       |

@@ -199,7 +199,7 @@ type and the encoding the body is still in.
 - Files are self-contained and rotate at `--rotate-bytes` (1 GiB). A restart starts a new file and
   never appends to or replaces an old one, so shipping or deleting old files is a `mv` or an `rm`
   on your schedule.
-- Gzip bodies are stored decoded, so the delta sees the content. Headers, and so credentials, are
+- Compressed bodies (gzip, deflate, brotli, zstd, snappy) are stored decoded, so the delta sees the content. Headers, and so credentials, are
   never stored.
 - Recording never takes your traffic down: a failed write is counted in
   `logpak_record_failures_total`, and the request goes on.
@@ -379,7 +379,7 @@ client.confirm(&request, response.headers().get(logpak::KEPT).and_then(|v| v.to_
 | `--listen` | `LOGPAK_LISTEN` | `127.0.0.1:4318,127.0.0.1:4317` | Where to listen; each address takes OTLP/HTTP and OTLP/gRPC. On loopback: whoever reaches it can fill the disk. In a container, `0.0.0.0:4318,0.0.0.0:4317` on a private network. |
 | `--record-window` | `LOGPAK_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per trace or exporter interleaved. |
 | `--rotate-bytes` | `LOGPAK_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. Every file reads on its own; deleting old ones (or shipping them to object storage) is yours to schedule. |
-| `--max-body` | `LOGPAK_MAX_BODY` | 64 MiB | The largest body stored, after gzip decoding; larger ones are answered 413. |
+| `--max-body` | `LOGPAK_MAX_BODY` | 64 MiB | The largest body stored, after decoding; larger ones are answered 413. |
 | `--metrics` | `LOGPAK_METRICS` | off | |
 
 **`logpak client`**: for tools you cannot change. They post plain requests to it, and it sends
