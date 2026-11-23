@@ -193,6 +193,23 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: fuzz-artifacts, path: fuzz/artifacts }
 
+  # the release binaries build, and run (release.yml attaches them to each release); on main too,
+  # so that the cache pull requests restore is saved
+  binaries:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.os }}
+    env: { RUSTFLAGS: "" } # the release build, as release.yml makes it
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { key: "${{ matrix.target }}", save-if: "${{ github.ref == 'refs/heads/main' }}" }
+      - run: scripts/binary.sh ${{ matrix.target }} test
+      - run: tar xzf deltapack-test-${{ matrix.target }}.tar.gz && deltapack-test-${{ matrix.target }}/deltapack --version
+
   # the release image builds, and its binary runs
   image:
     if: github.event_name == 'pull_request'

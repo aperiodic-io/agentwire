@@ -1,6 +1,7 @@
 name: release
 # A tag `vX.Y.Z` on main publishes that version: the crate to crates.io, the image to
-# ghcr.io/aperiodic-io/deltapack:X.Y.Z (and :latest), and a GitHub release with its CHANGELOG entry.
+# ghcr.io/aperiodic-io/deltapack:X.Y.Z (and :latest), and a GitHub release with its CHANGELOG entry
+# and a binary for each platform (scripts/binary.sh; ci.yml's `binaries` job builds the same).
 # The tag's commit has passed ci.yml on main; this checks only that the tag and the version agree.
 on:
   push:
@@ -47,4 +48,20 @@ jobs:
       - run: |
           awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## \\[" v "\\]" { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md > notes.md
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
+        env: { GH_TOKEN: "${{ github.token }}" }
+
+  # the binary for each platform, attached to the release: for hosts with neither Docker nor Rust
+  binaries:
+    needs: [github-release]
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.os }}
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: scripts/binary.sh ${{ matrix.target }} "$GITHUB_REF_NAME"
+      - run: gh release upload --clobber "$GITHUB_REF_NAME" deltapack-*.tar.gz deltapack-*.tar.gz.sha256
         env: { GH_TOKEN: "${{ github.token }}" }

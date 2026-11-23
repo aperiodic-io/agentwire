@@ -17,3 +17,9 @@ Feature: Every request is stored as a delta, and read back byte for byte
     Then `deltapack log unpack` gives back the same lines
     And `deltapack log get` gives back span 17 alone
     And the packed file takes under 25% of the lines' bytes
+    And `deltapack log stats` reports its 24 records, the lines' bytes, the file's size and their ratio
+
+  Scenario: `deltapack log stats` names a file it cannot read, and reports the others
+    Given 3 traces of 8 spans, each span carrying the whole prompt, as JSON lines
+    When they are packed with `deltapack log pack`
+    Then `deltapack log stats` over it, a copy whose name has a space and an empty file reports both copies and their total, names the empty file and fails

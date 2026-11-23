@@ -182,6 +182,15 @@ enum LogCmd {
     },
     /// List the records: index, records back to its base (0: stored whole), bytes stored, meta.
     Ls { file: PathBuf },
+    /// Per file: its records, the bytes they stand for, its bytes on disk and the ratio, then a tab
+    /// and its name; then `(total)`, when given more than one file. A file that cannot be read is
+    /// named on stderr, and the command fails once the others are counted.
+    Stats {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        #[arg(long, default_value_t = 64 << 20)]
+        max_body: usize,
+    },
     /// Write records as JSON lines: one per span or log record of an OTLP export (JSON or
     /// protobuf), any other record whole; each with its file, index and the time it was received.
     Show {
@@ -763,6 +772,34 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
                 })?;
             }
         }
+        LogCmd::Stats { files, max_body } => {
+            let (mut total, mut unread) = ((0, 0, 0), 0);
+            for file in &files {
+                // a file being written, deleted by retention or not DPK1 is named and skipped
+                let counted = std::fs::metadata(file).and_then(|m| {
+                    let (mut records, mut body) = (0, 0);
+                    open_log(file, max_body)?.scan(|_, b| {
+                        (records, body) = (records + 1, body + b.len() as u64);
+                        Ok(())
+                    })?;
+                    Ok((records, body, m.len()))
+                });
+                match counted {
+                    Ok((records, body, disk)) => {
+                        writeln!(out, "{}", stats_line(&file.display().to_string(), records, body, disk))?;
+                        total = (total.0 + records, total.1 + body, total.2 + disk);
+                    }
+                    Err(e) => (unread, _) = (unread + 1, eprintln!("{}: {e}", file.display())),
+                }
+            }
+            if files.len() > 1 {
+                writeln!(out, "{}", stats_line("(total)", total.0, total.1, total.2))?;
+            }
+            if unread > 0 {
+                out.flush()?;
+                return Err(format!("{unread} of {} files could not be read", files.len()).into());
+            }
+        }
         LogCmd::Ls { file } => {
             for (i, r) in open_log(&file, 0)?.records().iter().enumerate() {
                 writeln!(out, "{i} {} {} {}", r.back, r.stored, String::from_utf8_lossy(&r.meta))?;
@@ -771,6 +808,11 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
     }
     out.flush()?;
     Ok(())
+}
+
+fn stats_line(name: &str, records: u64, body: u64, disk: u64) -> String {
+    // the name last, after a tab: it may hold spaces
+    format!("{records} records, {body} bytes in {disk} on disk ({:.1}x)\t{name}", body as f64 / disk.max(1) as f64)
 }
 
 fn open_log(path: &std::path::Path, max_body: usize) -> io::Result<log::Reader<File>> {
