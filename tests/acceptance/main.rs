@@ -47,6 +47,9 @@ struct Proxies {
     posted: Option<(u16, HeaderMap, Bytes)>,
     /// gRPC exports: the message sent, and (grpc-status, response message) for each
     grpc: Vec<(Bytes, Option<u32>, Bytes)>,
+    /// where `--on-rotate` moves closed files, and the files a directory held before the collector
+    moved_to: Option<std::path::PathBuf>,
+    earlier: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -539,8 +542,7 @@ fn batch(turn: usize) -> Bytes {
 
 impl Proxies {
     async fn start_collector(&mut self, extra: &[&str]) {
-        self.record_dir = Some(scratch("collect"));
-        let dir = self.record_dir.as_ref().unwrap().to_str().unwrap().to_owned();
+        let dir = self.record_dir.get_or_insert_with(|| scratch("collect")).to_str().unwrap().to_owned();
         let mut args = vec!["collect".to_owned(), "--record-dir".to_owned(), dir];
         args.extend(extra.iter().map(|a| a.to_string()));
         if let Some((addr, ..)) = &self.upstream {
@@ -1056,6 +1058,203 @@ async fn show_gives_whole(w: &mut Proxies) {
     assert_eq!(rows.len(), 1, "{rows:?}");
     let body: serde_json::Value = serde_json::from_slice(&w.gzipped[0]).unwrap();
     assert_eq!(rows[0]["body"], body, "the record whole, not its spans");
+}
+
+/// The record directory's files, oldest first, and their bytes.
+fn files_in(dir: &std::path::Path) -> Vec<(std::path::PathBuf, u64)> {
+    // a file an --on-rotate command moves away meanwhile is not listed
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| Some((e.path(), e.metadata().ok()?.len())))
+        .collect();
+    files.sort();
+    files
+}
+
+/// Every record of `files`, in order.
+async fn bodies_of(files: &[std::path::PathBuf]) -> Vec<Bytes> {
+    let mut bodies = Vec::new();
+    for f in files {
+        let f = f.to_str().unwrap();
+        let n = String::from_utf8(log(&["ls", f], b"").await).unwrap().lines().count();
+        for i in 0..n {
+            bodies.push(Bytes::from(log(&["get", f, &i.to_string()], b"").await));
+        }
+    }
+    bodies
+}
+
+/// Waits up to 20 s for `done`: hooks run beside the collector, not before it answers.
+async fn eventually(mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("not within 20 s");
+}
+
+impl Proxies {
+    fn hook_dest(&mut self) -> String {
+        let dest = self.moved_to.get_or_insert_with(|| scratch("moved"));
+        format!(r#"mv "$1" {}/"#, dest.display())
+    }
+}
+
+#[given(
+    expr = "a deltapack collector recording to a directory, starting a new file every {int} bytes and keeping {int} bytes"
+)]
+async fn a_collector_keeping_bytes(w: &mut Proxies, rotate: u64, keep: u64) {
+    w.start_collector(&["--rotate-bytes", &rotate.to_string(), "--keep-bytes", &keep.to_string()]).await;
+}
+
+#[then(expr = "the closed files left take at most {int} bytes, and the oldest are gone")]
+async fn closed_files_within(w: &mut Proxies, keep: u64) {
+    let files = files_in(w.record_dir.as_ref().unwrap());
+    let closed: u64 = files[..files.len() - 1].iter().map(|f| f.1).sum();
+    assert!(closed <= keep, "{closed} bytes closed: {files:?}");
+    let left = bodies_of(&files.iter().map(|f| f.0.clone()).collect::<Vec<_>>()).await;
+    assert!(left.len() < w.sent.len(), "nothing was deleted: {files:?}");
+}
+
+#[then("the files left hold the newest batches, in order")]
+async fn files_left_hold_newest(w: &mut Proxies) {
+    let files: Vec<_> = files_in(w.record_dir.as_ref().unwrap()).into_iter().map(|f| f.0).collect();
+    let left = bodies_of(&files).await;
+    let newest = &w.sent[w.sent.len() - left.len()..];
+    assert!(left.iter().eq(newest.iter().map(|s| &s.body)), "the newest batches, in order");
+}
+
+#[given("a record directory holding a file last written 3 days ago and one written now")]
+async fn a_directory_with_old_files(w: &mut Proxies) {
+    let dir = w.record_dir.insert(scratch("earlier")).clone();
+    for (name, age) in [("1000000000000-1-000000.dpk", 3 * 86_400), ("1000000000001-1-000000.dpk", 0)] {
+        let path = dir.join(name);
+        log(&["pack", path.to_str().unwrap()], b"{\"a\":1}\n").await;
+        let when = std::time::SystemTime::now() - Duration::from_secs(age);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(when).unwrap();
+        w.earlier.push(path);
+    }
+}
+
+#[given(expr = "a deltapack collector recording to it, keeping {int} days")]
+async fn a_collector_keeping_days(w: &mut Proxies, days: u64) {
+    w.start_collector(&["--keep-days", &days.to_string()]).await;
+}
+
+#[then("the file written 3 days ago is gone and the one written now is kept")]
+async fn old_file_gone(w: &mut Proxies) {
+    assert!(!w.earlier[0].exists(), "{:?}", w.earlier[0]);
+    assert!(w.earlier[1].exists(), "{:?}", w.earlier[1]);
+}
+
+#[given(
+    expr = "a deltapack collector recording to a directory, starting a new file every {int} bytes and moving each closed file elsewhere"
+)]
+async fn a_collector_moving_files(w: &mut Proxies, rotate: u64) {
+    let hook = w.hook_dest();
+    w.start_collector(&["--rotate-bytes", &rotate.to_string(), "--on-rotate", &hook]).await;
+}
+
+#[given("a deltapack collector recording to it, moving each closed file elsewhere")]
+async fn a_collector_moving_earlier_files(w: &mut Proxies) {
+    let hook = w.hook_dest();
+    w.start_collector(&["--on-rotate", &hook]).await;
+}
+
+#[then("only the open file is left, and the files moved away and the open file hold every batch in order")]
+async fn files_moved_away(w: &mut Proxies) {
+    let dir = w.record_dir.clone().unwrap();
+    eventually(|| files_in(&dir).len() == 1).await;
+    let mut files: Vec<_> = files_in(w.moved_to.as_ref().unwrap()).into_iter().map(|f| f.0).collect();
+    assert!(!files.is_empty(), "nothing was moved");
+    files.extend(files_in(&dir).into_iter().map(|f| f.0));
+    let all = bodies_of(&files).await;
+    assert!(all.iter().eq(w.sent.iter().map(|s| &s.body)), "every batch, in order, once");
+}
+
+#[then(expr = "the collector reports {int} failed rotation commands")]
+async fn hook_failures_are(w: &mut Proxies, n: u64) {
+    assert_eq!(w.metric(&w.server, "deltapack_rotate_command_failures_total").await, n);
+}
+
+#[then("both files are moved away")]
+async fn both_moved(w: &mut Proxies) {
+    let dest = w.moved_to.clone().unwrap();
+    eventually(|| files_in(&dest).len() == 2).await;
+    assert!(w.earlier.iter().all(|f| !f.exists()));
+}
+
+#[given(
+    expr = "a deltapack collector recording to a directory, starting a new file every {int} bytes and running a command that fails on each closed file"
+)]
+async fn a_collector_with_failing_hook(w: &mut Proxies, rotate: u64) {
+    w.start_collector(&["--rotate-bytes", &rotate.to_string(), "--on-rotate", "exit 3"]).await;
+}
+
+#[then("the collector reports a failed rotation command for each closed file")]
+async fn hook_failure_per_file(w: &mut Proxies) {
+    let closed = files_in(w.record_dir.as_ref().unwrap()).len() as u64 - 1;
+    assert!(closed > 0);
+    for _ in 0..200 {
+        if w.metric(&w.server, "deltapack_rotate_command_failures_total").await == closed {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("{closed} closed files, not as many failures");
+}
+
+#[then("only the open file is left")]
+async fn only_open_file(w: &mut Proxies) {
+    let files = files_in(w.record_dir.as_ref().unwrap());
+    assert_eq!(files.len(), 1, "{files:?}");
+}
+
+#[given(
+    expr = "a deltapack collector recording to a directory, starting a new file every {int} bytes, keeping {int} bytes and moving each closed file elsewhere after a second"
+)]
+async fn a_collector_keeping_and_slowly_moving(w: &mut Proxies, rotate: u64, keep: u64) {
+    let hook = format!("sleep 1; {}", w.hook_dest());
+    w.start_collector(&[
+        "--rotate-bytes",
+        &rotate.to_string(),
+        "--keep-bytes",
+        &keep.to_string(),
+        "--on-rotate",
+        &hook,
+    ])
+    .await;
+}
+
+#[given(
+    expr = "a deltapack collector recording to a directory, starting a new file every {int} bytes, keeping {int} bytes and running a command that fails on each closed file"
+)]
+async fn a_collector_keeping_with_failing_hook(w: &mut Proxies, rotate: u64, keep: u64) {
+    w.start_collector(&[
+        "--rotate-bytes",
+        &rotate.to_string(),
+        "--keep-bytes",
+        &keep.to_string(),
+        "--on-rotate",
+        "exit 3",
+    ])
+    .await;
+}
+
+#[then("a second collector recording to the same directory refuses to start")]
+async fn second_collector_refused(w: &mut Proxies) {
+    let dir = w.record_dir.as_ref().unwrap().to_str().unwrap().to_owned();
+    let out = Command::new(env!("CARGO_BIN_EXE_deltapack"))
+        .args(["collect", "--record-dir", &dir, "--listen", "127.0.0.1:0"])
+        .stdin(Stdio::null())
+        .output();
+    let out = tokio::time::timeout(Duration::from_secs(30), out).await.unwrap().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("another process"), "{err}");
 }
 
 #[tokio::main]
