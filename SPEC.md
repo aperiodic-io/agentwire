@@ -148,6 +148,9 @@ Only bodies are stored. `logpak server --record-dir` and `logpak collect` store 
 from gzip, deflate, br, zstd and snappy, and write as `meta`, separated by spaces: the time (Unix ms), the method, the path, the
 content type (spaces removed) and the encoding the body is still in, `-` for none or absent. Never
 a header. For an OTLP/gRPC Export call the body is its one message, decompressed, the path its gRPC
-method and the content type `application/grpc`. A file holds everything in it in the clear: protect it as you would the
+method and the content type `application/grpc`. For an OTLP trace or log export (the path
+`/v1/traces`, `/v1/logs` or their gRPC methods) `collect` writes a sixth field: the export's trace
+ids in lowercase hex, comma-separated, each once, in order of first appearance; `-` for none; `?`
+when the body is not an export or holds more than 64. Readers MUST accept five fields. A file holds everything in it in the clear: protect it as you would the
 requests, and keep one file per tenant where a tenant's records must be deletable on their own
 (deleting one record means rewriting those that delta against it).
