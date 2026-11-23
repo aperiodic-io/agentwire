@@ -1062,8 +1062,12 @@ async fn show_gives_whole(w: &mut Proxies) {
 
 /// The record directory's files, oldest first, and their bytes.
 fn files_in(dir: &std::path::Path) -> Vec<(std::path::PathBuf, u64)> {
-    let mut files: Vec<_> =
-        std::fs::read_dir(dir).unwrap().map(|e| e.unwrap()).map(|e| (e.path(), e.metadata().unwrap().len())).collect();
+    // a file an --on-rotate command moves away meanwhile is not listed
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| Some((e.path(), e.metadata().ok()?.len())))
+        .collect();
     files.sort();
     files
 }

@@ -353,7 +353,8 @@ ms or a duration ago (`90s`, `15m`, `2h`, `7d`).
 - Files are self-contained and rotate at `--rotate-bytes` (1 GiB). A restart starts a new file and
   never appends to or replaces an old one. `--keep-bytes` and `--keep-days` delete the oldest, and
   `--on-rotate` hands each closed file to a command of yours, such as one that moves it to object
-  storage. A directory is recorded to by one process at a time: a second one refuses to start.
+  storage. A directory is recorded to by one process at a time: a second one refuses to start (on a file
+  system that cannot lock a directory, such as some network ones, a warning says so instead).
 - Compressed bodies (gzip, deflate, brotli, zstd, snappy) are stored decoded, so the delta sees the content. Headers, and so credentials, are
   never stored.
 - Recording never takes your traffic down: a failed write is counted in

@@ -378,9 +378,16 @@ impl Recording {
         std::fs::create_dir_all(&dir)?;
         // the directory itself is locked (flock), so it holds nothing but its files
         let dir_lock = File::open(&dir)?;
-        if dir_lock.try_lock().is_err() {
-            let e = format!("{} is recorded to by another process: give each its own directory", dir.display());
-            return Err(io::Error::other(e));
+        match dir_lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let e = format!("{} is recorded to by another process: give each its own directory", dir.display());
+                return Err(io::Error::other(e));
+            }
+            // a file system that cannot lock a directory (some network ones): record unguarded
+            Err(std::fs::TryLockError::Error(e)) => {
+                tracing::warn!(dir = %dir.display(), error = %e, "cannot lock the record directory; let one process record to it")
+            }
         }
         let earlier = dpk_files(&dir)?;
         let (path, writer) = Self::create(&dir, window, 0)?;
@@ -480,6 +487,8 @@ impl Recording {
     }
 
     fn next_file(&mut self) -> io::Result<()> {
+        // first, so that a full disk is freed before the new file needs room (the open file is kept)
+        self.prune();
         let len = std::fs::metadata(&self.path).map_or(0, |m| m.len());
         let (path, writer) = Self::create(&self.dir, self.window, self.seq + 1)?;
         let old = std::mem::replace(&mut self.path, path);
@@ -1347,6 +1356,10 @@ mod tests {
         }
         // gone between the listing and its size (a command moved it): skipped
         std::os::unix::fs::symlink(dir.join("missing"), dir.join("0-x.dpk")).unwrap();
+        // any other failure to read one is an error
+        std::os::unix::fs::symlink(dir.join("loop.dpk"), dir.join("loop.dpk")).unwrap();
+        assert!(dpk_files(&dir).is_err(), "a link to itself cannot be read");
+        std::fs::remove_file(dir.join("loop.dpk")).unwrap();
         let listed: Vec<_> =
             dpk_files(&dir).unwrap().into_iter().map(|f| (f.0.file_name().unwrap().to_owned(), f.1)).collect();
         assert_eq!(listed, [("1-x.dpk".into(), 7), ("2-x.dpk".into(), 7)]);
