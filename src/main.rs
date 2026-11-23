@@ -36,6 +36,7 @@ use tokio::net::TcpListener;
 use tower_layer::Layer;
 
 mod grpc;
+mod show;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ResBody = UnsyncBoxBody<Bytes, BoxError>;
@@ -155,6 +156,23 @@ enum LogCmd {
     },
     /// List the records: index, records back to its base (0: stored whole), bytes stored, meta.
     Ls { file: PathBuf },
+    /// Write records as JSON lines: one per span or log record of an OTLP export (JSON or
+    /// protobuf), any other record whole; each with its file, index and the time it was received.
+    Show {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Only the spans and log records of this trace (hex).
+        #[arg(long)]
+        trace: Option<String>,
+        /// Only records received at or after this time: Unix ms, or a duration ago (90s, 15m, 2h, 7d).
+        #[arg(long)]
+        since: Option<String>,
+        /// Only records received at or before this time, in the same forms.
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long, default_value_t = 64 << 20)]
+        max_body: usize,
+    },
 }
 
 #[tokio::main]
@@ -437,15 +455,27 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
 }
 
 /// Stores one record, flushed, before the request goes on: what the upstream saw is on disk. Its
-/// meta is the time, method, path, content type and the encoding `body` is still in.
+/// meta is the time, method, path, content type and the encoding `body` is still in; for an OTLP
+/// trace or log export, then its trace ids (`show::trace_ids`).
 // ponytail: one writer behind a lock; a writer per shard if recording limits throughput
 async fn store(record: &Recorder, parts: &http::request::Parts, encoding: &str, body: Bytes) {
     let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
     let ct = parts.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|v| v.replace(' ', ""));
-    let meta = format!("{} {} {path} {} {encoding}", unix_ms(), parts.method, ct.as_deref().unwrap_or("-"));
+    let mut meta = format!("{} {} {path} {} {encoding}", unix_ms(), parts.method, ct.as_deref().unwrap_or("-"));
+    let signal = show::signal(path);
+    let encoding = encoding.to_owned();
     let record = record.clone();
     // a failed write is logged and counted where it happens; it never stops the request
-    if let Err(e) = tokio::task::spawn_blocking(move || lock(&record).append(meta.as_bytes(), body)).await {
+    let append = move || {
+        // an OTLP batch's trace ids, so `log show --trace` skips the batches of other traces
+        if let Some(signal) = signal {
+            // a body still in a coding logpak cannot decode is not read: its ids are unknown
+            let ids = if encoding == "-" { show::trace_ids(signal, &body) } else { "?".into() };
+            meta = format!("{meta} {ids}");
+        }
+        lock(&record).append(meta.as_bytes(), body)
+    };
+    if let Err(e) = tokio::task::spawn_blocking(append).await {
         tracing::error!(error = %e, "recording panicked; forwarding the request unrecorded");
     }
 }
@@ -519,6 +549,36 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
             })?;
         }
         LogCmd::Get { file, index, max_body } => out.write_all(&open_log(&file, max_body)?.get(index)?)?,
+        LogCmd::Show { files, trace, since, until, max_body } => {
+            let now = unix_ms() as u64;
+            let filter = show::Filter {
+                trace: trace.map(|t| t.to_ascii_lowercase()),
+                since: since.map(|s| show::when(&s, now)).transpose()?,
+                until: until.map(|s| show::when(&s, now)).transpose()?,
+            };
+            for file in &files {
+                let name = serde_json::Value::from(file.display().to_string());
+                let mut index = 0;
+                // ponytail: every record is rebuilt to reach the ones wanted; `get` per indexed match
+                // when files outgrow a scan
+                open_log(file, max_body)?.scan(|record, body| {
+                    let meta = show::Meta::parse(&record.meta);
+                    if filter.wants(&meta) {
+                        let otlp = meta.decoded().then(|| show::rows(body, meta.path.and_then(show::signal)));
+                        let rows = otlp.flatten().unwrap_or_else(|| vec![show::whole(body)]);
+                        for mut row in rows.into_iter().filter(|r| filter.keeps(r)) {
+                            row["file"] = name.clone();
+                            row["record"] = index.into();
+                            row["received"] = meta.time.into();
+                            serde_json::to_writer(&mut out, &row)?;
+                            out.write_all(b"\n")?;
+                        }
+                    }
+                    index += 1;
+                    Ok(())
+                })?;
+            }
+        }
         LogCmd::Ls { file } => {
             for (i, r) in open_log(&file, 0)?.records().iter().enumerate() {
                 writeln!(out, "{i} {} {} {}", r.back, r.stored, String::from_utf8_lossy(&r.meta))?;

@@ -319,7 +319,28 @@ logpak log get /var/log/logpak/1763650000000-4242-000000.lpk 17 > request-17.jso
 `get` writes one record byte for byte, which for a recorded request is the exact body the provider
 received: post it again to reproduce a failure, or feed a day of them to an eval. `unpack` writes
 them all. `collect` and `server` stamp each record with its time (Unix ms), method, path, content
-type and the encoding the body is still in.
+type and the encoding the body is still in. `collect` adds the trace ids of each OTLP trace or log
+batch.
+
+`show` writes records as JSON lines: one per span or log record of an OTLP export, JSON or
+protobuf, with its attributes as plain JSON; any other record whole, as `body`. Each line names its
+file, its record and the time it was received.
+
+```bash
+logpak log show --trace 4bf92f3577b34da6a3ce929d0e0e4736 ~/logpak/*.lpk     # one trace, every span
+```
+
+```bash
+logpak log show --since 2h ~/logpak/*.lpk | jq -r 'select(.name == "chat") | .attributes["gen_ai.request.model"]'
+```
+
+```bash
+duckdb -c "SELECT name, count(*) FROM read_json('spans.jsonl') GROUP BY name"   # after: logpak log show … > spans.jsonl
+```
+
+`--trace` skips the batches whose meta does not list the trace. Trace ids are hex, as OTLP/JSON
+requires; the spans of an exporter that writes them in base64 are shown, but `--trace` cannot find them. `--since` and `--until` take Unix
+ms or a duration ago (`90s`, `15m`, `2h`, `7d`).
 
 ## What you can rely on
 
@@ -356,7 +377,8 @@ on every pull request ([tests/gateways/](tests/gateways/test_gateways.py)).
 
 ### What it is not
 
-- A query engine. Records are read by position, and `meta` is yours to index. Keep your tracing
+- A query engine. `log show` finds records by trace and time and writes JSON lines for `jq`,
+  DuckDB or pandas to query; it reads every record of the files it is given. Keep your tracing
   backend for search and dashboards, and Logpak for the full bodies behind them.
 - A general log compressor. The gain comes from records that repeat earlier records, which is what
   LLM requests and spans do. On logs without that shape, expect what zstd gives.
