@@ -6,14 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use agentwire::client::Client;
-use agentwire::server::{Awd1, Awd1Layer, Config, InnerBody, Stats};
-use agentwire::store::Store;
-use agentwire::{ENCODING, ERROR, KEEP, KEPT, codec, hex};
 use bytes::Bytes;
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH};
 use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
+use logpak::client::Client;
+use logpak::server::{Awd1, Awd1Layer, Config, InnerBody, Stats};
+use logpak::store::Store;
+use logpak::{ENCODING, ERROR, KEEP, KEPT, codec, hex};
 use tower_layer::Layer;
 use tower_service::Service;
 

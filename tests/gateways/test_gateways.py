@@ -1,17 +1,17 @@
-"""agentwire with the three most deployed open-source LLM gateways, each as the real container.
+"""logpak with the three most deployed open-source LLM gateways, each as the real container.
 
 For each of LiteLLM, Kong AI Gateway and Portkey:
 
-  tool -> agentwire client -> agentwire server -> gateway -> mock model
+  tool -> logpak client -> logpak server -> gateway -> mock model
 
 * on the wire: every turn of three interleaved conversations reaches the model with the messages the
   tool sent, and every turn after a conversation's first crosses the network as a small delta;
 * at rest: the gateway's log of every request (Kong's http-log, LiteLLM's generic_api callback; for
-  Portkey, which exports none, `agentwire server --record-dir` in front of it) is stored by agentwire
+  Portkey, which exports none, `logpak server --record-dir` in front of it) is stored by logpak
   in AWL1, holds every request, and takes a fraction of the bytes logged.
 
-Needs Docker (host networking, so Linux) and AGENTWIRE_BIN, the `agentwire` binary built with the
-`proxy` feature. Run: AGENTWIRE_BIN=target/debug/agentwire python3 -m unittest tests/gateways/test_gateways.py
+Needs Docker (host networking, so Linux) and LOGPAK_BIN, the `logpak` binary built with the
+`proxy` feature. Run: LOGPAK_BIN=target/debug/logpak python3 -m unittest tests/gateways/test_gateways.py
 """
 
 import hashlib
@@ -30,7 +30,7 @@ import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BIN = os.environ.get("AGENTWIRE_BIN", "")
+BIN = os.environ.get("LOGPAK_BIN", "")
 MOCK = 18080  # the model; the gateways' configs name these ports
 KONG_LOGS, LITELLM_LOGS = 14318, 14319
 IMAGES = {
@@ -85,8 +85,8 @@ class Mock(http.server.ThreadingHTTPServer):
         super().__init__(("127.0.0.1", MOCK), Handler)
 
 
-class Agentwire:
-    """`agentwire <args>` as a process; `addr` and `metrics_addr` read from its log."""
+class Logpak:
+    """`logpak <args>` as a process; `addr` and `metrics_addr` read from its log."""
 
     def __init__(self, *args):
         self.proc = subprocess.Popen(
@@ -97,7 +97,7 @@ class Agentwire:
         while self.addr is None:
             line = self.proc.stdout.readline()
             if not line:
-                raise RuntimeError(f"agentwire {args} exited")
+                raise RuntimeError(f"logpak {args} exited")
             found = re.search(r"addr=(\S+)", line)
             if found and " metrics " in line:
                 self.metrics_addr = found.group(1)
@@ -129,7 +129,7 @@ def wait_until(check, timeout, what):
     raise AssertionError(f"timed out waiting for {what}")
 
 
-@unittest.skipUnless(BIN and shutil.which("docker"), "needs Docker and AGENTWIRE_BIN")
+@unittest.skipUnless(BIN and shutil.which("docker"), "needs Docker and LOGPAK_BIN")
 class Gateways(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -153,24 +153,24 @@ class Gateways(unittest.TestCase):
 
     def gateway(self, name, port, ready_path, *docker_args):
         """The gateway's real image on the host network, until it answers `ready_path`."""
-        container = f"agentwire-test-{name}"
+        container = f"logpak-test-{name}"
         subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         subprocess.run(["docker", "run", "-d", "--name", container, "--network", "host", *docker_args], check=True, capture_output=True)
         self.stops.append(lambda: subprocess.run(["docker", "rm", "-f", container], capture_output=True))
         url = f"http://127.0.0.1:{port}{ready_path}"
         wait_until(lambda: urllib.request.urlopen(url, timeout=2).status < 500, 180, f"{name} at {url}")
 
-    def agentwire(self, *args):
-        a = Agentwire(*args)
+    def logpak(self, *args):
+        a = Logpak(*args)
         self.stops.append(a.stop)
         return a
 
     def converse(self, gateway_url, headers=None, key="test"):
-        """agentwire server in front of the gateway, agentwire client in front of that; the tool sends
+        """logpak server in front of the gateway, logpak client in front of that; the tool sends
         the conversations turn by turn, interleaved. Returns the client and the server."""
         record = os.path.join(self.dir, "front")
-        server = self.agentwire("server", "--listen", "127.0.0.1:0", "--upstream", gateway_url, "--record-dir", record)
-        client = self.client = self.agentwire("client", "--listen", "127.0.0.1:0", "--upstream", f"http://{server.addr}")
+        server = self.logpak("server", "--listen", "127.0.0.1:0", "--upstream", gateway_url, "--record-dir", record)
+        client = self.client = self.logpak("client", "--listen", "127.0.0.1:0", "--upstream", f"http://{server.addr}")
         self.sent = []
         for turn in range(1, TURNS + 1):
             for name in CONVERSATIONS:
@@ -191,11 +191,11 @@ class Gateways(unittest.TestCase):
         self.assertEqual(received, sorted(json.dumps(s["messages"], sort_keys=True) for s in self.sent))
         # every turn after each conversation's first went as a delta (a conversation's first may go
         # as one too, against another conversation: they share the request's skeleton)
-        self.assertGreaterEqual(client.metric("agentwire_client_deltas_total"), len(self.sent) - len(CONVERSATIONS))
-        self.assertEqual(client.metric("agentwire_client_resent_total"), 0)
-        body, wire = client.metric("agentwire_client_body_bytes_total"), client.metric("agentwire_client_wire_bytes_total")
+        self.assertGreaterEqual(client.metric("logpak_client_deltas_total"), len(self.sent) - len(CONVERSATIONS))
+        self.assertEqual(client.metric("logpak_client_resent_total"), 0)
+        body, wire = client.metric("logpak_client_body_bytes_total"), client.metric("logpak_client_wire_bytes_total")
         self.assertLess(wire * 4, body, f"{wire} bytes sent for {body}")
-        self.assertEqual(server.metric("agentwire_server_refused_total"), 0)
+        self.assertEqual(server.metric("logpak_server_refused_total"), 0)
 
     def assert_stored(self, recording_dir, collector, at_most):
         """Every request's latest turn is in the stored logs, which take under `at_most` of their bytes."""
@@ -204,16 +204,16 @@ class Gateways(unittest.TestCase):
         for body in self.sent:
             last = body["messages"][-1]["content"].split()[0]
             self.assertIn(last.encode(), text, f"{last} is in the stored logs")
-        logged = collector.metric("agentwire_recorded_body_bytes_total")
-        stored = collector.metric("agentwire_recorded_file_bytes_total")
+        logged = collector.metric("logpak_recorded_body_bytes_total")
+        stored = collector.metric("logpak_recorded_file_bytes_total")
         self.assertLess(stored, logged * at_most, f"{stored} bytes stored for {logged} logged")
-        body, wire = self.client.metric("agentwire_client_body_bytes_total"), self.client.metric("agentwire_client_wire_bytes_total")
+        body, wire = self.client.metric("logpak_client_body_bytes_total"), self.client.metric("logpak_client_wire_bytes_total")
         print(f"\n  {self.id().rsplit('_', 1)[-1]}: requests {body:,} B sent as {wire:,} B; "
               f"logs {logged:,} B stored as {stored:,} B ({logged / stored:.0f}x)", file=sys.stderr)
 
     def collector(self, port):
         logs = os.path.join(self.dir, "logs")
-        return self.agentwire("collect", "--listen", f"127.0.0.1:{port}", "--record-dir", logs), logs
+        return self.logpak("collect", "--listen", f"127.0.0.1:{port}", "--record-dir", logs), logs
 
     def test_kong(self):
         collector, logs = self.collector(KONG_LOGS)
@@ -226,7 +226,7 @@ class Gateways(unittest.TestCase):
         )
         client, server = self.converse("http://127.0.0.1:18000")
         self.assert_the_wire_carried_deltas(client, server)
-        wait_until(lambda: collector.metric("agentwire_recorded_total") >= len(self.sent), 60, "Kong's logs")
+        wait_until(lambda: collector.metric("logpak_recorded_total") >= len(self.sent), 60, "Kong's logs")
         self.assert_stored(logs, collector, at_most=0.25)
 
     def test_litellm(self):
@@ -248,7 +248,7 @@ class Gateways(unittest.TestCase):
         self.assert_stored(logs, collector, at_most=0.25)
 
     def test_portkey(self):
-        # Portkey's open-source gateway exports no logs: agentwire server records what it forwards to it
+        # Portkey's open-source gateway exports no logs: logpak server records what it forwards to it
         self.gateway("portkey", 8787, "/", IMAGES["portkey"])  # it listens on 8787 whatever PORT says
         client, server = self.converse(
             "http://127.0.0.1:8787",

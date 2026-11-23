@@ -3,24 +3,6 @@
 version = 4
 
 [[package]]
-name = "agentwire"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "sha2",
- "zstd-safe",
-]
-
-[[package]]
-name = "agentwire-fuzz"
-version = "0.0.0"
-dependencies = [
- "agentwire",
- "arbitrary",
- "libfuzzer-sys",
-]
-
-[[package]]
 name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -153,6 +135,24 @@ checksum = "a9fd2f41a1cba099f79a0b6b6c35656cf7c03351a7bae8ff0f28f25270f929d2"
 dependencies = [
  "arbitrary",
  "cc",
+]
+
+[[package]]
+name = "logpak"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "sha2",
+ "zstd-safe",
+]
+
+[[package]]
+name = "logpak-fuzz"
+version = "0.0.0"
+dependencies = [
+ "arbitrary",
+ "libfuzzer-sys",
+ "logpak",
 ]
 
 [[package]]

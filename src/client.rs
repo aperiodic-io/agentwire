@@ -2,7 +2,7 @@
 //!
 //! ```no_run
 //! # fn send(body: &[u8], headers: &[(&str, &str)]) -> (u16, Option<String>, Option<String>) { todo!() }
-//! use agentwire::client::Client;
+//! use logpak::client::Client;
 //! let client = Client::new(4);
 //! # let body = bytes::Bytes::from_static(b"{}");
 //! let request = client.prepare(body);

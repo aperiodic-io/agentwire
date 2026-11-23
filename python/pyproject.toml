@@ -3,7 +3,7 @@ requires = ["maturin>=1.8,<2"]
 build-backend = "maturin"
 
 [project]
-name = "agentwire"
+name = "logpak"
 description = "AWL1: LLM request logs and trace spans stored as deltas against earlier records, every one checked by SHA-256."
 readme = "README.md"
 license = "Apache-2.0"

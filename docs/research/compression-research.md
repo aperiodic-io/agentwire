@@ -3,6 +3,7 @@
 > **Archived research.** The prototype code, benchmark scripts and result files this report links to
 > were removed when the production implementation replaced them. They are in the git history at
 > commit `6693379` (`git show 6693379:research/`, `git show 6693379:results/research/SUMMARY.md`).
+> Logpak was called AgentWire then, which is the name this report uses.
 
 **Goal:** cut storage and bandwidth cost for AI-agent traffic. **Method:** build realistic corpora from
 public agent trajectories, measure their structure, implement each candidate technique alongside

@@ -7,7 +7,7 @@ disclosure date with you, at most 90 days after the report.
 
 Supported: the latest 0.x release.
 
-In scope: anything that makes `agentwire` forward a body other than the one the client hashed;
+In scope: anything that makes `logpak` forward a body other than the one the client hashed;
 lets one tenant use, detect or evict another tenant's bases beyond what SPEC.md §5 states; or makes
 it allocate past its configured limits, panic, or hang on input from the network. The model these
 are judged against is [SPEC.md §5](SPEC.md#5-scope-and-security).

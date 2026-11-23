@@ -3,7 +3,7 @@
 //! costs about its new bytes. Every record is checked by SHA-256 when read back.
 //!
 //! ```
-//! use agentwire::log::{Reader, Writer};
+//! use logpak::log::{Reader, Writer};
 //! let mut w = Writer::new(Vec::new(), 8)?;
 //! w.append(b"req 1", bytes::Bytes::from_static(br#"{"messages":["hi"]}"#))?;
 //! w.append(b"req 2", bytes::Bytes::from_static(br#"{"messages":["hi","more"]}"#))?;

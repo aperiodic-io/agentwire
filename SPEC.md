@@ -1,6 +1,6 @@
 # AWD1: request bodies as deltas against the previous request
 
-Version 1. Status: stable wire format for agentwire 0.x; changes need a new version byte.
+Version 1. Status: stable wire format for logpak 0.x; changes need a new version byte.
 
 LLM APIs are called with the whole conversation in every request, so request *k+1* is request *k*
 plus a turn. AWD1 lets an HTTP client send it as an edit of a body the server already holds, and
@@ -144,7 +144,7 @@ A writer SHOULD bound the chain behind any record, so reading one rebuilds a bou
 bodies. The reference writer starts again with a whole record once a chain would rebuild 4,096
 records or 1 GiB. `meta` is not covered by any hash. Put what must be verified in the body.
 
-Only bodies are stored. `agentwire server --record-dir` and `agentwire collect` store a gzip body
+Only bodies are stored. `logpak server --record-dir` and `logpak collect` store a gzip body
 decoded, and write as `meta`, separated by spaces: the time (Unix ms), the method, the path, the
 content type (spaces removed) and the encoding the body is still in, `-` for none or absent. Never
 a header. For an OTLP/gRPC Export call the body is its one message, decompressed, the path its gRPC

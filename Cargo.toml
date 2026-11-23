@@ -1,5 +1,5 @@
 [package]
-name = "agentwire"
+name = "logpak"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
@@ -15,7 +15,7 @@ include = ["/src", "/README.md", "/SPEC.md", "/LICENSE"]
 default = ["server"]
 # the tower layer that decodes AWD1 requests (src/server.rs)
 server = ["dep:http", "dep:http-body", "dep:http-body-util", "dep:tower-layer", "dep:tower-service"]
-# the `agentwire` binary: the server layer as a reverse proxy, and a local client proxy
+# the `logpak` binary: the server layer as a reverse proxy, and a local client proxy
 proxy = [
   "server",
   "dep:clap",
@@ -67,7 +67,7 @@ tower-layer = "0.3"
 tower-service = "0.3"
 
 [[bin]]
-name = "agentwire"
+name = "logpak"
 required-features = ["proxy"]
 
 [[test]]

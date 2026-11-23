@@ -1,11 +1,11 @@
 Feature: Requests cross the network as deltas and reach the API byte for byte
-  A tool posts to `agentwire client` on its machine, which sends each request to `agentwire server`
+  A tool posts to `logpak client` on its machine, which sends each request to `logpak server`
   as a delta against the previous one. The server rebuilds it and forwards it to the API.
 
   Background:
     Given an upstream API
-    And an agentwire server in front of it
-    And an agentwire client in front of that server
+    And an logpak server in front of it
+    And an logpak client in front of that server
 
   Scenario: A conversation reaches the API unchanged, and only its first request is sent in full
     When a tool sends a conversation of 12 turns through the client
@@ -21,7 +21,7 @@ Feature: Requests cross the network as deltas and reach the API byte for byte
 
   Scenario: A restarted server forgets its bases, and the next request is resent in full
     When a tool sends a conversation of 4 turns through the client
-    And the agentwire server restarts
+    And the logpak server restarts
     And the tool sends 4 more turns of that conversation
     Then the upstream received every request byte for byte
     And the client resent 1 request in full

@@ -1,8 +1,8 @@
-//! `agentwire server`: the AWD1 layer as a reverse proxy in front of an HTTP API.
-//! `agentwire client`: a local proxy that sends what a tool posts to it as AWD1 deltas.
-//! `agentwire collect`: a log sink (OTLP/HTTP, a gateway's HTTP log plugin) that stores every
+//! `logpak server`: the AWD1 layer as a reverse proxy in front of an HTTP API.
+//! `logpak client`: a local proxy that sends what a tool posts to it as AWD1 deltas.
+//! `logpak collect`: a log sink (OTLP/HTTP, a gateway's HTTP log plugin) that stores every
 //! request body in AWL1, and forwards it unchanged when given a backend.
-//! `agentwire log`: pack, list and read AWL1 files (what `--record-dir` and `collect` write).
+//! `logpak log`: pack, list and read AWL1 files (what `--record-dir` and `collect` write).
 
 use std::convert::Infallible;
 use std::fs::File;
@@ -16,11 +16,6 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use agentwire::client::Client;
-use agentwire::log;
-use agentwire::server::{Awd1Layer, Config, InnerBody, Stats};
-use agentwire::store::Store;
-use agentwire::{ERROR, KEPT};
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use http::header::{self, HeaderMap, HeaderName};
@@ -32,6 +27,11 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
+use logpak::client::Client;
+use logpak::log;
+use logpak::server::{Awd1Layer, Config, InnerBody, Stats};
+use logpak::store::Store;
+use logpak::{ERROR, KEPT};
 use tokio::net::TcpListener;
 use tower_layer::Layer;
 
@@ -51,79 +51,79 @@ struct Cli {
 enum Mode {
     /// Rebuild AWD1 requests and forward them, byte-exact, to the upstream API.
     Server {
-        #[arg(long, env = "AGENTWIRE_LISTEN", default_value = "0.0.0.0:8080")]
+        #[arg(long, env = "LOGPAK_LISTEN", default_value = "0.0.0.0:8080")]
         listen: SocketAddr,
         /// The API requests are forwarded to, e.g. https://api.anthropic.com
-        #[arg(long, env = "AGENTWIRE_UPSTREAM")]
+        #[arg(long, env = "LOGPAK_UPSTREAM")]
         upstream: reqwest::Url,
         /// Bytes of kept bases held in memory, across all tenants.
-        #[arg(long, env = "AGENTWIRE_STORE_BYTES", default_value_t = 1 << 30)]
+        #[arg(long, env = "LOGPAK_STORE_BYTES", default_value_t = 1 << 30)]
         store_bytes: usize,
         /// Seconds a base unused is kept.
-        #[arg(long, env = "AGENTWIRE_TTL_SECONDS", default_value_t = 1800)]
+        #[arg(long, env = "LOGPAK_TTL_SECONDS", default_value_t = 1800)]
         ttl_seconds: u64,
         /// The largest body kept or rebuilt.
-        #[arg(long, env = "AGENTWIRE_MAX_BODY", default_value_t = 64 << 20)]
+        #[arg(long, env = "LOGPAK_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
         /// The headers that identify a tenant (repeat the flag); bases are never shared across them.
-        #[arg(long = "scope-header", env = "AGENTWIRE_SCOPE_HEADERS", value_delimiter = ',', default_values_t = [String::from("authorization"), String::from("x-api-key")])]
+        #[arg(long = "scope-header", env = "LOGPAK_SCOPE_HEADERS", value_delimiter = ',', default_values_t = [String::from("authorization"), String::from("x-api-key")])]
         scope_headers: Vec<String>,
         /// Serve Prometheus metrics at http://<addr>/metrics.
-        #[arg(long, env = "AGENTWIRE_METRICS")]
+        #[arg(long, env = "LOGPAK_METRICS")]
         metrics: Option<SocketAddr>,
         /// Store every request body forwarded, with its time, method and path (never its headers),
-        /// in a new AWL1 file in this directory; read it with `agentwire log`.
-        #[arg(long, env = "AGENTWIRE_RECORD_DIR")]
+        /// in a new AWL1 file in this directory; read it with `logpak log`.
+        #[arg(long, env = "LOGPAK_RECORD_DIR")]
         record_dir: Option<PathBuf>,
         /// Records a new one may delta against: about one per conversation in flight.
-        #[arg(long, env = "AGENTWIRE_RECORD_WINDOW", default_value_t = 16)]
+        #[arg(long, env = "LOGPAK_RECORD_WINDOW", default_value_t = 16)]
         record_window: usize,
         /// Start a new AWL1 file once one reaches this size; every file reads on its own.
-        #[arg(long, env = "AGENTWIRE_ROTATE_BYTES", default_value_t = 1 << 30)]
+        #[arg(long, env = "LOGPAK_ROTATE_BYTES", default_value_t = 1 << 30)]
         rotate_bytes: u64,
     },
     /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
     /// AWL1, gzip decoded; forward each request as received when given a backend. Also accepts
-    /// AWD1 deltas from `agentwire client`.
+    /// AWD1 deltas from `logpak client`.
     Collect {
         /// Where to listen (repeat, or comma-separate); each address takes OTLP/HTTP and OTLP/gRPC.
         /// Loopback by default: anyone who can reach it can fill the disk. In a container, give
         /// 0.0.0.0:4318,0.0.0.0:4317 and put it on a private network.
-        #[arg(long, env = "AGENTWIRE_LISTEN", value_delimiter = ',', default_value = "127.0.0.1:4318,127.0.0.1:4317")]
+        #[arg(long, env = "LOGPAK_LISTEN", value_delimiter = ',', default_value = "127.0.0.1:4318,127.0.0.1:4317")]
         listen: Vec<SocketAddr>,
-        /// The new AWL1 file goes in this directory; read it with `agentwire log`.
-        #[arg(long, env = "AGENTWIRE_RECORD_DIR")]
+        /// The new AWL1 file goes in this directory; read it with `logpak log`.
+        #[arg(long, env = "LOGPAK_RECORD_DIR")]
         record_dir: PathBuf,
         /// The backend each request is forwarded to, as received, e.g.
         /// https://cloud.langfuse.com/api/public/otel. Without one, each request is answered 200.
-        #[arg(long, env = "AGENTWIRE_FORWARD")]
+        #[arg(long, env = "LOGPAK_FORWARD")]
         forward: Option<reqwest::Url>,
         /// Records a new one may delta against: about one per trace or exporter interleaved.
-        #[arg(long, env = "AGENTWIRE_RECORD_WINDOW", default_value_t = 16)]
+        #[arg(long, env = "LOGPAK_RECORD_WINDOW", default_value_t = 16)]
         record_window: usize,
         /// Start a new AWL1 file once one reaches this size; every file reads on its own.
-        #[arg(long, env = "AGENTWIRE_ROTATE_BYTES", default_value_t = 1 << 30)]
+        #[arg(long, env = "LOGPAK_ROTATE_BYTES", default_value_t = 1 << 30)]
         rotate_bytes: u64,
         /// The largest body stored, after gzip decoding.
-        #[arg(long, env = "AGENTWIRE_MAX_BODY", default_value_t = 64 << 20)]
+        #[arg(long, env = "LOGPAK_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
-        #[arg(long, env = "AGENTWIRE_METRICS")]
+        #[arg(long, env = "LOGPAK_METRICS")]
         metrics: Option<SocketAddr>,
     },
-    /// Accept plain requests from a local tool and send them to an `agentwire server` as deltas.
+    /// Accept plain requests from a local tool and send them to an `logpak server` as deltas.
     Client {
-        #[arg(long, env = "AGENTWIRE_LISTEN", default_value = "127.0.0.1:8787")]
+        #[arg(long, env = "LOGPAK_LISTEN", default_value = "127.0.0.1:8787")]
         listen: SocketAddr,
-        /// The `agentwire server` (or an AWD1-aware API) to send to.
-        #[arg(long, env = "AGENTWIRE_UPSTREAM")]
+        /// The `logpak server` (or an AWD1-aware API) to send to.
+        #[arg(long, env = "LOGPAK_UPSTREAM")]
         upstream: reqwest::Url,
         /// Bodies remembered as bases: about one per conversation in flight.
-        #[arg(long, env = "AGENTWIRE_BASES", default_value_t = 8)]
+        #[arg(long, env = "LOGPAK_BASES", default_value_t = 8)]
         bases: usize,
         /// The largest request body accepted from the tool.
-        #[arg(long, env = "AGENTWIRE_MAX_BODY", default_value_t = 64 << 20)]
+        #[arg(long, env = "LOGPAK_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
-        #[arg(long, env = "AGENTWIRE_METRICS")]
+        #[arg(long, env = "LOGPAK_METRICS")]
         metrics: Option<SocketAddr>,
     },
     /// Read and write AWL1 files: bodies stored as deltas against earlier ones.
@@ -164,9 +164,7 @@ async fn main() -> Result<(), BoxError> {
         return run_log(cmd);
     }
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "agentwire=info".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "logpak=info".into()))
         .init();
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -374,10 +372,10 @@ impl Recording {
     fn metrics(&self) -> String {
         let on_disk = self.closed + std::fs::metadata(&self.path).map_or(0, |m| m.len());
         format!(
-            "# TYPE agentwire_recorded_total counter\nagentwire_recorded_total {}\n\
-             # TYPE agentwire_recorded_body_bytes_total counter\nagentwire_recorded_body_bytes_total {}\n\
-             # TYPE agentwire_recorded_file_bytes_total counter\nagentwire_recorded_file_bytes_total {on_disk}\n\
-             # TYPE agentwire_record_failures_total counter\nagentwire_record_failures_total {}\n",
+            "# TYPE logpak_recorded_total counter\nlogpak_recorded_total {}\n\
+             # TYPE logpak_recorded_body_bytes_total counter\nlogpak_recorded_body_bytes_total {}\n\
+             # TYPE logpak_recorded_file_bytes_total counter\nlogpak_recorded_file_bytes_total {on_disk}\n\
+             # TYPE logpak_record_failures_total counter\nlogpak_record_failures_total {}\n",
             self.recorded, self.body_bytes, self.failures,
         )
     }
@@ -387,7 +385,7 @@ fn unix_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())
 }
 
-/// The inner service of `agentwire server` and `collect`: records the request (if recording), then
+/// The inner service of `logpak server` and `collect`: records the request (if recording), then
 /// sends it on to the upstream, or answers it (a collector without a backend).
 #[derive(Clone)]
 struct Forward {
@@ -724,11 +722,11 @@ impl ClientStats {
     fn render(&self) -> String {
         let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
         format!(
-            "# TYPE agentwire_client_requests_total counter\nagentwire_client_requests_total {}\n\
-             # TYPE agentwire_client_deltas_total counter\nagentwire_client_deltas_total {}\n\
-             # TYPE agentwire_client_resent_total counter\nagentwire_client_resent_total {}\n\
-             # TYPE agentwire_client_body_bytes_total counter\nagentwire_client_body_bytes_total {}\n\
-             # TYPE agentwire_client_wire_bytes_total counter\nagentwire_client_wire_bytes_total {}\n",
+            "# TYPE logpak_client_requests_total counter\nlogpak_client_requests_total {}\n\
+             # TYPE logpak_client_deltas_total counter\nlogpak_client_deltas_total {}\n\
+             # TYPE logpak_client_resent_total counter\nlogpak_client_resent_total {}\n\
+             # TYPE logpak_client_body_bytes_total counter\nlogpak_client_body_bytes_total {}\n\
+             # TYPE logpak_client_wire_bytes_total counter\nlogpak_client_wire_bytes_total {}\n",
             g(&self.requests),
             g(&self.deltas),
             g(&self.resent),
@@ -741,12 +739,12 @@ impl ClientStats {
 fn server_metrics(stats: &Stats, store: &Store) -> String {
     let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
     format!(
-        "# TYPE agentwire_server_deltas_total counter\nagentwire_server_deltas_total {}\n\
-         # TYPE agentwire_server_delta_bytes_total counter\nagentwire_server_delta_bytes_total {}\n\
-         # TYPE agentwire_server_rebuilt_bytes_total counter\nagentwire_server_rebuilt_bytes_total {}\n\
-         # TYPE agentwire_server_kept_total counter\nagentwire_server_kept_total {}\n\
-         # TYPE agentwire_server_refused_total counter\nagentwire_server_refused_total {}\n\
-         # TYPE agentwire_server_store_bytes gauge\nagentwire_server_store_bytes {}\n",
+        "# TYPE logpak_server_deltas_total counter\nlogpak_server_deltas_total {}\n\
+         # TYPE logpak_server_delta_bytes_total counter\nlogpak_server_delta_bytes_total {}\n\
+         # TYPE logpak_server_rebuilt_bytes_total counter\nlogpak_server_rebuilt_bytes_total {}\n\
+         # TYPE logpak_server_kept_total counter\nlogpak_server_kept_total {}\n\
+         # TYPE logpak_server_refused_total counter\nlogpak_server_refused_total {}\n\
+         # TYPE logpak_server_store_bytes gauge\nlogpak_server_store_bytes {}\n",
         g(&stats.deltas),
         g(&stats.delta_bytes),
         g(&stats.rebuilt_bytes),
@@ -844,7 +842,7 @@ mod tests {
 
     #[test]
     fn a_failed_write_moves_recording_to_a_new_file_and_loses_nothing_after_it() {
-        let dir = std::env::temp_dir().join(format!("agentwire-recording-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("logpak-recording-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut r = Recording::open(dir.clone(), 4, 1 << 30).unwrap();
         r.append(b"m", Bytes::from_static(b"before")).unwrap();
@@ -864,13 +862,13 @@ mod tests {
             })
             .collect();
         assert_eq!(bodies, [&b"before"[..], b"after"]);
-        assert!(r.metrics().contains("agentwire_record_failures_total 1\n"));
+        assert!(r.metrics().contains("logpak_record_failures_total 1\n"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn files_rotated_within_a_millisecond_get_their_own_names_in_order() {
-        let dir = std::env::temp_dir().join(format!("agentwire-rotation-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("logpak-rotation-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut r = Recording::open(dir.clone(), 1, 1).unwrap(); // every record fills its file
         for body in ["a", "b", "c"] {
