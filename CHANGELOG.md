@@ -13,6 +13,8 @@ version byte (SPEC.md); a crate release that changes it says so here.
   `LPK1`, files `.lpk`). Nothing else in either layout changed. Files and clients from before this
   change are not read: no release had shipped the old prefixes. A client and server on different
   sides of the change fall back to plain requests, since neither confirms the other's headers.
+- `docs/research` is removed: the report on the prototype formats (AWC1, AWF1, AWJ1 and the Python
+  prototype) that preceded 0.1. It stays in git history.
 - `collect`, `server --record-dir` and `client` decode deflate, brotli, zstd and snappy request
   bodies, as well as gzip, and a list of codings in order; `collect` does the same for gRPC
   messages by their `grpc-encoding`. A body in another coding is still stored or sent as is.

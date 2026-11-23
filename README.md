@@ -321,12 +321,12 @@ plain HTTP: a pair of headers and a `content-encoding` ([SPEC.md](SPEC.md)).
 | adds one turn to the previous request | 6 MiB | ~1.6 MiB | **141 bytes** |
 | also edits the system prompt at the top | 6 MiB | ~1.6 MiB | **748 bytes** |
 
-¹ At the 3.8× that one zstd frame per request averaged on public agent trajectories
-([research](docs/research/compression-research.md#tldr)).
+¹ At the 3.8× that one zstd frame per request averaged on public agent trajectories, measured
+before the 0.1 release ([the research report](https://github.com/aperiodic-io/agentwire/blob/907d44e/docs/research/compression-research.md), kept in git history).
 
 This is for agents on slow or metered links, and for egress you pay for: on public agent traffic,
 1 TB a month of request uploads at $0.09/GB costs $90 plain, $23.56 with per-request zstd and $1.43
-with LPD1 ([research, §6](docs/research/compression-research.md#6-re-sent-context-windows-delta-patch-from)).
+with LPD1, by the same measurements.
 It does not change what the model sees. Token counts, your LLM bill and provider prompt caching are
 as before, because the provider receives the same bytes.
 
@@ -496,9 +496,7 @@ these as upper bounds:
 | 6 MiB | top edit + new turn | 748 B | 7.9 ms | 13 ms |
 | 32 MiB | top edit + new turn | 3.7 KB | 47 ms | 59 ms |
 
-Hashing the rebuilt body is most of the rebuild time. How LPD1 compares with other ways to compress
-agent traffic (per-request zstd, streaming windows, dictionaries, `--patch-from`), measured on public
-agent trajectories, is in [docs/research/](docs/research/compression-research.md).
+Hashing the rebuilt body is most of the rebuild time.
 
 ## Security
 
