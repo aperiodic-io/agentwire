@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
 description = "Python bindings for LPK1: LLM request logs and trace spans stored as deltas."
-repository = "https://github.com/aperiodic-io/agentwire"
+repository = "https://github.com/aperiodic-io/logpak"
 publish = false
 
 [lib]

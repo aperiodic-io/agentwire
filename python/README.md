@@ -3,7 +3,7 @@
 LPK1 files from Python: LLM request logs and trace spans stored as deltas against earlier records.
 A gateway's or a tracer's log re-sends the whole prompt in every record, so a record costs about
 its new bytes. Every body is checked by SHA-256 when it is read back. The format is in
-[SPEC.md §7](https://github.com/aperiodic-io/agentwire/blob/main/SPEC.md#7-lpk1-a-log-of-bodies-stored-as-deltas);
+[SPEC.md §7](https://github.com/aperiodic-io/logpak/blob/main/SPEC.md#7-lpk1-a-log-of-bodies-stored-as-deltas);
 files are interchangeable with the `logpak` CLI (`logpak log ls | get | unpack`) and with
 what `logpak collect` records.
 

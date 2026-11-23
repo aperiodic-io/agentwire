@@ -17,4 +17,4 @@ classifiers = [
 dynamic = ["version"]
 
 [project.urls]
-Repository = "https://github.com/aperiodic-io/agentwire"
+Repository = "https://github.com/aperiodic-io/logpak"

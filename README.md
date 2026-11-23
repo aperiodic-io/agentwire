@@ -322,7 +322,7 @@ plain HTTP: a pair of headers and a `content-encoding` ([SPEC.md](SPEC.md)).
 | also edits the system prompt at the top | 6 MiB | ~1.6 MiB | **748 bytes** |
 
 ¹ At the 3.8× that one zstd frame per request averaged on public agent trajectories, measured
-before the 0.1 release ([the research report](https://github.com/aperiodic-io/agentwire/blob/907d44e/docs/research/compression-research.md), kept in git history).
+before the 0.1 release ([the research report](https://github.com/aperiodic-io/logpak/blob/907d44e/docs/research/compression-research.md), kept in git history).
 
 This is for agents on slow or metered links, and for egress you pay for: on public agent traffic,
 1 TB a month of request uploads at $0.09/GB costs $90 plain, $23.56 with per-request zstd and $1.43
