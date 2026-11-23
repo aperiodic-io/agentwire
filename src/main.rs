@@ -110,7 +110,7 @@ enum Mode {
         #[arg(long, env = "LOGPAK_METRICS")]
         metrics: Option<SocketAddr>,
     },
-    /// Accept plain requests from a local tool and send them to an `logpak server` as deltas.
+    /// Accept plain requests from a local tool and send them to a `logpak server` as deltas.
     Client {
         #[arg(long, env = "LOGPAK_LISTEN", default_value = "127.0.0.1:8787")]
         listen: SocketAddr,

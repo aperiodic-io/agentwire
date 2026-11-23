@@ -241,12 +241,12 @@ async fn an_upstream(w: &mut Proxies) {
     w.upstream = Some(upstream().await);
 }
 
-#[given("an logpak server in front of it")]
+#[given("a logpak server in front of it")]
 async fn a_server(w: &mut Proxies) {
     w.start_server().await;
 }
 
-#[given("an logpak client in front of that server")]
+#[given("a logpak client in front of that server")]
 async fn a_client(w: &mut Proxies) {
     let relayed = relay(w.server.as_ref().unwrap().addr).await;
     let upstream = format!("http://{}", relayed.0);
@@ -437,7 +437,7 @@ async fn log(args: &[&str], stdin: &[u8]) -> Vec<u8> {
     out.stdout
 }
 
-#[given("an logpak server in front of it, recording to a directory")]
+#[given("a logpak server in front of it, recording to a directory")]
 async fn a_recording_server(w: &mut Proxies) {
     w.record_dir = Some(scratch("record"));
     w.start_server().await;
@@ -584,17 +584,17 @@ impl Proxies {
     }
 }
 
-#[given("an logpak collector recording to a directory")]
+#[given("a logpak collector recording to a directory")]
 async fn a_collector(w: &mut Proxies) {
     w.start_collector(&[]).await;
 }
 
-#[given("an logpak collector in front of it, recording to a directory")]
+#[given("a logpak collector in front of it, recording to a directory")]
 async fn a_forwarding_collector(w: &mut Proxies) {
     w.start_collector(&[]).await;
 }
 
-#[given(expr = "an logpak collector recording to a directory, starting a new file every {int} bytes")]
+#[given(expr = "a logpak collector recording to a directory, starting a new file every {int} bytes")]
 async fn a_rotating_collector(w: &mut Proxies, bytes: u64) {
     w.start_collector(&["--rotate-bytes", &bytes.to_string()]).await;
 }
@@ -631,7 +631,7 @@ async fn collector_reports(w: &mut Proxies, records: u64, percent: u64) {
     assert!(stored * 100 < body * percent, "{stored} stored for {body}");
 }
 
-#[given(expr = "an logpak collector recording to a directory, with a size limit of {int} bytes")]
+#[given(expr = "a logpak collector recording to a directory, with a size limit of {int} bytes")]
 async fn a_small_collector(w: &mut Proxies, bytes: u64) {
     w.start_collector(&["--max-body", &bytes.to_string()]).await;
 }
@@ -648,7 +648,7 @@ async fn refused_as_a_base(w: &mut Proxies, status: u16) {
     refused_unrecorded(w, status).await;
 }
 
-#[given("an logpak client in front of that collector")]
+#[given("a logpak client in front of that collector")]
 async fn a_client_before_the_collector(w: &mut Proxies) {
     a_client(w).await;
 }

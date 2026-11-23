@@ -1,4 +1,4 @@
-# logpak (Python)
+# Logpak (Python)
 
 AWL1 files from Python: LLM request logs and trace spans stored as deltas against earlier records.
 A gateway's or a tracer's log re-sends the whole prompt in every record, so a record costs about

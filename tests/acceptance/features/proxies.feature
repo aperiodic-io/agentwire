@@ -4,8 +4,8 @@ Feature: Requests cross the network as deltas and reach the API byte for byte
 
   Background:
     Given an upstream API
-    And an logpak server in front of it
-    And an logpak client in front of that server
+    And a logpak server in front of it
+    And a logpak client in front of that server
 
   Scenario: A conversation reaches the API unchanged, and only its first request is sent in full
     When a tool sends a conversation of 12 turns through the client

@@ -1,6 +1,6 @@
 # AWD1: request bodies as deltas against the previous request
 
-Version 1. Status: stable wire format for logpak 0.x; changes need a new version byte.
+Version 1. Status: stable wire format for Logpak 0.x; changes need a new version byte.
 
 LLM APIs are called with the whole conversation in every request, so request *k+1* is request *k*
 plus a turn. AWD1 lets an HTTP client send it as an edit of a body the server already holds, and

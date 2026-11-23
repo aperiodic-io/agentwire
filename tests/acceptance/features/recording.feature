@@ -4,8 +4,8 @@ Feature: Every request is stored as a delta, and read back byte for byte
 
   Scenario: A recording server keeps every request it forwards, in a fraction of its size
     Given an upstream API
-    And an logpak server in front of it, recording to a directory
-    And an logpak client in front of that server
+    And a logpak server in front of it, recording to a directory
+    And a logpak client in front of that server
     When two tools send conversations of 6 turns through the client, turn by turn
     Then the upstream received every request byte for byte
     And the recording holds every request byte for byte, with its method and path
