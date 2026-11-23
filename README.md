@@ -33,78 +33,124 @@ anyway. Logpak looks for the previous copy by record, whatever its size.
 At that ratio a terabyte of spans is under 10 GB. You can afford to keep every prompt in full,
 without sampling or truncating, and still pull any single request out in milliseconds.
 
-## Try it on your own logs
+## Quick start: point your OpenTelemetry exporter at Logpak
 
-One JSON object per line in, an `.lpk` file out. No service to run and nothing to change.
+Your agent, framework or gateway most likely exports OpenTelemetry already. Run a collector, point
+the exporter at it, and every span and log record is stored on your disk.
 
 ```bash
 cargo install logpak --features proxy
 ```
 
 ```bash
-logpak log pack spans.lpk --window 32 < exported-spans.jsonl
-```
-
-```bash
-ls -l exported-spans.jsonl spans.lpk
-```
-
-```bash
-logpak log unpack spans.lpk | cmp - exported-spans.jsonl    # silent: every byte is back
-```
-
-`--window` is how many traces or conversations are interleaved in the file (default 16).
-
-## Five ways to use it
-
-OpenTelemetry is the main interface: if your tool already exports OTLP, Logpak is one endpoint
-variable away, and `--forward` keeps your current backend fed. The recording proxy is for tools
-whose export leaves the prompts out.
-
-| You have | Use | What changes in your stack |
-|---|---|---|
-| An OpenTelemetry exporter feeding Langfuse, a collector or any OTLP backend | [`logpak collect --forward`](#1-in-front-of-your-tracing-backend) | one endpoint variable |
-| A gateway with an HTTP log plugin (Kong, LiteLLM) | [`logpak collect`](#2-as-your-gateways-log-sink) | one plugin setting |
-| No log export at all, or calls straight to a provider | [`logpak server --record-dir`](#3-as-a-recording-proxy) | the base URL |
-| Files of exported spans or request logs | [`logpak log pack`](#4-on-files-you-already-have) | nothing |
-| Your own ingest path or notebook | [the Rust or Python library](#5-embedded-in-rust-or-python) | a few lines |
-
-All five write the same LPK1 files, and [`logpak log`](#reading-it-back) and both libraries read
-them all.
-
-**[docs/integrations.md](docs/integrations.md) has step-by-step setups for each tool**, OTel first
-wherever the tool's export carries the messages. It covers 20 coding agents (Claude Code, Codex,
-Gemini CLI, Copilot, Goose, OpenCode, Aider, Cline, …), 25 SDKs and agent frameworks, 15 gateways,
-AWS Bedrock, Azure and Vertex AI logs, 6 telemetry pipelines, 20 observability backends to forward
-to, and self-hosted inference servers.
-
-### 1. In front of your tracing backend
-
-Keep the backend you query. Put `logpak collect` between the exporter and it: every OTLP batch
-is stored in full on your disk, then forwarded as received. The backend can sample, truncate or
-expire what it likes, and you still hold every span.
-
-```bash
-logpak collect --record-dir /var/log/logpak --forward https://cloud.langfuse.com/api/public/otel
+logpak collect --record-dir ~/logpak        # OTLP/HTTP on 127.0.0.1:4318, OTLP/gRPC on :4317
 ```
 
 ```bash
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf   # or grpc, with http://127.0.0.1:4317
+```
+
+Run your agent as usual, then look at what arrived:
+
+```bash
+logpak log ls ~/logpak/*.lpk          # one line per batch: index, base, bytes stored, meta
+```
+
+```bash
+logpak log unpack ~/logpak/*.lpk      # every batch back, byte for byte
+```
+
+It takes OTLP traces, logs and metrics, as protobuf or JSON, compressed or not (gzip, deflate,
+brotli, zstd, snappy). Nothing sits in the path of your model calls: unset the variable and
+Logpak is out of the picture.
+
+### Turn on the content
+
+Most exporters leave prompts out until you ask for them. The flags for the most common tools:
+
+**Claude Code** exports the whole Messages API request, history included:
+
+```bash
+export CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=otlp
+export OTEL_LOG_RAW_API_BODIES=1 CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH=67108864
+```
+
+**Python apps** (OpenAI, Anthropic, LangChain, LlamaIndex, CrewAI, …), with the official
+OpenTelemetry GenAI instrumentations and no code changes:
+
+```bash
+pip install opentelemetry-distro opentelemetry-exporter-otlp-proto-http opentelemetry-instrumentation-genai-openai
+```
+
+```bash
+OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=span_only OTEL_LOGS_EXPORTER=otlp opentelemetry-instrument python app.py
+```
+
+**Other tools.** Each line goes with the endpoint variables above:
+
+| Tool | Content flag |
+|---|---|
+| Gemini CLI | `"telemetry": {"enabled": true, "otlpProtocol": "grpc", "otlpEndpoint": "http://127.0.0.1:4317", "logPrompts": true}` in `.gemini/settings.json` |
+| GitHub Copilot CLI | `OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT=SPAN_ONLY` |
+| VS Code Copilot | `github.copilot.chat.otel.enabled` and `github.copilot.chat.otel.captureContent` set to `true` |
+| Goose | `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` |
+| OpenLLMetry (Traceloop) | content is on; set `TRACELOOP_BASE_URL=http://127.0.0.1:4318` |
+| OpenInference (Arize) | content is on |
+| Vercel AI SDK | inputs and outputs are recorded by default |
+| LiteLLM proxy | `callbacks: ["otel"]`; prompts are on |
+| Microsoft Agent Framework | `ENABLE_SENSITIVE_DATA=true` |
+| Semantic Kernel (Python) | `SEMANTICKERNEL_EXPERIMENTAL_GENAI_ENABLE_OTEL_DIAGNOSTICS_SENSITIVE=true` |
+
+[docs/integrations.md](docs/integrations.md) has the full setup for each of 20 coding agents, 25 SDKs
+and agent frameworks, 15 gateways, AWS Bedrock, Azure and Vertex AI logs, 6 telemetry pipelines and
+20 backends. It also says, per tool, whether its export carries the full request, the messages,
+only the prompts, or no content at all.
+
+### Keep your current backend
+
+Put Logpak between the exporter and the backend you query. Every batch is stored, then forwarded as
+received, headers included (they are never stored). The backend can sample, truncate or expire what
+it likes, and you still hold every span.
+
+```bash
+logpak collect --record-dir ~/logpak --forward https://cloud.langfuse.com/api/public/otel
+```
+
+```bash
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(echo -n "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64 -w0)"
 ```
 
-It takes OTLP traces, logs and metrics over HTTP (`:4318`) and gRPC (`:4317`). Your exporter's
-headers are forwarded and never stored. Without `--forward` it is a plain sink that answers OTLP's
-empty success.
+| Backend | `--forward` | `OTEL_EXPORTER_OTLP_HEADERS` |
+|---|---|---|
+| Langfuse | `https://cloud.langfuse.com/api/public/otel` | `Authorization=Basic <base64 pk:sk>` |
+| Arize Phoenix | `http://<host>:6006` | `Authorization=Bearer <key>` |
+| LangSmith | `https://api.smith.langchain.com/otel` | `x-api-key=<key>` |
+| Honeycomb | `https://api.honeycomb.io` | `x-honeycomb-team=<key>` |
+| Grafana Cloud | `https://otlp-gateway-<zone>.grafana.net/otlp` | `Authorization=Basic <base64 instance:token>` |
+| An OpenTelemetry Collector | `http://<host>:4318` | as configured |
 
-gRPC arrives as HTTP/2 without TLS, as `insecure` exporters send it; put a proxy in front for TLS.
-`--forward` is an OTLP/HTTP endpoint: each gRPC Export goes on to it as OTLP/HTTP protobuf
-(`/v1/traces`, `/v1/logs` or `/v1/metrics`) and its answer comes back as the gRPC status (429 and
-502–504 as `UNAVAILABLE`, which exporters retry). So a gRPC exporter can feed a backend that takes
-only OTLP/HTTP, such as Langfuse.
+More backends are in [the guide](docs/integrations.md#forwarding-to-an-observability-backend).
+`--forward` is an OTLP/HTTP endpoint. A gRPC export goes on to it as OTLP/HTTP protobuf, and the
+backend's answer comes back as the gRPC status (429 and 502–504 as `UNAVAILABLE`, which exporters
+retry). So a gRPC exporter can feed a backend that takes only OTLP/HTTP, such as Langfuse. gRPC
+arrives as HTTP/2 without TLS, as `insecure` exporters send it; put a proxy in front for TLS.
 
-### 2. As your gateway's log sink
+## Other ways in
+
+OpenTelemetry covers most tools. For the rest:
+
+| You have | Use | What changes in your stack |
+|---|---|---|
+| A gateway with an HTTP log plugin (Kong, LiteLLM) | [`logpak collect`](#as-your-gateways-log-sink) | one plugin setting |
+| A tool whose export leaves the prompts out, or no export at all | [`logpak server --record-dir`](#as-a-recording-proxy) | the base URL |
+| Files of exported spans or request logs | [`logpak log pack`](#on-files-you-already-have) | nothing |
+| Your own ingest path or notebook | [the Rust or Python library](#embedded-in-rust-or-python) | a few lines |
+
+Every route writes the same LPK1 files, and [`logpak log`](#reading-it-back) and both libraries
+read them all.
+
+### As your gateway's log sink
 
 Anything that can POST a log entry can log to `logpak collect`. The path is yours to choose and
 is stored with each record.
@@ -138,9 +184,10 @@ plugins:
       content_type: application/json
 ```
 
-### 3. As a recording proxy
+### As a recording proxy
 
-For a gateway that exports no logs (Portkey), or for calls that go straight to a provider, let
+For a tool whose OpenTelemetry export leaves the prompts out (Codex, Cline, Aider, OpenCode), a
+gateway that exports no logs (Portkey), or for the exact request bytes a provider received, let
 `logpak server` record what it forwards. Each request body is on disk before it reaches the
 upstream, so the file is a record of what the model was asked. If a write fails, the error is
 logged and the request is still forwarded.
@@ -155,13 +202,23 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8080 claude
 
 API keys pass straight through. Headers are never written to the file.
 
-### 4. On files you already have
+### On files you already have
 
-`logpak log pack` and `unpack`, as in [Try it](#try-it-on-your-own-logs): exported spans, a
-gateway's JSON-lines log, an eval run's requests. Pack before you ship to object storage and the
-bucket holds about a hundredth of the bytes.
+One JSON object per line in, an `.lpk` file out: exported spans, a gateway's JSON-lines log, an
+eval run's requests. Pack before you ship to object storage and the bucket holds about a hundredth
+of the bytes.
 
-### 5. Embedded, in Rust or Python
+```bash
+logpak log pack spans.lpk --window 32 < exported-spans.jsonl
+```
+
+```bash
+logpak log unpack spans.lpk | cmp - exported-spans.jsonl    # silent: every byte is back
+```
+
+`--window` is how many traces or conversations are interleaved in the file (default 16).
+
+### Embedded in Rust or Python
 
 Rust: `logpak::log::Writer` appends, `logpak::log::Reader` indexes and reads.
 
@@ -380,7 +437,7 @@ client.confirm(&request, response.headers().get(logpak::KEPT).and_then(|v| v.to_
 | `--record-window` | `LOGPAK_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per conversation in flight. |
 | `--rotate-bytes` | `LOGPAK_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. |
 
-**`logpak collect`**: a log sink that stores what is posted to it in LPK1 ([above](#1-in-front-of-your-tracing-backend)).
+**`logpak collect`**: a log sink that stores what is posted to it in LPK1 ([above](#quick-start-point-your-opentelemetry-exporter-at-logpak)).
 
 | Flag | Env | Default | |
 |---|---|---|---|
