@@ -1,18 +1,32 @@
 # Integrations
 
 How to get the logs of each popular coding agent, agent framework, gateway, cloud platform and
-telemetry pipeline into Logpak. Every entry ends in one of three ways in:
+telemetry pipeline into Logpak.
 
-| Way in | Command | What it stores |
+**OpenTelemetry is the main interface.** Point the OTLP exporter your tool, framework or gateway
+already has at `logpak collect`. With `--forward`, every batch is also passed on, as received, to
+the backend you use today (Langfuse, Phoenix, Datadog, an OpenTelemetry Collector). Nothing sits
+in the path of your model calls, and turning Logpak off is one environment variable.
+
+| Way in | Command | Use it when |
 |---|---|---|
-| **A. Collector** | `logpak collect --record-dir DIR [--forward URL]` | every OTLP batch (HTTP `:4318`, gRPC `:4317`) or JSON log entry POSTed to it |
-| **B. Recording proxy** | `logpak server --upstream URL --record-dir DIR` | every request body sent to a provider, byte for byte, as the provider received it |
-| **C. Pack a file** | `logpak log pack FILE.awl < lines.jsonl` | one record per line of a JSON-lines file |
+| **A. OpenTelemetry** (main) | `logpak collect --record-dir DIR [--forward URL]` | the tool exports OTLP with the messages: most frameworks and gateways, and the coding agents marked so below |
+| **B. Recording proxy** (fallback) | `logpak server --upstream URL --record-dir DIR` | the tool exports no content over OTel, or you need the exact API request bytes |
+| **C. Pack a file** | `logpak log pack FILE.awl < lines.jsonl` | logs that already land in files or buckets (Bedrock, Vertex, exports) |
 
-Pick B when you want the exact API request bodies and the tool lets you change its base URL. It is
-the most faithful and needs no telemetry setup at all. Pick A when the tool or gateway already
-exports traces or logs, or when you want to keep sending them to Langfuse, Phoenix or Datadog
-(`--forward`). Pick C for logs that already land in files or buckets.
+`collect` also takes plain JSON log POSTs on any path, which is how gateways with an HTTP log
+plugin (Kong, LiteLLM, APISIX) send their payload logs.
+
+**What each tool's OTel export carries.** Each section opens with one of these labels:
+
+- **full request:** the API request body itself, conversation history included.
+- **messages:** the input and output messages on each span or log record, once content capture is
+  on. Each record still repeats the conversation, so this is what Logpak compresses best.
+- **prompts only:** the user's prompt and the reply, not the history sent with them.
+- **metadata only:** model, tokens, latency and cost. No content.
+- **no OTel.**
+
+For **full request** and **messages**, use A. For the rest, use B.
 
 **Sources.** Keys and flags below were read from each project's official documentation in
 November 2026, and each section links its pages. Settings marked *(unverified)* were not
@@ -22,14 +36,15 @@ CI runs only LiteLLM, Kong, Portkey, Langfuse and the OpenTelemetry Collector
 
 ## Contents
 
+- [At a glance](#at-a-glance)
 - [Rules that apply everywhere](#rules-that-apply-everywhere)
-- [Coding agents](#coding-agents): Claude Code, Claude Agent SDK, Codex CLI, Gemini CLI, Qwen Code,
-  GitHub Copilot CLI, VS Code Copilot, Goose, OpenCode, Aider, Cline, Roo Code, Kilo Code, Continue,
-  OpenHands, SWE-agent, mini-swe-agent, Crush, Pi, Zed
-- [SDKs and agent frameworks](#sdks-and-agent-frameworks): provider SDKs, OpenTelemetry GenAI,
-  OpenLLMetry, OpenInference, Langfuse, LangSmith, Logfire and Pydantic AI, LangChain, LlamaIndex,
-  OpenAI Agents SDK, Vercel AI SDK, Mastra, CrewAI, AutoGen, Microsoft Agent Framework, Semantic
-  Kernel, Spring AI, Strands, Google ADK, smolagents, Haystack, DSPy, Agno, LangChain4j, Genkit
+- [Coding agents](#coding-agents): Claude Code, Claude Agent SDK, Gemini CLI, Qwen Code, GitHub
+  Copilot CLI, VS Code Copilot, Goose, Codex CLI, OpenHands, Kilo Code, Cline, Roo Code, OpenCode,
+  Aider, Continue, SWE-agent, mini-swe-agent, Crush, Pi, Zed
+- [SDKs and agent frameworks](#sdks-and-agent-frameworks): OpenTelemetry GenAI, OpenLLMetry,
+  OpenInference, Langfuse, LangSmith, Logfire and Pydantic AI, LangChain, LlamaIndex, OpenAI Agents
+  SDK, Vercel AI SDK, Mastra, CrewAI, AutoGen, Microsoft Agent Framework, Semantic Kernel, Spring
+  AI, Strands, Google ADK, smolagents, Haystack, DSPy, Agno, LangChain4j, Genkit, and provider SDKs
 - [LLM gateways](#llm-gateways): LiteLLM, Kong, Portkey, Apache APISIX, Bifrost, TensorZero,
   agentgateway, Envoy AI Gateway, Higress, Traefik Hub, OpenRouter, Cloudflare AI Gateway,
   Helicone, Vercel AI Gateway, MLflow AI Gateway
@@ -41,7 +56,50 @@ CI runs only LiteLLM, Kong, Portkey, Langfuse and the OpenTelemetry Collector
 - [Provider upstreams](#provider-upstreams)
 - [Not supported](#not-supported)
 
+## At a glance
+
+| Tool | Over OTel | Route |
+|---|---|---|
+| Claude Code, Claude Agent SDK | full request | A |
+| Gemini CLI, Qwen Code, GitHub Copilot CLI, VS Code Copilot, Goose | messages | A |
+| OTel GenAI, OpenLLMetry and OpenInference instrumentors; Langfuse, LangSmith, Logfire, Pydantic AI, LangChain, LlamaIndex, OpenAI Agents SDK (Python), Vercel AI SDK, Mastra, CrewAI, Microsoft Agent Framework, Semantic Kernel, Spring AI, Strands, Google ADK, smolagents, Haystack, DSPy, Agno | messages, once content capture is on | A |
+| LiteLLM, Kong, APISIX, Bifrost, Envoy AI Gateway, Traefik Hub, agentgateway, OpenRouter, Cloudflare | messages or payload logs | A |
+| Codex CLI | prompts only | B (A for prompts and replies) |
+| OpenHands, Kilo Code, TensorZero, AutoGen | content *(unverified)* | A, B if prompts are missing |
+| Cline | metadata only | B |
+| Roo Code, OpenCode, Aider, Continue, SWE-agent, mini-swe-agent, Crush, Pi, Zed, OpenAI Agents SDK (JS), LangChain4j, Genkit | no OTel with content | B |
+| Portkey (open source), Helicone, Vercel AI Gateway, MLflow AI Gateway, Higress | no payload export | B |
+| AWS Bedrock, Azure API Management, Vertex AI | provider logs | C |
+
 ## Rules that apply everywhere
+
+**The collector (A).** Start one collector, then point exporters at `http://127.0.0.1:4318`
+(OTLP/HTTP, protobuf or JSON) or `http://127.0.0.1:4317` (OTLP/gRPC without TLS).
+
+```bash
+logpak collect --record-dir ~/logpak/otel
+```
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+```
+
+To keep your current backend, add `--forward` with its OTLP/HTTP base URL, and leave its auth in
+`OTEL_EXPORTER_OTLP_HEADERS`. Headers are forwarded and never stored. The URL and header for each
+backend are in [Forwarding](#forwarding-to-an-observability-backend).
+
+```bash
+logpak collect --record-dir ~/logpak/otel --forward https://cloud.langfuse.com/api/public/otel
+```
+
+**Turn content capture on.** Most tracers leave prompts out by default. Each section names the
+flag. Some tools put the content on log records rather than spans. Those also need
+`OTEL_LOGS_EXPORTER=otlp`, and `collect` stores the logs on `/v1/logs` like the rest.
+
+**Raise attribute limits.** A long agent conversation is megabytes. Where a tool truncates content
+(Claude Code at 60 KB, Qwen Code at 1 MiB, VS Code Copilot by `maxAttributeSizeChars`), the
+section says how to raise it.
 
 **The base-URL rule (B).** Start `logpak server` with the provider's origin as `--upstream`.
 Then take the base URL the tool uses today, swap the origin for `http://127.0.0.1:8080`, and keep
@@ -60,23 +118,6 @@ logpak server --listen 127.0.0.1:8081 --upstream https://api.openai.com --record
 Run one server per provider, each on its own port and directory. The proxy speaks plain HTTP,
 including streamed (SSE) responses. It does not speak WebSocket. The default `--listen` is
 `0.0.0.0:8080`, so pass `127.0.0.1` on a laptop.
-
-**The collector (A).** Point exporters at `http://127.0.0.1:4318` (OTLP/HTTP, protobuf or JSON) or
-`http://127.0.0.1:4317` (OTLP/gRPC without TLS). A plain JSON log POST can go to any path, for
-example `/kong`, and the path is stored with each record.
-
-```bash
-logpak collect --record-dir ~/logpak/otel
-```
-
-```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-```
-
-**Turn content capture on.** Most tracers leave prompts out of spans by default. Each section names
-the flag. Some tools put the content on log records rather than spans. Those also need
-`OTEL_LOGS_EXPORTER=otlp`, and `collect` stores the logs on `/v1/logs` like the rest.
 
 **Any common compression works.** `collect` and `server --record-dir` decode gzip, deflate, brotli,
 zstd and snappy before they store a body, and gRPC messages by their `grpc-encoding`. A coding
@@ -100,24 +141,10 @@ example) has little to deduplicate, and packs about as well as zstd.
 
 ### Claude Code
 
-**B (recommended): the exact request bodies.** No `/v1` in the base URL.
+Over OTel: **full request**. Claude Code is the one coding agent that exports the whole Messages
+API body.
 
-```bash
-logpak server --listen 127.0.0.1:8080 --upstream https://api.anthropic.com --record-dir ~/logpak/claude
-```
-
-```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8080 claude
-```
-
-- To make it permanent, put `"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8080"}` in
-  `~/.claude/settings.json`. In the VS Code extension, use `claudeCode.environmentVariables`.
-- Both API keys (`x-api-key`) and a claude.ai subscription login (`Authorization: Bearer`) work,
-  because the proxy forwards those headers and `anthropic-beta` verbatim.
-- Remote Control is disabled while the base URL is not an Anthropic host. The desktop app does not
-  read `ANTHROPIC_BASE_URL`.
-
-**A: native OpenTelemetry.** Only Claude Code exports the full Messages API body over OTel.
+**A.** Export logs to the collector, with raw API bodies on:
 
 ```bash
 export CLAUDE_CODE_ENABLE_TELEMETRY=1
@@ -128,6 +155,11 @@ export OTEL_LOG_RAW_API_BODIES=1            # the full request and response JSON
 export CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH=67108864   # inline bodies are cut at 60 KB otherwise
 ```
 
+```bash
+claude
+```
+
+- To make it permanent, put the same variables in the `env` block of `~/.claude/settings.json`.
 - Traces (beta) also need `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1` and `OTEL_TRACES_EXPORTER=otlp`.
 - Narrower flags exist for prompts, tool arguments and tool output: `OTEL_LOG_USER_PROMPTS=1`,
   `OTEL_LOG_TOOL_DETAILS=1` and `OTEL_LOG_TOOL_CONTENT=1`.
@@ -135,40 +167,219 @@ export CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH=67108864   # inline bodies are cut at
   puts a `body_ref` path in the event.
 - Extended thinking is redacted from raw bodies.
 
-**C: transcripts.** `~/.claude/projects/<project>/<session-id>.jsonl` holds one message per line,
-kept for 30 days (`cleanupPeriodDays`). It packs, but each message is stored only once, so expect
-zstd-like ratios. The format is internal to Claude Code.
+**B.** For the request bytes exactly as Anthropic received them. No `/v1` in the base URL.
+
+```bash
+logpak server --listen 127.0.0.1:8080 --upstream https://api.anthropic.com --record-dir ~/logpak/claude
+```
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 claude
+```
+
+- In the VS Code extension, set it in `claudeCode.environmentVariables`.
+- Both API keys (`x-api-key`) and a claude.ai subscription login (`Authorization: Bearer`) work,
+  because the proxy forwards those headers and `anthropic-beta` verbatim.
+- Remote Control is disabled while the base URL is not an Anthropic host. The desktop app does not
+  read `ANTHROPIC_BASE_URL`.
+
+**C.** `~/.claude/projects/<project>/<session-id>.jsonl` holds one message per line, kept for 30
+days (`cleanupPeriodDays`). It packs, but each message is stored only once, so expect zstd-like
+ratios. The format is internal to Claude Code.
 
 ```bash
 cat ~/.claude/projects/*/*.jsonl | logpak log pack claude-transcripts.awl
 ```
 
-Docs: [LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect),
-[monitoring](https://code.claude.com/docs/en/monitoring-usage).
+Docs: [monitoring](https://code.claude.com/docs/en/monitoring-usage),
+[LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect).
 
 ### Claude Agent SDK
 
-The SDK runs the Claude Code CLI, so everything above applies through `env`.
+Over OTel: **full request**. The SDK runs the Claude Code CLI, so the Claude Code variables above
+apply. Pass them in `env`:
 
 ```python
 from claude_agent_sdk import ClaudeAgentOptions
-options = ClaudeAgentOptions(env={"ANTHROPIC_BASE_URL": "http://127.0.0.1:8080"})  # merged onto os.environ
+otel = {"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_LOGS_EXPORTER": "otlp",
+        "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318",
+        "OTEL_LOG_RAW_API_BODIES": "1", "CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH": "67108864",
+        "OTEL_LOGS_EXPORT_INTERVAL": "1000"}
+options = ClaudeAgentOptions(env=otel)   # merged onto os.environ
 ```
 
 ```ts
-const options = { env: { ...process.env, ANTHROPIC_BASE_URL: "http://127.0.0.1:8080" } }; // replaces the env: spread it
+const otel = { CLAUDE_CODE_ENABLE_TELEMETRY: "1", OTEL_LOGS_EXPORTER: "otlp",
+  OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf", OTEL_EXPORTER_OTLP_ENDPOINT: "http://127.0.0.1:4318",
+  OTEL_LOG_RAW_API_BODIES: "1", CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH: "67108864", OTEL_LOGS_EXPORT_INTERVAL: "1000" };
+const options = { env: { ...process.env, ...otel } }; // env replaces the environment: spread it
 ```
 
-- For OTel, pass the Claude Code variables above in the same `env`. Don't use the `console`
-  exporter: stdout is the SDK's message channel.
-- Short runs exit before the default export interval. Set `OTEL_LOGS_EXPORT_INTERVAL=1000` and
-  `OTEL_TRACES_EXPORT_INTERVAL=1000`.
+- Don't use the `console` exporter: stdout is the SDK's message channel.
+- Short runs exit before the default export interval, hence `OTEL_LOGS_EXPORT_INTERVAL=1000`.
+- **B:** add `ANTHROPIC_BASE_URL: "http://127.0.0.1:8080"` to the same `env`.
 
 Docs: [Agent SDK observability](https://code.claude.com/docs/en/agent-sdk/observability).
 
+### Gemini CLI
+
+Over OTel: **messages**, in `gen_ai.input.messages` and `gen_ai.output.messages`.
+
+**A.** It exports gRPC to `:4317` by default, and prompts are on by default. In
+`.gemini/settings.json`:
+
+```json
+{ "telemetry": { "enabled": true, "target": "local", "otlpEndpoint": "http://127.0.0.1:4317",
+                 "otlpProtocol": "grpc", "logPrompts": true, "traces": true } }
+```
+
+For `:4318`, set `"otlpProtocol": "http"`. The same settings exist as `GEMINI_TELEMETRY_*`
+environment variables.
+
+**B.** This only works with API-key auth (`gemini-api-key`). Login with Google goes elsewhere.
+
+```bash
+logpak server --listen 127.0.0.1:8082 --upstream https://generativelanguage.googleapis.com --record-dir ~/logpak/gemini
+```
+
+```bash
+GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8082 gemini
+```
+
+For Vertex AI auth, the variable is `GOOGLE_VERTEX_BASE_URL`.
+
+Docs: [telemetry](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/telemetry.md).
+
+### Qwen Code
+
+Over OTel: **messages**, once sensitive span attributes are on.
+
+**A.** A Gemini CLI fork with the same `telemetry` block, defaulting to gRPC. In
+`~/.qwen/settings.json`:
+
+```json
+{ "telemetry": { "enabled": true, "otlpEndpoint": "http://127.0.0.1:4317", "otlpProtocol": "grpc",
+                 "logPrompts": true, "includeSensitiveSpanAttributes": true,
+                 "sensitiveSpanAttributeMaxLength": 67108864 } }
+```
+
+`sensitiveSpanAttributeMaxLength` caps content at 1 MiB unless raised. The same settings exist as
+`QWEN_TELEMETRY_*` environment variables.
+
+**B.** `envKey` names the variable that holds the key. Qwen OAuth models cannot be redirected.
+
+```json
+{ "modelProviders": {
+    "openai":    [{ "id": "<model>", "envKey": "OPENAI_API_KEY",    "baseUrl": "http://127.0.0.1:8081/v1" }],
+    "anthropic": [{ "id": "<model>", "envKey": "ANTHROPIC_API_KEY", "baseUrl": "http://127.0.0.1:8080/v1" }] } }
+```
+
+Docs: [settings](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/).
+
+### GitHub Copilot CLI
+
+Over OTel: **messages**, with input and output messages, system instructions, and tool arguments
+and results.
+
+**A.** OTLP/HTTP only, no gRPC. Content capture is opt-in.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT=SPAN_ONLY
+```
+
+The reference says export is disabled for a plain `http://` endpoint *(unverified)*. If nothing
+arrives, put `collect` behind a TLS proxy, or write to a file and pack it:
+
+```bash
+COPILOT_OTEL_FILE_EXPORTER_PATH=~/copilot-otel.jsonl copilot
+```
+
+```bash
+logpak log pack copilot.awl < ~/copilot-otel.jsonl
+```
+
+**B.** Only bring-your-own-key models go through the proxy. In `~/.copilot/providers.json`:
+
+```json
+{ "providers": [
+    { "name": "lp-openai", "type": "openai", "baseUrl": "http://127.0.0.1:8081/v1", "apiKey": "KEY", "wireApi": "responses" },
+    { "name": "lp-anthropic", "type": "anthropic", "baseUrl": "http://127.0.0.1:8080", "apiKey": "KEY" } ],
+  "models": [ { "id": "my-model", "provider": "lp-openai", "wireModel": "<provider model name>" } ] }
+```
+
+```bash
+copilot --model lp-openai/my-model
+```
+
+`apiKey` is taken literally; `$VAR` is not expanded.
+
+Docs: [OpenTelemetry reference](https://docs.github.com/en/copilot/reference/enterprise-administrators/opentelemetry-reference),
+[BYOK](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/use-byok-models).
+
+### VS Code Copilot Chat
+
+Over OTel: **messages**, with full prompts, system prompts, tool schemas, tool arguments and
+results.
+
+**A.** In VS Code settings:
+
+```json
+{ "github.copilot.chat.otel.enabled": true,
+  "github.copilot.chat.otel.exporterType": "otlp-http",
+  "github.copilot.chat.otel.otlpEndpoint": "http://127.0.0.1:4318",
+  "github.copilot.chat.otel.captureContent": true,
+  "github.copilot.chat.otel.maxAttributeSizeChars": 0 }
+```
+
+`maxAttributeSizeChars: 0` turns truncation off.
+
+**B.** Run "Chat: Manage Language Models", then Add Models and choose Custom Endpoint. Each model
+takes a full URL and an `apiType` (`chat-completions`, `responses` or `messages`), for example
+`http://127.0.0.1:8081/v1/chat/completions`. Whether localhost URLs are accepted is *(unverified)*,
+and an organisation policy can disable BYOK.
+
+Docs: [monitoring agents](https://code.visualstudio.com/docs/copilot/guides/monitoring-agents),
+[language models](https://code.visualstudio.com/docs/copilot/customization/language-models).
+
+### Goose
+
+Over OTel: **messages**, once message content capture is on.
+
+**A.** Goose reads the standard variables and appends `/v1/traces` itself:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
+```
+
+**B.** Use the bare origin with no path: Goose adds `v1/chat/completions` itself (`OPENAI_BASE_PATH`).
+
+```bash
+OPENAI_HOST=http://127.0.0.1:8081 goose session
+```
+
+```bash
+ANTHROPIC_HOST=http://127.0.0.1:8080 goose session
+```
+
+**C.** `~/.local/state/goose/logs/llm_request.*.jsonl` holds the 10 most recent requests in full:
+the input payload, response and usage. Pack them before they rotate away:
+
+```bash
+cat ~/.local/state/goose/logs/llm_request.*.jsonl | logpak log pack goose.awl
+```
+
+Docs: [environment variables](https://goose-docs.ai/docs/guides/environment-variables),
+[logs](https://goose-docs.ai/docs/guides/logs).
+
 ### OpenAI Codex CLI
 
-**B.** Only the user-level `~/.codex/config.toml` is read for providers. A project's
+Over OTel: **prompts only**. You get `codex.user_prompt`, `codex.agent_response` and tool-result
+snippets, not the history sent with them.
+
+**B (full context).** Only the user-level `~/.codex/config.toml` is read for providers. A project's
 `.codex/config.toml` is ignored for these keys.
 
 ```toml
@@ -191,8 +402,7 @@ logpak server --listen 127.0.0.1:8081 --upstream https://api.openai.com --record
   that path also tries WebSocket, or honours ChatGPT-subscription login, is *(unverified)*. Prefer
   the custom provider with an API key.
 
-**A.** OTel exports events, not request bodies. You get `codex.user_prompt` (with
-`log_user_prompt`), `codex.agent_response` (with `log_agent_responses`), and tool-result snippets.
+**A (prompts and replies).**
 
 ```toml
 [otel]
@@ -211,142 +421,64 @@ decompressed first)*.
 Docs: [config-advanced](https://learn.chatgpt.com/docs/config-file/config-advanced),
 [config-reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-### Gemini CLI
+### OpenHands
 
-**B.** This only works with API-key auth (`gemini-api-key`). Login with Google goes elsewhere.
+Over OTel: agent steps, tool input and output, and LLM calls; whether the messages are included
+is *(unverified)*.
 
-```bash
-logpak server --listen 127.0.0.1:8082 --upstream https://generativelanguage.googleapis.com --record-dir ~/logpak/gemini
-```
-
-```bash
-GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8082 gemini
-```
-
-For Vertex AI auth, the variable is `GOOGLE_VERTEX_BASE_URL`.
-
-**A.** It exports gRPC to `:4317` by default, and prompts are on by default. In `.gemini/settings.json`:
-
-```json
-{ "telemetry": { "enabled": true, "target": "local", "otlpEndpoint": "http://127.0.0.1:4317",
-                 "otlpProtocol": "grpc", "logPrompts": true, "traces": true } }
-```
-
-- For `:4318`, set `"otlpProtocol": "http"`. The same settings exist as `GEMINI_TELEMETRY_*`
-  environment variables.
-- Content arrives at the message level: `gen_ai.input.messages` and `gen_ai.output.messages`.
-
-Docs: [telemetry](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/telemetry.md).
-
-### Qwen Code
-
-**B.** In `~/.qwen/settings.json`. `envKey` names the variable that holds the key.
-
-```json
-{ "modelProviders": {
-    "openai":    [{ "id": "<model>", "envKey": "OPENAI_API_KEY",    "baseUrl": "http://127.0.0.1:8081/v1" }],
-    "anthropic": [{ "id": "<model>", "envKey": "ANTHROPIC_API_KEY", "baseUrl": "http://127.0.0.1:8080/v1" }] } }
-```
-
-Qwen OAuth models cannot be redirected; use an API key.
-
-**A.** A Gemini CLI fork with the same `telemetry` block, defaulting to gRPC. Prompts on spans need
-`"includeSensitiveSpanAttributes": true`, capped by `sensitiveSpanAttributeMaxLength` (1 MiB). Add
-`"logPrompts": true` for prompt and API text in logs.
-
-Docs: [settings](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/).
-
-### GitHub Copilot CLI
-
-**B.** Only bring-your-own-key models go through the proxy. In `~/.copilot/providers.json`:
-
-```json
-{ "providers": [
-    { "name": "aw-openai", "type": "openai", "baseUrl": "http://127.0.0.1:8081/v1", "apiKey": "KEY", "wireApi": "responses" },
-    { "name": "aw-anthropic", "type": "anthropic", "baseUrl": "http://127.0.0.1:8080", "apiKey": "KEY" } ],
-  "models": [ { "id": "my-model", "provider": "aw-openai", "wireModel": "<provider model name>" } ] }
-```
-
-```bash
-copilot --model aw-openai/my-model
-```
-
-`apiKey` is taken literally; `$VAR` is not expanded.
-
-**A.** OTLP/HTTP only, no gRPC. Content capture is opt-in.
+**A.** In the Docker web app, pass these through `OH_AGENT_SERVER_ENV`; the app container does not
+hand them to the agent.
 
 ```bash
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-export OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT=SPAN_ONLY
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
 ```
 
-The reference says export is disabled for a plain `http://` endpoint *(unverified)*. If nothing
-arrives, write to a file instead and pack it (C):
+**B.** If the spans lack prompts. The CLI needs `--override-with-envs` for these variables.
 
 ```bash
-COPILOT_OTEL_FILE_EXPORTER_PATH=~/copilot-otel.jsonl copilot
+LLM_BASE_URL=http://127.0.0.1:8081/v1 LLM_MODEL=openai/<model> LLM_API_KEY=$OPENAI_API_KEY openhands --override-with-envs
 ```
 
-```bash
-logpak log pack copilot.awl < ~/copilot-otel.jsonl
-```
+In the GUI, the setting is Settings, LLM, Advanced, Base URL.
 
-Docs: [BYOK](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/use-byok-models),
-[OpenTelemetry reference](https://docs.github.com/en/copilot/reference/enterprise-administrators/opentelemetry-reference).
+Docs: [observability](https://docs.openhands.dev/sdk/guides/observability),
+[CLI](https://docs.openhands.dev/openhands/usage/cli/command-reference).
 
-### VS Code Copilot Chat
+### Kilo Code
 
-**B.** Run "Chat: Manage Language Models", then Add Models and choose Custom Endpoint. Each model
-takes a full URL and an `apiType` (`chat-completions`, `responses` or `messages`), for example
-`http://127.0.0.1:8081/v1/chat/completions`. Whether localhost URLs are accepted is *(unverified)*,
-and an organisation policy can disable BYOK.
+Over OTel (CLI): traces and logs; whether prompts are included is *(unverified)*.
 
-**A.** In VS Code settings:
-
-```json
-{ "github.copilot.chat.otel.enabled": true,
-  "github.copilot.chat.otel.exporterType": "otlp-http",
-  "github.copilot.chat.otel.otlpEndpoint": "http://127.0.0.1:4318",
-  "github.copilot.chat.otel.captureContent": true,
-  "github.copilot.chat.otel.maxAttributeSizeChars": 0 }
-```
-
-`captureContent` covers full prompts, system prompts, tool schemas, tool arguments and results.
-
-Docs: [language models](https://code.visualstudio.com/docs/copilot/customization/language-models),
-[monitoring agents](https://code.visualstudio.com/docs/copilot/guides/monitoring-agents).
-
-### Goose
-
-**B.** Use the bare origin with no path: Goose adds `v1/chat/completions` itself (`OPENAI_BASE_PATH`).
-
-```bash
-OPENAI_HOST=http://127.0.0.1:8081 goose session
-```
-
-```bash
-ANTHROPIC_HOST=http://127.0.0.1:8080 goose session
-```
-
-**A.** Goose reads the standard variables and appends `/v1/traces` itself:
+**A.** The CLI exports OTLP/HTTP whenever the endpoint is set:
 
 ```bash
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
-export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
 ```
 
-**C.** `~/.local/state/goose/logs/llm_request.*.jsonl` holds the 10 most recent requests in full:
-the input payload, response and usage. Pack them before they rotate away:
+**B.** In the VS Code extension, choose Settings, Providers, Custom provider, and set "Base URL" to
+`http://127.0.0.1:8081/v1`. The CLI's base-URL key under `provider.<id>.options` in
+`~/.config/kilo/kilo.json` is *(unverified)*.
 
-```bash
-cat ~/.local/state/goose/logs/llm_request.*.jsonl | logpak log pack goose.awl
-```
+Docs: [OpenAI-compatible](https://kilo.ai/docs/ai-providers/openai-compatible),
+[CLI](https://kilo.ai/docs/code-with-ai/platforms/cli).
 
-Docs: [environment variables](https://goose-docs.ai/docs/guides/environment-variables),
-[logs](https://goose-docs.ai/docs/guides/logs).
+### Cline and Roo Code
+
+Over OTel: **metadata only** for Cline (`CLINE_OTEL_*` exports token counts and costs). **No OTel**
+for Roo Code.
+
+**B.** Both are VS Code extensions, configured in the UI:
+
+- **Anthropic provider:** tick "Use custom base URL" and enter `http://127.0.0.1:8080`.
+- **OpenAI Compatible provider:** set "Base URL" to `http://127.0.0.1:8081/v1`.
+
+Docs: [Cline Anthropic](https://docs.cline.bot/provider-config/anthropic),
+[Cline OpenTelemetry](https://docs.cline.bot/enterprise-solutions/monitoring/opentelemetry_override),
+[Roo Code providers](https://roocodeinc.github.io/Roo-Code/providers/openai-compatible).
 
 ### OpenCode
+
+Over OTel: **no OTel** in V2 (V1's experimental `openTelemetry` field is ignored).
 
 **B.** These are V2 keys, in `~/.config/opencode/opencode.json` or a project's `opencode.json`:
 
@@ -354,18 +486,18 @@ Docs: [environment variables](https://goose-docs.ai/docs/guides/environment-vari
 { "providers": {
     "anthropic": { "settings": { "baseURL": "http://127.0.0.1:8080" } },
     "logpak-openai": { "package": "@opencode/ai/providers/openai-compatible",
-                          "settings": { "baseURL": "http://127.0.0.1:8081/v1" } } } }
+                       "settings": { "baseURL": "http://127.0.0.1:8081/v1" } } } }
 ```
 
 - On V1, the key is `provider.<id>.options.baseURL` (see the migration page).
 - With ChatGPT sign-in and no custom `baseURL`, OpenCode zstd-encodes request bodies. Logpak
   decodes zstd before it stores them.
 
-No OTel export in V2.
-
 Docs: [providers](https://opencode.ai/docs/providers/), [migrating from V1](https://opencode.ai/docs/migrate-v1/).
 
 ### Aider
+
+Over OTel: **no OTel** (analytics go to PostHog only).
 
 **B.** Aider goes through LiteLLM.
 
@@ -377,30 +509,14 @@ OPENAI_API_BASE=http://127.0.0.1:8081/v1 aider --model openai/<model>
 ANTHROPIC_API_BASE=http://127.0.0.1:8080 aider --model anthropic/<model>
 ```
 
-The Anthropic variable is LiteLLM's, not documented by Aider *(unverified)*. Aider has no OTel.
-`--llm-history-file` writes plain text, not JSON lines.
+The Anthropic variable is LiteLLM's, not documented by Aider *(unverified)*. `--llm-history-file`
+writes plain text, not JSON lines.
 
 Docs: [OpenAI-compatible](https://aider.chat/docs/llms/openai-compat.html).
 
-### Cline, Roo Code, Kilo Code
-
-These are VS Code extensions, configured in the UI.
-
-- **Anthropic provider:** tick "Use custom base URL" and enter `http://127.0.0.1:8080`.
-- **OpenAI Compatible provider:** set "Base URL" to `http://127.0.0.1:8081/v1`.
-
-**Kilo Code CLI.** Its OpenAI-compatible settings live under `provider.<id>.options` in
-`~/.config/kilo/kilo.json`. The base-URL key name is *(unverified)*. It exports OTLP/HTTP whenever
-`OTEL_EXPORTER_OTLP_ENDPOINT` is set, but whether prompts are included is *(unverified)*.
-
-**Cline's OTel.** `CLINE_OTEL_TELEMETRY_ENABLED=true` with `CLINE_OTEL_EXPORTER_OTLP_ENDPOINT`
-exports token counts and costs, not content. Use B for prompts.
-
-Docs: [Cline Anthropic](https://docs.cline.bot/provider-config/anthropic),
-[Roo Code providers](https://roocodeinc.github.io/Roo-Code/providers/openai-compatible),
-[Kilo Code](https://kilo.ai/docs/ai-providers/openai-compatible).
-
 ### Continue
+
+Over OTel: **no OTel**.
 
 **B.** In `~/.continue/config.yaml`:
 
@@ -414,30 +530,14 @@ models:
     roles: [chat, edit]
 ```
 
-`apiBase` with `provider: anthropic` is *(unverified)*; if you try it, use
-`http://127.0.0.1:8080`. Continue has no OTel.
+`apiBase` with `provider: anthropic` is *(unverified)*; if you try it, use `http://127.0.0.1:8080`.
 
 Docs: [config reference](https://docs.continue.dev/reference).
 
-### OpenHands
-
-**B.** The CLI needs `--override-with-envs` for these variables.
-
-```bash
-LLM_BASE_URL=http://127.0.0.1:8081/v1 LLM_MODEL=openai/<model> LLM_API_KEY=$OPENAI_API_KEY openhands --override-with-envs
-```
-
-In the GUI, the setting is Settings, LLM, Advanced, Base URL.
-
-**A.** `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318` with
-`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf`. In the Docker web app, pass these through
-`OH_AGENT_SERVER_ENV`; the app container does not hand them to the agent. Payload capture in spans
-is *(unverified)*.
-
-Docs: [CLI](https://docs.openhands.dev/openhands/usage/cli/command-reference),
-[observability](https://docs.openhands.dev/sdk/guides/observability).
-
 ### SWE-agent and mini-swe-agent
+
+Over OTel: **no OTel**. Both call models through LiteLLM, so B works; their trajectories (C) also
+pack well.
 
 **B.** In SWE-agent's config YAML:
 
@@ -470,17 +570,19 @@ Docs: [keys and api_base](https://swe-agent.com/latest/installation/keys/),
 
 ### Crush
 
+Over OTel: **no OTel** (pseudonymous metrics only, without prompts).
+
 **B.** In `~/.config/crush/crushrc`. Use `--type messages` for an Anthropic-compatible provider.
 
 ```bash
 provider add logpak --type completions --base-url "http://127.0.0.1:8081/v1" --api-key "$OPENAI_API_KEY"
 ```
 
-Crush has no OTel.
-
 Docs: [README](https://github.com/charmbracelet/crush).
 
 ### Pi
+
+Over OTel: **no OTel**.
 
 **B.** In `~/.pi/agent/models.json`. Setting only `baseUrl` keeps the provider's models and auth.
 
@@ -494,6 +596,8 @@ Docs: [models.md](https://unpkg.com/@earendil-works/pi-coding-agent@1.5.2/docs/m
 
 ### Zed
 
+Over OTel: **no OTel**.
+
 **B.** Use `api_url` under `language_models` in Zed's settings: `http://127.0.0.1:8081/v1` for
 `openai_compatible`, `http://127.0.0.1:8080` for `anthropic_compatible`. Copy the exact nesting from
 the docs *(unverified)*. Zed-hosted models cannot be redirected.
@@ -504,26 +608,9 @@ Docs: [API access](https://zed.dev/docs/ai/use-api-access).
 
 ## SDKs and agent frameworks
 
-### Any provider SDK: change the base URL (B)
+### Export to the collector
 
-This records the exact request bodies, whatever framework sits on top.
-
-| SDK | Code | Env var |
-|---|---|---|
-| OpenAI Python / JS | `OpenAI(base_url="http://127.0.0.1:8081/v1")` / `new OpenAI({ baseURL: ... })` | `OPENAI_BASE_URL` |
-| Anthropic Python / TS | `Anthropic(base_url="http://127.0.0.1:8080")` / `new Anthropic({ baseURL: ... })` | `ANTHROPIC_BASE_URL` |
-| google-genai Python | `genai.Client(http_options=types.HttpOptions(base_url="http://127.0.0.1:8082"))` | `GOOGLE_GEMINI_BASE_URL` |
-| LangChain | `ChatOpenAI(base_url=".../v1")`, `ChatAnthropic(base_url="http://127.0.0.1:8080")` | `OPENAI_API_BASE`, `ANTHROPIC_API_URL` |
-| LlamaIndex | `OpenAI(api_base=".../v1")`, `Anthropic(base_url="http://127.0.0.1:8080")` | `OPENAI_API_BASE` |
-| Vercel AI SDK | `createOpenAI({ baseURL: ".../v1" })`, `createAnthropic({ baseURL: "http://127.0.0.1:8080/v1" })` | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` |
-| LiteLLM SDK | `completion(..., api_base="http://127.0.0.1:8081/v1")`; Anthropic: `api_base="http://127.0.0.1:8080"` | `OPENAI_BASE_URL`, `ANTHROPIC_API_BASE` |
-
-The Vercel AI SDK's Anthropic provider wants `/v1` in its base URL, and the Anthropic SDK does not.
-Don't share one `ANTHROPIC_BASE_URL` between them.
-
-### Collector (A) for SDKs and frameworks
-
-The rest of this section exports OTLP to `collect`. Set the endpoint once:
+Every framework below exports OTLP to `collect` (A). Set the endpoint once:
 
 ```bash
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
@@ -880,8 +967,26 @@ OpenInference instrumentors, which capture content by default.
 
 ### LangChain4j, Genkit
 
-Neither has a documented generic OTLP export that includes prompts. Set the model client's base
-URL (B).
+Neither has a documented generic OTLP export that includes prompts. Point the model client at a
+recording server, [below](#no-content-over-otel-change-the-provider-sdks-base-url-b).
+
+### No content over OTel? Change the provider SDK's base URL (B)
+
+For LangChain4j, Genkit, OpenAI Agents SDK (JS), or wherever the exact request bytes matter, point
+the provider SDK underneath at a recording server. This works whatever framework sits on top.
+
+| SDK | Code | Env var |
+|---|---|---|
+| OpenAI Python / JS | `OpenAI(base_url="http://127.0.0.1:8081/v1")` / `new OpenAI({ baseURL: ... })` | `OPENAI_BASE_URL` |
+| Anthropic Python / TS | `Anthropic(base_url="http://127.0.0.1:8080")` / `new Anthropic({ baseURL: ... })` | `ANTHROPIC_BASE_URL` |
+| google-genai Python | `genai.Client(http_options=types.HttpOptions(base_url="http://127.0.0.1:8082"))` | `GOOGLE_GEMINI_BASE_URL` |
+| LangChain | `ChatOpenAI(base_url=".../v1")`, `ChatAnthropic(base_url="http://127.0.0.1:8080")` | `OPENAI_API_BASE`, `ANTHROPIC_API_URL` |
+| LlamaIndex | `OpenAI(api_base=".../v1")`, `Anthropic(base_url="http://127.0.0.1:8080")` | `OPENAI_API_BASE` |
+| Vercel AI SDK | `createOpenAI({ baseURL: ".../v1" })`, `createAnthropic({ baseURL: "http://127.0.0.1:8080/v1" })` | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` |
+| LiteLLM SDK | `completion(..., api_base="http://127.0.0.1:8081/v1")`; Anthropic: `api_base="http://127.0.0.1:8080"` | `OPENAI_BASE_URL`, `ANTHROPIC_API_BASE` |
+
+The Vercel AI SDK's Anthropic provider wants `/v1` in its base URL, and the Anthropic SDK does not.
+Don't share one `ANTHROPIC_BASE_URL` between them.
 
 ---
 

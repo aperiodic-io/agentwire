@@ -57,6 +57,10 @@ logpak log unpack spans.awl | cmp - exported-spans.jsonl    # silent: every byte
 
 ## Five ways to use it
 
+OpenTelemetry is the main interface: if your tool already exports OTLP, Logpak is one endpoint
+variable away, and `--forward` keeps your current backend fed. The recording proxy is for tools
+whose export leaves the prompts out.
+
 | You have | Use | What changes in your stack |
 |---|---|---|
 | An OpenTelemetry exporter feeding Langfuse, a collector or any OTLP backend | [`logpak collect --forward`](#1-in-front-of-your-tracing-backend) | one endpoint variable |
@@ -68,10 +72,11 @@ logpak log unpack spans.awl | cmp - exported-spans.jsonl    # silent: every byte
 All five write the same AWL1 files, and [`logpak log`](#reading-it-back) and both libraries read
 them all.
 
-**[docs/integrations.md](docs/integrations.md) has step-by-step setups for each tool.** It covers
-20 coding agents (Claude Code, Codex, Gemini CLI, Copilot, Goose, OpenCode, Aider, Cline, …), 25
-SDKs and agent frameworks, 15 gateways, AWS Bedrock, Azure and Vertex AI logs, 6 telemetry
-pipelines, 20 observability backends to forward to, and self-hosted inference servers.
+**[docs/integrations.md](docs/integrations.md) has step-by-step setups for each tool**, OTel first
+wherever the tool's export carries the messages. It covers 20 coding agents (Claude Code, Codex,
+Gemini CLI, Copilot, Goose, OpenCode, Aider, Cline, …), 25 SDKs and agent frameworks, 15 gateways,
+AWS Bedrock, Azure and Vertex AI logs, 6 telemetry pipelines, 20 observability backends to forward
+to, and self-hosted inference servers.
 
 ### 1. In front of your tracing backend
 
