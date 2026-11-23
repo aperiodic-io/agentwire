@@ -697,7 +697,7 @@ async fn recording_holds_batches(w: &mut Proxies) {
     assert_eq!(listed.lines().count(), w.sent.len(), "{listed}");
     for (i, line) in listed.lines().enumerate() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        assert_eq!(fields[4..], ["POST", "/v1/traces", "application/json", "-"], "{line}");
+        assert_eq!(fields[4..8], ["POST", "/v1/traces", "application/json", "-"], "{line}");
         assert!(log(&["get", &file, &i.to_string()], b"").await == w.sent[i].body, "batch {i}");
     }
 }
@@ -805,7 +805,7 @@ async fn recording_holds_grpc(w: &mut Proxies) {
     assert_eq!(listed.lines().count(), w.grpc.len(), "{listed}");
     for (i, line) in listed.lines().enumerate() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        assert_eq!(fields[4..], ["POST", TRACE_EXPORT, "application/grpc", "-"], "{line}");
+        assert_eq!(fields[4..8], ["POST", TRACE_EXPORT, "application/grpc", "-"], "{line}");
         assert!(log(&["get", &file, &i.to_string()], b"").await == w.grpc[i].0, "export {i}");
     }
 }
@@ -892,6 +892,135 @@ async fn upstream_received_lz4(w: &mut Proxies) {
     for ((headers, body), sent) in recorded.iter().zip(&w.gzipped) {
         assert!(body == sent);
         assert_eq!(headers["content-encoding"], "lz4");
+    }
+}
+
+/// `logpak log show <args> <the recording>`, one JSON value per line.
+async fn show(w: &Proxies, args: &[&str]) -> Vec<serde_json::Value> {
+    let file = match &w.packed {
+        Some(f) => f.to_str().unwrap().to_owned(),
+        None => recording(w),
+    };
+    let mut args = [&["show"], args].concat();
+    args.push(&file);
+    let out = String::from_utf8(log(&args, b"").await).unwrap();
+    out.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}"))).collect()
+}
+
+#[then("each record's meta lists the trace ids of its batch")]
+async fn meta_lists_traces(w: &mut Proxies) {
+    let listed = String::from_utf8(log(&["ls", &recording(w)], b"").await).unwrap();
+    assert_eq!(listed.lines().count(), w.sent.len());
+    for line in listed.lines() {
+        let ids = line.split_whitespace().nth(8).unwrap_or_else(|| panic!("no trace ids: {line}"));
+        assert_eq!(ids, format!("{:032x},{:032x},{:032x}", 0, 1, 2), "{line}");
+    }
+}
+
+#[then(expr = "`logpak log show --trace` of trace {int} gives its {int} spans in order, each with its prompt")]
+async fn show_trace(w: &mut Proxies, trace: usize, n: usize) {
+    let id = format!("{trace:032x}");
+    let rows = show(w, &["--trace", &id]).await;
+    assert_eq!(rows.len(), n, "{rows:?}");
+    for (turn, row) in (1..).zip(&rows) {
+        assert_eq!(row["trace_id"], id.as_str());
+        let prompt = String::from_utf8(conversation(&format!("t{trace}"), turn).to_vec()).unwrap();
+        assert_eq!(row["attributes"]["gen_ai.input.messages"], prompt.as_str(), "span {turn}");
+        assert_eq!(row["record"], turn - 1);
+    }
+}
+
+#[then("`logpak log show` gives each line back as the body of its record")]
+async fn show_raw(w: &mut Proxies) {
+    let rows = show(w, &[]).await;
+    assert_eq!(rows.len(), w.lines.len());
+    for (i, (row, line)) in rows.iter().zip(&w.lines).enumerate() {
+        assert_eq!(row["record"], i);
+        assert_eq!(row["body"], serde_json::from_slice::<serde_json::Value>(line).unwrap(), "line {i}");
+    }
+}
+
+#[then(expr = "`logpak log show --since {word}` gives {int} spans")]
+async fn show_since(w: &mut Proxies, since: String, n: usize) {
+    assert_eq!(show(w, &["--since", &since]).await.len(), n);
+}
+
+#[then(expr = "`logpak log show --until {word}` gives none")]
+async fn show_until(w: &mut Proxies, until: String) {
+    assert_eq!(show(w, &["--until", &until]).await, Vec::<serde_json::Value>::new());
+}
+
+/// Protobuf as OTLP encodes it: a field's key, then its value.
+fn pb(field: u64, wire: u64, value: &[u8]) -> Vec<u8> {
+    let mut out = varint((field << 3) | wire);
+    if wire == 2 {
+        out.extend(varint(value.len() as u64));
+    }
+    out.extend_from_slice(value);
+    out
+}
+
+fn varint(mut v: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    while v >= 0x80 {
+        out.push(v as u8 | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+    out
+}
+
+/// An ExportTraceServiceRequest: one span per trace, each with the whole prompt and its turn as an
+/// int attribute.
+fn trace_export(turn: usize, traces: usize) -> Bytes {
+    let spans: Vec<u8> = (0..traces)
+        .flat_map(|t| {
+            let kv = |key: &str, any: Vec<u8>| pb(9, 2, &[pb(1, 2, key.as_bytes()), pb(2, 2, &any)].concat());
+            let prompt = conversation(&format!("t{t}"), turn);
+            let span = [
+                pb(1, 2, &(t as u128).to_be_bytes()),
+                pb(2, 2, &(turn as u64).to_be_bytes()),
+                pb(5, 2, b"chat"),
+                pb(6, 0, &varint(3)),
+                pb(7, 1, &(1_700_000_000_000_000_000u64 + turn as u64).to_le_bytes()),
+                pb(8, 1, &(1_700_000_001_000_000_000u64 + turn as u64).to_le_bytes()),
+                kv("gen_ai.input.messages", pb(1, 2, &prompt)),
+                kv("gen_ai.usage.input_tokens", pb(3, 0, &varint(turn as u64))),
+            ]
+            .concat();
+            pb(2, 2, &span)
+        })
+        .collect();
+    let scope_spans = pb(2, 2, &[pb(1, 2, &pb(1, 2, b"agent")), spans].concat());
+    let resource = pb(1, 2, &pb(1, 2, &[pb(1, 2, b"service.name"), pb(2, 2, &pb(1, 2, b"swe"))].concat()));
+    Bytes::from(pb(1, 2, &[resource, scope_spans].concat()))
+}
+
+#[when(expr = "a gRPC exporter sends {int} protobuf trace exports of {int} traces each")]
+async fn grpc_protobuf_exports(w: &mut Proxies, n: usize, traces: usize) {
+    let to = w.server.as_ref().unwrap().addr;
+    for turn in 1..=n {
+        let message = trace_export(turn, traces);
+        let (status, body) = grpc_call(to, TRACE_EXPORT, grpc_frame(true, &gzip(&message)), true).await;
+        assert_eq!(status, Some(0));
+        w.grpc.push((message, status, body));
+    }
+}
+
+#[then(expr = "`logpak log show` gives {int} spans, each with its trace id, name, times and attributes")]
+async fn show_protobuf(w: &mut Proxies, n: usize) {
+    let rows = show(w, &[]).await;
+    assert_eq!(rows.len(), n, "{rows:?}");
+    for (i, row) in rows.iter().enumerate() {
+        let (turn, trace) = (i / 2 + 1, i % 2);
+        assert_eq!(row["signal"], "span");
+        assert_eq!(row["trace_id"], format!("{trace:032x}"));
+        assert_eq!(row["span_id"], format!("{turn:016x}"));
+        assert_eq!((&row["name"], &row["kind"]), (&"chat".into(), &3.into()));
+        assert_eq!(row["start"], 1_700_000_000_000_000_000u64 + turn as u64);
+        assert_eq!(row["end"], 1_700_000_001_000_000_000u64 + turn as u64);
+        assert_eq!(row["attributes"]["gen_ai.usage.input_tokens"], turn);
+        assert_eq!((&row["resource"]["service.name"], &row["scope"]), (&"swe".into(), &"agent".into()));
     }
 }
 
