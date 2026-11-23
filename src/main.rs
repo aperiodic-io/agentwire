@@ -1,8 +1,8 @@
-//! `logpak server`: the LPD1 layer as a reverse proxy in front of an HTTP API.
-//! `logpak client`: a local proxy that sends what a tool posts to it as LPD1 deltas.
-//! `logpak collect`: a log sink (OTLP/HTTP, a gateway's HTTP log plugin) that stores every
-//! request body in LPK1, and forwards it unchanged when given a backend.
-//! `logpak log`: pack, list and read LPK1 files (what `--record-dir` and `collect` write).
+//! `deltapack server`: the DPD1 layer as a reverse proxy in front of an HTTP API.
+//! `deltapack client`: a local proxy that sends what a tool posts to it as DPD1 deltas.
+//! `deltapack collect`: a log sink (OTLP/HTTP, a gateway's HTTP log plugin) that stores every
+//! request body in DPK1, and forwards it unchanged when given a backend.
+//! `deltapack log`: pack, list and read DPK1 files (what `--record-dir` and `collect` write).
 
 use std::convert::Infallible;
 use std::fs::File;
@@ -18,6 +18,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
+use deltapack::client::Client;
+use deltapack::log;
+use deltapack::server::{Config, Dpd1Layer, InnerBody, Stats};
+use deltapack::store::Store;
+use deltapack::{ERROR, KEPT};
 use http::header::{self, HeaderMap, HeaderName};
 use http::{Request, Response, StatusCode};
 use http_body_util::combinators::UnsyncBoxBody;
@@ -27,11 +32,6 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
-use logpak::client::Client;
-use logpak::log;
-use logpak::server::{Config, InnerBody, Lpd1Layer, Stats};
-use logpak::store::Store;
-use logpak::{ERROR, KEPT};
 use tokio::net::TcpListener;
 use tower_layer::Layer;
 
@@ -50,91 +50,91 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Mode {
-    /// Rebuild LPD1 requests and forward them, byte-exact, to the upstream API.
+    /// Rebuild DPD1 requests and forward them, byte-exact, to the upstream API.
     Server {
-        #[arg(long, env = "LOGPAK_LISTEN", default_value = "0.0.0.0:8080")]
+        #[arg(long, env = "DELTAPACK_LISTEN", default_value = "0.0.0.0:8080")]
         listen: SocketAddr,
         /// The API requests are forwarded to, e.g. https://api.anthropic.com
-        #[arg(long, env = "LOGPAK_UPSTREAM")]
+        #[arg(long, env = "DELTAPACK_UPSTREAM")]
         upstream: reqwest::Url,
         /// Bytes of kept bases held in memory, across all tenants.
-        #[arg(long, env = "LOGPAK_STORE_BYTES", default_value_t = 1 << 30)]
+        #[arg(long, env = "DELTAPACK_STORE_BYTES", default_value_t = 1 << 30)]
         store_bytes: usize,
         /// Seconds a base unused is kept.
-        #[arg(long, env = "LOGPAK_TTL_SECONDS", default_value_t = 1800)]
+        #[arg(long, env = "DELTAPACK_TTL_SECONDS", default_value_t = 1800)]
         ttl_seconds: u64,
         /// The largest body kept or rebuilt.
-        #[arg(long, env = "LOGPAK_MAX_BODY", default_value_t = 64 << 20)]
+        #[arg(long, env = "DELTAPACK_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
         /// The headers that identify a tenant (repeat the flag); bases are never shared across them.
-        #[arg(long = "scope-header", env = "LOGPAK_SCOPE_HEADERS", value_delimiter = ',', default_values_t = [String::from("authorization"), String::from("x-api-key")])]
+        #[arg(long = "scope-header", env = "DELTAPACK_SCOPE_HEADERS", value_delimiter = ',', default_values_t = [String::from("authorization"), String::from("x-api-key")])]
         scope_headers: Vec<String>,
         /// Serve Prometheus metrics at http://<addr>/metrics.
-        #[arg(long, env = "LOGPAK_METRICS")]
+        #[arg(long, env = "DELTAPACK_METRICS")]
         metrics: Option<SocketAddr>,
         /// Store every request body forwarded, with its time, method and path (never its headers),
-        /// in a new LPK1 file in this directory; read it with `logpak log`.
-        #[arg(long, env = "LOGPAK_RECORD_DIR")]
+        /// in a new DPK1 file in this directory; read it with `deltapack log`.
+        #[arg(long, env = "DELTAPACK_RECORD_DIR")]
         record_dir: Option<PathBuf>,
         /// Records a new one may delta against: about one per conversation in flight.
-        #[arg(long, env = "LOGPAK_RECORD_WINDOW", default_value_t = 16)]
+        #[arg(long, env = "DELTAPACK_RECORD_WINDOW", default_value_t = 16)]
         record_window: usize,
-        /// Start a new LPK1 file once one reaches this size; every file reads on its own.
-        #[arg(long, env = "LOGPAK_ROTATE_BYTES", default_value_t = 1 << 30)]
+        /// Start a new DPK1 file once one reaches this size; every file reads on its own.
+        #[arg(long, env = "DELTAPACK_ROTATE_BYTES", default_value_t = 1 << 30)]
         rotate_bytes: u64,
     },
     /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
-    /// LPK1, decoded (gzip, deflate, br, zstd, snappy); forward each request as received when given a backend. Also accepts
-    /// LPD1 deltas from `logpak client`.
+    /// DPK1, decoded (gzip, deflate, br, zstd, snappy); forward each request as received when given a backend. Also accepts
+    /// DPD1 deltas from `deltapack client`.
     Collect {
         /// Where to listen (repeat, or comma-separate); each address takes OTLP/HTTP and OTLP/gRPC.
         /// Loopback by default: anyone who can reach it can fill the disk. In a container, give
         /// 0.0.0.0:4318,0.0.0.0:4317 and put it on a private network.
-        #[arg(long, env = "LOGPAK_LISTEN", value_delimiter = ',', default_value = "127.0.0.1:4318,127.0.0.1:4317")]
+        #[arg(long, env = "DELTAPACK_LISTEN", value_delimiter = ',', default_value = "127.0.0.1:4318,127.0.0.1:4317")]
         listen: Vec<SocketAddr>,
-        /// The new LPK1 file goes in this directory; read it with `logpak log`.
-        #[arg(long, env = "LOGPAK_RECORD_DIR")]
+        /// The new DPK1 file goes in this directory; read it with `deltapack log`.
+        #[arg(long, env = "DELTAPACK_RECORD_DIR")]
         record_dir: PathBuf,
         /// The backend each request is forwarded to, as received, e.g.
         /// https://cloud.langfuse.com/api/public/otel. Without one, each request is answered 200.
-        #[arg(long, env = "LOGPAK_FORWARD")]
+        #[arg(long, env = "DELTAPACK_FORWARD")]
         forward: Option<reqwest::Url>,
         /// Records a new one may delta against: about one per trace or exporter interleaved.
-        #[arg(long, env = "LOGPAK_RECORD_WINDOW", default_value_t = 16)]
+        #[arg(long, env = "DELTAPACK_RECORD_WINDOW", default_value_t = 16)]
         record_window: usize,
-        /// Start a new LPK1 file once one reaches this size; every file reads on its own.
-        #[arg(long, env = "LOGPAK_ROTATE_BYTES", default_value_t = 1 << 30)]
+        /// Start a new DPK1 file once one reaches this size; every file reads on its own.
+        #[arg(long, env = "DELTAPACK_ROTATE_BYTES", default_value_t = 1 << 30)]
         rotate_bytes: u64,
         /// The largest body stored, after decoding.
-        #[arg(long, env = "LOGPAK_MAX_BODY", default_value_t = 64 << 20)]
+        #[arg(long, env = "DELTAPACK_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
-        #[arg(long, env = "LOGPAK_METRICS")]
+        #[arg(long, env = "DELTAPACK_METRICS")]
         metrics: Option<SocketAddr>,
     },
-    /// Accept plain requests from a local tool and send them to a `logpak server` as deltas.
+    /// Accept plain requests from a local tool and send them to a `deltapack server` as deltas.
     Client {
-        #[arg(long, env = "LOGPAK_LISTEN", default_value = "127.0.0.1:8787")]
+        #[arg(long, env = "DELTAPACK_LISTEN", default_value = "127.0.0.1:8787")]
         listen: SocketAddr,
-        /// The `logpak server` (or an LPD1-aware API) to send to.
-        #[arg(long, env = "LOGPAK_UPSTREAM")]
+        /// The `deltapack server` (or an DPD1-aware API) to send to.
+        #[arg(long, env = "DELTAPACK_UPSTREAM")]
         upstream: reqwest::Url,
         /// Bodies remembered as bases: about one per conversation in flight.
-        #[arg(long, env = "LOGPAK_BASES", default_value_t = 8)]
+        #[arg(long, env = "DELTAPACK_BASES", default_value_t = 8)]
         bases: usize,
         /// The largest request body accepted from the tool.
-        #[arg(long, env = "LOGPAK_MAX_BODY", default_value_t = 64 << 20)]
+        #[arg(long, env = "DELTAPACK_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
-        #[arg(long, env = "LOGPAK_METRICS")]
+        #[arg(long, env = "DELTAPACK_METRICS")]
         metrics: Option<SocketAddr>,
     },
-    /// Read and write LPK1 files: bodies stored as deltas against earlier ones.
+    /// Read and write DPK1 files: bodies stored as deltas against earlier ones.
     #[command(subcommand)]
     Log(LogCmd),
 }
 
 #[derive(Subcommand)]
 enum LogCmd {
-    /// Store each line of stdin (JSON lines: spans, requests) as a record of a new LPK1 file.
+    /// Store each line of stdin (JSON lines: spans, requests) as a record of a new DPK1 file.
     Pack {
         file: PathBuf,
         /// Records a new one may delta against: about one per trace or conversation interleaved.
@@ -182,7 +182,9 @@ async fn main() -> Result<(), BoxError> {
         return run_log(cmd);
     }
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "logpak=info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "deltapack=info".into()),
+        )
         .init();
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -242,7 +244,7 @@ async fn main() -> Result<(), BoxError> {
     }
 }
 
-/// The LPD1 layer in front of `forward`, until shutdown.
+/// The DPD1 layer in front of `forward`, until shutdown.
 async fn run_server(
     listen: Vec<SocketAddr>,
     store: Store,
@@ -251,7 +253,7 @@ async fn run_server(
     forward: Forward,
 ) -> Result<(), BoxError> {
     let store = Arc::new(store);
-    let layer = Lpd1Layer::new(store.clone(), config);
+    let layer = Dpd1Layer::new(store.clone(), config);
     if let Some(addr) = metrics {
         let (stats, store, record) = (layer.stats().clone(), store.clone(), forward.record.clone());
         serve_metrics(addr, move || {
@@ -317,7 +319,7 @@ fn lock(r: &Recorder) -> std::sync::MutexGuard<'_, Recording> {
     r.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// LPK1 files in `dir`, named by when each was opened, so a restart never appends to or replaces
+/// DPK1 files in `dir`, named by when each was opened, so a restart never appends to or replaces
 /// one, and in order by name. Each is self-contained: a new one starts without bases.
 struct Recording {
     dir: PathBuf,
@@ -352,11 +354,11 @@ impl Recording {
     }
 
     fn create(dir: &std::path::Path, window: usize, seq: u64) -> io::Result<(PathBuf, log::Writer<BufWriter<File>>)> {
-        let path = dir.join(format!("{}-{}-{seq:06}.lpk", unix_ms(), std::process::id()));
+        let path = dir.join(format!("{}-{}-{seq:06}.dpk", unix_ms(), std::process::id()));
         let file = File::options().write(true).create_new(true).open(&path)?;
         tracing::info!(path = %path.display(), "recording");
         let mut w = log::Writer::new(BufWriter::new(file), window)?;
-        w.flush()?; // a valid, empty LPK1 file before the first record
+        w.flush()?; // a valid, empty DPK1 file before the first record
         Ok((path, w))
     }
 
@@ -390,10 +392,10 @@ impl Recording {
     fn metrics(&self) -> String {
         let on_disk = self.closed + std::fs::metadata(&self.path).map_or(0, |m| m.len());
         format!(
-            "# TYPE logpak_recorded_total counter\nlogpak_recorded_total {}\n\
-             # TYPE logpak_recorded_body_bytes_total counter\nlogpak_recorded_body_bytes_total {}\n\
-             # TYPE logpak_recorded_file_bytes_total counter\nlogpak_recorded_file_bytes_total {on_disk}\n\
-             # TYPE logpak_record_failures_total counter\nlogpak_record_failures_total {}\n",
+            "# TYPE deltapack_recorded_total counter\ndeltapack_recorded_total {}\n\
+             # TYPE deltapack_recorded_body_bytes_total counter\ndeltapack_recorded_body_bytes_total {}\n\
+             # TYPE deltapack_recorded_file_bytes_total counter\ndeltapack_recorded_file_bytes_total {on_disk}\n\
+             # TYPE deltapack_record_failures_total counter\ndeltapack_record_failures_total {}\n",
             self.recorded, self.body_bytes, self.failures,
         )
     }
@@ -403,7 +405,7 @@ fn unix_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())
 }
 
-/// The inner service of `logpak server` and `collect`: records the request (if recording), then
+/// The inner service of `deltapack server` and `collect`: records the request (if recording), then
 /// sends it on to the upstream, or answers it (a collector without a backend).
 #[derive(Clone)]
 struct Forward {
@@ -469,7 +471,7 @@ async fn store(record: &Recorder, parts: &http::request::Parts, encoding: &str, 
     let append = move || {
         // an OTLP batch's trace ids, so `log show --trace` skips the batches of other traces
         if let Some(signal) = signal {
-            // a body still in a coding logpak cannot decode is not read: its ids are unknown
+            // a body still in a coding deltapack cannot decode is not read: its ids are unknown
             let ids = if encoding == "-" { show::trace_ids(signal, &body) } else { "?".into() };
             meta = format!("{meta} {ids}");
         }
@@ -726,7 +728,7 @@ fn bounded(decoder: impl Read, max: usize) -> Result<Bytes, StatusCode> {
 }
 
 /// Zstandard frames, one or several, whether or not they state their size, in a window no larger
-/// than LPD1's own (2^27).
+/// than DPD1's own (2^27).
 fn unzstd(data: &[u8], max: usize) -> Result<Bytes, StatusCode> {
     let mut dctx = zstd_safe::DCtx::create();
     dctx.set_parameter(zstd_safe::DParameter::WindowLogMax(27)).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -794,7 +796,7 @@ impl ClientProxy {
             Err(_) => return status(StatusCode::PAYLOAD_TOO_LARGE),
         };
         // a delta of compressed bytes finds nothing: decode first. A body in a coding not known here goes as is
-        // (`lpd1` must be its only content coding)
+        // (`dpd1` must be its only content coding)
         let body = match decoded(&parts.headers, body, self.max_body) {
             Ok((body, encoding)) if encoding == "-" => {
                 parts.headers.remove(header::CONTENT_ENCODING);
@@ -843,11 +845,11 @@ impl ClientStats {
     fn render(&self) -> String {
         let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
         format!(
-            "# TYPE logpak_client_requests_total counter\nlogpak_client_requests_total {}\n\
-             # TYPE logpak_client_deltas_total counter\nlogpak_client_deltas_total {}\n\
-             # TYPE logpak_client_resent_total counter\nlogpak_client_resent_total {}\n\
-             # TYPE logpak_client_body_bytes_total counter\nlogpak_client_body_bytes_total {}\n\
-             # TYPE logpak_client_wire_bytes_total counter\nlogpak_client_wire_bytes_total {}\n",
+            "# TYPE deltapack_client_requests_total counter\ndeltapack_client_requests_total {}\n\
+             # TYPE deltapack_client_deltas_total counter\ndeltapack_client_deltas_total {}\n\
+             # TYPE deltapack_client_resent_total counter\ndeltapack_client_resent_total {}\n\
+             # TYPE deltapack_client_body_bytes_total counter\ndeltapack_client_body_bytes_total {}\n\
+             # TYPE deltapack_client_wire_bytes_total counter\ndeltapack_client_wire_bytes_total {}\n",
             g(&self.requests),
             g(&self.deltas),
             g(&self.resent),
@@ -860,12 +862,12 @@ impl ClientStats {
 fn server_metrics(stats: &Stats, store: &Store) -> String {
     let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
     format!(
-        "# TYPE logpak_server_deltas_total counter\nlogpak_server_deltas_total {}\n\
-         # TYPE logpak_server_delta_bytes_total counter\nlogpak_server_delta_bytes_total {}\n\
-         # TYPE logpak_server_rebuilt_bytes_total counter\nlogpak_server_rebuilt_bytes_total {}\n\
-         # TYPE logpak_server_kept_total counter\nlogpak_server_kept_total {}\n\
-         # TYPE logpak_server_refused_total counter\nlogpak_server_refused_total {}\n\
-         # TYPE logpak_server_store_bytes gauge\nlogpak_server_store_bytes {}\n",
+        "# TYPE deltapack_server_deltas_total counter\ndeltapack_server_deltas_total {}\n\
+         # TYPE deltapack_server_delta_bytes_total counter\ndeltapack_server_delta_bytes_total {}\n\
+         # TYPE deltapack_server_rebuilt_bytes_total counter\ndeltapack_server_rebuilt_bytes_total {}\n\
+         # TYPE deltapack_server_kept_total counter\ndeltapack_server_kept_total {}\n\
+         # TYPE deltapack_server_refused_total counter\ndeltapack_server_refused_total {}\n\
+         # TYPE deltapack_server_store_bytes gauge\ndeltapack_server_store_bytes {}\n",
         g(&stats.deltas),
         g(&stats.delta_bytes),
         g(&stats.rebuilt_bytes),
@@ -1075,7 +1077,7 @@ mod tests {
 
     #[test]
     fn a_failed_write_moves_recording_to_a_new_file_and_loses_nothing_after_it() {
-        let dir = std::env::temp_dir().join(format!("logpak-recording-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("deltapack-recording-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut r = Recording::open(dir.clone(), 4, 1 << 30).unwrap();
         r.append(b"m", Bytes::from_static(b"before")).unwrap();
@@ -1095,13 +1097,13 @@ mod tests {
             })
             .collect();
         assert_eq!(bodies, [&b"before"[..], b"after"]);
-        assert!(r.metrics().contains("logpak_record_failures_total 1\n"));
+        assert!(r.metrics().contains("deltapack_record_failures_total 1\n"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn files_rotated_within_a_millisecond_get_their_own_names_in_order() {
-        let dir = std::env::temp_dir().join(format!("logpak-rotation-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("deltapack-rotation-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut r = Recording::open(dir.clone(), 1, 1).unwrap(); // every record fills its file
         for body in ["a", "b", "c"] {

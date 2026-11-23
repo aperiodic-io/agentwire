@@ -1,20 +1,20 @@
-# Logpak (Python)
+# Deltapack (Python)
 
-LPK1 files from Python: LLM request logs and trace spans stored as deltas against earlier records.
+DPK1 files from Python: LLM request logs and trace spans stored as deltas against earlier records.
 A gateway's or a tracer's log re-sends the whole prompt in every record, so a record costs about
 its new bytes. Every body is checked by SHA-256 when it is read back. The format is in
-[SPEC.md §7](https://github.com/aperiodic-io/logpak/blob/main/SPEC.md#7-lpk1-a-log-of-bodies-stored-as-deltas);
-files are interchangeable with the `logpak` CLI (`logpak log ls | get | unpack`) and with
-what `logpak collect` records.
+[SPEC.md §7](https://github.com/aperiodic-io/deltapack/blob/main/SPEC.md#7-dpk1-a-log-of-bodies-stored-as-deltas);
+files are interchangeable with the `deltapack` CLI (`deltapack log ls | get | unpack`) and with
+what `deltapack collect` records.
 
 ```python
-import logpak
+import deltapack
 
-with logpak.Writer("spans.lpk", window=16) as w:   # a new file; never replaces one
+with deltapack.Writer("spans.dpk", window=16) as w:   # a new file; never replaces one
     for span in exported_spans:                       # bytes: JSON, protobuf, anything
         w.append(span, meta=b"trace=ab12")
 
-r = logpak.Reader("spans.lpk")
+r = deltapack.Reader("spans.dpk")
 r[17]                        # one record's body, rebuilt and checked
 r.meta(17), len(r), r.truncated
 for meta, body in r:         # every record in order, each rebuilt once

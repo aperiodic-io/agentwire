@@ -1,11 +1,11 @@
 [package]
-name = "logpak"
+name = "deltapack"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
-description = "A compression codec for LLM logs and traces: each record stored (LPK1) or sent (LPD1) as a delta against an earlier one."
-repository = "https://github.com/aperiodic-io/logpak"
+description = "A compression codec for LLM logs and traces: each record stored (DPK1) or sent (DPD1) as a delta against an earlier one."
+repository = "https://github.com/aperiodic-io/deltapack"
 readme = "README.md"
 keywords = ["compression", "llm", "logging", "delta", "zstd"]
 categories = ["compression", "network-programming", "web-programming::http-server"]
@@ -13,9 +13,9 @@ include = ["/src", "/README.md", "/SPEC.md", "/LICENSE"]
 
 [features]
 default = ["server"]
-# the tower layer that decodes LPD1 requests (src/server.rs)
+# the tower layer that decodes DPD1 requests (src/server.rs)
 server = ["dep:http", "dep:http-body", "dep:http-body-util", "dep:tower-layer", "dep:tower-service"]
-# the `logpak` binary: the server layer as a reverse proxy, and a local client proxy
+# the `deltapack` binary: the server layer as a reverse proxy, and a local client proxy
 proxy = [
   "server",
   "dep:clap",
@@ -53,7 +53,7 @@ futures-util = { version = "0.3", default-features = false, optional = true }
 hyper = { version = "1", features = ["server", "http1", "http2"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful", "service"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"], optional = true }
-# `logpak log show`: OTLP JSON read, and every record written, as JSON
+# `deltapack log show`: OTLP JSON read, and every record written, as JSON
 serde_json = { version = "1", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"], optional = true }
 tracing = { version = "0.1", optional = true }
@@ -77,7 +77,7 @@ tower-layer = "0.3"
 tower-service = "0.3"
 
 [[bin]]
-name = "logpak"
+name = "deltapack"
 required-features = ["proxy"]
 
 [[test]]

@@ -2,7 +2,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use logpak::codec;
+use deltapack::codec;
 
 fuzz_target!(|input: (&[u8], &[u8])| {
     let (base, target) = input;

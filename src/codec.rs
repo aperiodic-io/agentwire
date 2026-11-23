@@ -1,7 +1,7 @@
-//! The LPD1 delta body (SPEC.md §3): a request body sent as an edit of a body the server already has.
+//! The DPD1 delta body (SPEC.md §3): a request body sent as an edit of a body the server already has.
 //!
 //! ```text
-//! "LPD1" | version: u8 = 1 | base: sha256 | target: sha256 | prefix | suffix | target_len | zstd frame
+//! "DPD1" | version: u8 = 1 | base: sha256 | target: sha256 | prefix | suffix | target_len | zstd frame
 //! ```
 //!
 //! `prefix`, `suffix` and `target_len` are canonical ULEB128. The target is the base's first `prefix`
@@ -15,7 +15,7 @@ use zstd_safe::{CCtx, CParameter, DCtx, DParameter};
 /// SHA-256 of a body: names a base, and checks the rebuilt target.
 pub type Hash = [u8; 32];
 
-const MAGIC: &[u8; 4] = b"LPD1";
+const MAGIC: &[u8; 4] = b"DPD1";
 const VERSION: u8 = 1;
 const HEADER_LEN: usize = 4 + 1 + 32 + 32;
 const LEVEL: i32 = 3;
@@ -26,7 +26,7 @@ pub fn hash(body: &[u8]) -> Hash {
     Sha256::digest(body).into()
 }
 
-/// Rejected delta bodies. [`Error::code`] is the `lpd1-error` token the server answers with.
+/// Rejected delta bodies. [`Error::code`] is the `dpd1-error` token the server answers with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Malformed(&'static str),
@@ -51,8 +51,8 @@ impl Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Malformed(why) => write!(f, "malformed LPD1 body: {why}"),
-            Error::UnsupportedVersion(v) => write!(f, "unsupported LPD1 version {v}"),
+            Error::Malformed(why) => write!(f, "malformed DPD1 body: {why}"),
+            Error::UnsupportedVersion(v) => write!(f, "unsupported DPD1 version {v}"),
             Error::UnknownBase => f.write_str("the base is not known here"),
             Error::TooLarge => f.write_str("the body exceeds the size limit"),
             Error::Corrupt => f.write_str("the delta does not rebuild the body it names"),
@@ -120,7 +120,7 @@ pub fn parse(delta: &[u8], max_len: usize) -> Result<(Header, &[u8]), Error> {
         return Err(Error::Malformed("truncated header"));
     }
     if &delta[..4] != MAGIC {
-        return Err(Error::Malformed("not an LPD1 body"));
+        return Err(Error::Malformed("not an DPD1 body"));
     }
     if delta[4] != VERSION {
         return Err(Error::UnsupportedVersion(delta[4]));
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn the_wire_layout_is_the_spec() {
         let d = delta(b"hello world", b"hello brave world");
-        assert_eq!(&d[..4], b"LPD1");
+        assert_eq!(&d[..4], b"DPD1");
         assert_eq!(d[4], 1);
         assert_eq!(d[5..37], hash(b"hello world"));
         assert_eq!(d[37..69], hash(b"hello brave world"));
@@ -438,8 +438,8 @@ mod tests {
 
     #[test]
     fn errors_say_what_went_wrong() {
-        assert_eq!(Error::Malformed("truncated varint").to_string(), "malformed LPD1 body: truncated varint");
-        assert_eq!(Error::UnsupportedVersion(7).to_string(), "unsupported LPD1 version 7");
+        assert_eq!(Error::Malformed("truncated varint").to_string(), "malformed DPD1 body: truncated varint");
+        assert_eq!(Error::UnsupportedVersion(7).to_string(), "unsupported DPD1 version 7");
         assert_eq!(Error::UnknownBase.to_string(), "the base is not known here");
         assert_eq!(Error::TooLarge.to_string(), "the body exceeds the size limit");
         assert_eq!(Error::Corrupt.to_string(), "the delta does not rebuild the body it names");
@@ -483,13 +483,13 @@ mod tests {
         }
         assert_eq!(parse(&d[..69], 1 << 20).unwrap_err(), Error::Malformed("truncated varint"));
         assert_eq!(
-            parse(b"LPD1\x07", 1 << 20).unwrap_err(),
+            parse(b"DPD1\x07", 1 << 20).unwrap_err(),
             Error::UnsupportedVersion(7),
             "the version, before the length"
         );
         let mut bad = d.clone();
         bad[0] = b'X';
-        assert_eq!(parse(&bad, 1 << 20).unwrap_err(), Error::Malformed("not an LPD1 body"));
+        assert_eq!(parse(&bad, 1 << 20).unwrap_err(), Error::Malformed("not an DPD1 body"));
         let mut bad = d.clone();
         bad[4] = 2;
         assert_eq!(parse(&bad, 1 << 20).unwrap_err(), Error::UnsupportedVersion(2));

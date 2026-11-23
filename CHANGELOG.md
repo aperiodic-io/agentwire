@@ -1,22 +1,28 @@
 # Changelog
 
-This project follows [Semantic Versioning](https://semver.org). The LPD1 wire format has its own
+This project follows [Semantic Versioning](https://semver.org). The DPD1 wire format has its own
 version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
-- `logpak log show` writes records as JSON lines: one per span or log record of an OTLP export
+- Renamed from Logpak to **Deltapack**, before any release: the crate, binary, Python module and
+  image are `deltapack` (`ghcr.io/aperiodic-io/deltapack`), environment variables `DELTAPACK_*`,
+  metrics `deltapack_*`. The formats take the new prefixes: the file format LPK1 is **DPK1** (files
+  `.dpk`) and the wire format LPD1 is **DPD1** (headers `dpd1-keep`, `dpd1-kept`, `dpd1-error`,
+  `content-encoding: dpd1`). Nothing else in either layout changed; files and clients from before
+  are not read.
+- `deltapack log show` writes records as JSON lines: one per span or log record of an OTLP export
   (JSON or protobuf), attributes as plain JSON, any other record whole; filtered by `--trace`,
   `--since` and `--until`. `collect` and `server --record-dir` add the trace ids of each OTLP trace
   or log batch to its record's meta, as a sixth field (`-`: none; `?`: still encoded, not OTLP, or
   more than 64), so `--trace` skips the batches of other traces. Files written before this change are read, their bodies decoded to
   find a trace.
-- Renamed from agentwire to **Logpak**. The crate, binary, Python module and Docker image are
-  `logpak` (`ghcr.io/aperiodic-io/logpak`); environment variables are `LOGPAK_*` (were
-  `AGENTWIRE_*`) and metrics `logpak_*` (were `agentwire_*`).
-- The wire and file formats take Logpak's prefixes: AWD1 is now **LPD1** (magic `LPD1`, headers
-  `lpd1-keep`, `lpd1-kept`, `lpd1-error`, `content-encoding: lpd1`), and AWL1 is now **LPK1** (magic
-  `LPK1`, files `.lpk`). Nothing else in either layout changed. Files and clients from before this
+- Renamed from agentwire to **Deltapack**. The crate, binary, Python module and Docker image are
+  `deltapack` (`ghcr.io/aperiodic-io/deltapack`); environment variables are `DELTAPACK_*` (were
+  `AGENTWIRE_*`) and metrics `deltapack_*` (were `agentwire_*`).
+- The wire and file formats take Deltapack's prefixes: AWD1 is now **DPD1** (magic `DPD1`, headers
+  `dpd1-keep`, `dpd1-kept`, `dpd1-error`, `content-encoding: dpd1`), and AWL1 is now **DPK1** (magic
+  `DPK1`, files `.dpk`). Nothing else in either layout changed. Files and clients from before this
   change are not read: no release had shipped the old prefixes. A client and server on different
   sides of the change fall back to plain requests, since neither confirms the other's headers.
 - `docs/research` is removed: the report on the prototype formats (AWC1, AWF1, AWJ1 and the Python
@@ -24,27 +30,27 @@ version byte (SPEC.md); a crate release that changes it says so here.
 - `collect`, `server --record-dir` and `client` decode deflate, brotli, zstd and snappy request
   bodies, as well as gzip, and a list of codings in order; `collect` does the same for gRPC
   messages by their `grpc-encoding`. A body in another coding is still stored or sent as is.
-- Python bindings for LPK1 (`python/`, built with maturin, one abi3 wheel for CPython 3.9+):
-  `logpak.Writer` and `logpak.Reader`, reading and writing the same files as the CLI and
+- Python bindings for DPK1 (`python/`, built with maturin, one abi3 wheel for CPython 3.9+):
+  `deltapack.Writer` and `deltapack.Reader`, reading and writing the same files as the CLI and
   `collect`.
-- `logpak::log::Records`: a `Reader` iterates its records in order (`for (record, body) in
+- `deltapack::log::Records`: a `Reader` iterates its records in order (`for (record, body) in
   reader`), each body rebuilt once.
-- `logpak collect` takes OTLP over gRPC (HTTP/2 without TLS) on every address it listens on, by
+- `deltapack collect` takes OTLP over gRPC (HTTP/2 without TLS) on every address it listens on, by
   default 127.0.0.1:4318 and 127.0.0.1:4317. An Export call's message is stored decompressed; with
   `--forward` it goes on as OTLP/HTTP protobuf, and the backend's answer comes back as the gRPC
   status.
-- LPK1 (SPEC.md §7): logs of LLM requests or trace spans stored as LPD1 deltas against earlier
-  records, every record checked by SHA-256. `logpak::log::{Writer, Reader}`.
-- `logpak server --record-dir`: stores each request it forwards (body, time, method, path).
-- `logpak log pack | unpack | get | ls`: JSON lines in and out of LPK1 files.
-- `logpak collect`: an OTLP/HTTP and HTTP-log sink that stores what is posted in LPK1, and
+- DPK1 (SPEC.md §7): logs of LLM requests or trace spans stored as DPD1 deltas against earlier
+  records, every record checked by SHA-256. `deltapack::log::{Writer, Reader}`.
+- `deltapack server --record-dir`: stores each request it forwards (body, time, method, path).
+- `deltapack log pack | unpack | get | ls`: JSON lines in and out of DPK1 files.
+- `deltapack collect`: an OTLP/HTTP and HTTP-log sink that stores what is posted in DPK1, and
   forwards it unchanged with `--forward`. Gzip bodies are stored decoded. It listens on loopback
   unless told otherwise.
 - Recording (`collect`, `server --record-dir`) starts a new, self-contained file at
   `--rotate-bytes` (1 GiB), moves to a new file after a failed write, and reports
-  `logpak_recorded_*` and `logpak_record_failures_total` metrics.
-- `logpak client` decodes gzip request bodies before it deltas them, and sends a body in any
-  other content coding as is (an `lpd1` delta of it used to drop that coding).
+  `deltapack_recorded_*` and `deltapack_record_failures_total` metrics.
+- `deltapack client` decodes gzip request bodies before it deltas them, and sends a body in any
+  other content coding as is (an `dpd1` delta of it used to drop that coding).
 
 ## [0.1.0]
 

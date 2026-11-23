@@ -1,4 +1,4 @@
-# Logpak
+# Deltapack
 
 **A compression codec for LLM logs and traces. About 100× smaller, byte-exact, and any record
 reads back on its own.**
@@ -9,14 +9,14 @@ first tool result 199 times, its second 198 times. Most of what a gateway log, a
 audit archive holds is copies of what it already has.
 
 ```
-what your log holds                                 what logpak stores
+what your log holds                                 what deltapack stores
 
 span 1  [system][tools][turn 1]                     [system][tools][turn 1]
 span 2  [system][tools][turn 1][turn 2]             + [turn 2]
 span 3  [system][tools][turn 1][turn 2][turn 3]     + [turn 3]
 ```
 
-Logpak stores each record as a delta against the earlier record it shares the most with, so a
+Deltapack stores each record as a delta against the earlier record it shares the most with, so a
 record costs about its new bytes. Here are 7,343 OTel GenAI spans from 300 public SWE-agent runs,
 16 traces in flight, 337 MB of JSON lines:
 
@@ -24,26 +24,26 @@ record costs about its new bytes. Here are 7,343 OTel GenAI spans from 300 publi
 |---|---:|---:|
 | zstd-1 in 1 MiB blocks, arrival order (how a column store compresses) | 34.6 MB | 9.7× |
 | messages deduplicated per trace, then zstd-1 blocks | 14.6 MB | 23× |
-| **Logpak, one record per span** | **3.2 MB** | **105×** |
+| **Deltapack, one record per span** | **3.2 MB** | **105×** |
 
 A block compressor loses here because it only sees one block. With 16 agents running, the previous
 copy of a prompt usually sits in a different block, and a late prompt is larger than a block
-anyway. Logpak looks for the previous copy by record, whatever its size.
+anyway. Deltapack looks for the previous copy by record, whatever its size.
 
 At that ratio a terabyte of spans is under 10 GB. You can afford to keep every prompt in full,
 without sampling or truncating, and still pull any single request out in milliseconds.
 
-## Quick start: point your OpenTelemetry exporter at Logpak
+## Quick start: point your OpenTelemetry exporter at Deltapack
 
 Your agent, framework or gateway most likely exports OpenTelemetry already. Run a collector, point
 the exporter at it, and every span and log record is stored on your disk.
 
 ```bash
-cargo install logpak --features proxy
+cargo install deltapack --features proxy
 ```
 
 ```bash
-logpak collect --record-dir ~/logpak        # OTLP/HTTP on 127.0.0.1:4318, OTLP/gRPC on :4317
+deltapack collect --record-dir ~/deltapack        # OTLP/HTTP on 127.0.0.1:4318, OTLP/gRPC on :4317
 ```
 
 ```bash
@@ -54,16 +54,16 @@ export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf   # or grpc, with http://127.0.
 Run your agent as usual, then look at what arrived:
 
 ```bash
-logpak log ls ~/logpak/*.lpk          # one line per batch: index, base, bytes stored, meta
+deltapack log ls ~/deltapack/*.dpk          # one line per batch: index, base, bytes stored, meta
 ```
 
 ```bash
-logpak log unpack ~/logpak/*.lpk      # every batch back, byte for byte
+deltapack log unpack ~/deltapack/*.dpk      # every batch back, byte for byte
 ```
 
 It takes OTLP traces, logs and metrics, as protobuf or JSON, compressed or not (gzip, deflate,
 brotli, zstd, snappy). Nothing sits in the path of your model calls: unset the variable and
-Logpak is out of the picture.
+Deltapack is out of the picture.
 
 ### Turn on the content
 
@@ -109,12 +109,12 @@ only the prompts, or no content at all.
 
 ### Keep your current backend
 
-Put Logpak between the exporter and the backend you query. Every batch is stored, then forwarded as
+Put Deltapack between the exporter and the backend you query. Every batch is stored, then forwarded as
 received, headers included (they are never stored). The backend can sample, truncate or expire what
 it likes, and you still hold every span.
 
 ```bash
-logpak collect --record-dir ~/logpak --forward https://cloud.langfuse.com/api/public/otel
+deltapack collect --record-dir ~/deltapack --forward https://cloud.langfuse.com/api/public/otel
 ```
 
 ```bash
@@ -208,24 +208,24 @@ OpenTelemetry covers most tools. For the rest:
 
 | You have | Use | What changes in your stack |
 |---|---|---|
-| A gateway with an HTTP log plugin (Kong, LiteLLM) | [`logpak collect`](#as-your-gateways-log-sink) | one plugin setting |
-| A tool whose export leaves the prompts out, or no export at all | [`logpak server --record-dir`](#as-a-recording-proxy) | the base URL |
-| Files of exported spans or request logs | [`logpak log pack`](#on-files-you-already-have) | nothing |
+| A gateway with an HTTP log plugin (Kong, LiteLLM) | [`deltapack collect`](#as-your-gateways-log-sink) | one plugin setting |
+| A tool whose export leaves the prompts out, or no export at all | [`deltapack server --record-dir`](#as-a-recording-proxy) | the base URL |
+| Files of exported spans or request logs | [`deltapack log pack`](#on-files-you-already-have) | nothing |
 | Your own ingest path or notebook | [the Rust or Python library](#embedded-in-rust-or-python) | a few lines |
 
-Every route writes the same LPK1 files, and [`logpak log`](#reading-it-back) and both libraries
+Every route writes the same DPK1 files, and [`deltapack log`](#reading-it-back) and both libraries
 read them all.
 
 ### As your gateway's log sink
 
-Anything that can POST a log entry can log to `logpak collect`. The path is yours to choose and
+Anything that can POST a log entry can log to `deltapack collect`. The path is yours to choose and
 is stored with each record.
 
 ```bash
-logpak collect --record-dir /var/log/logpak
+deltapack collect --record-dir /var/log/deltapack
 ```
 
-**LiteLLM**: the `generic_api` callback, with `GENERIC_LOGGER_ENDPOINT=http://logpak-collect:4318/litellm`.
+**LiteLLM**: the `generic_api` callback, with `GENERIC_LOGGER_ENDPOINT=http://deltapack-collect:4318/litellm`.
 
 ```yaml
 litellm_settings:
@@ -246,7 +246,7 @@ plugins:
       # route_type, auth, model: as you have them
   - name: http-log
     config:
-      http_endpoint: http://logpak-collect:4318/kong
+      http_endpoint: http://deltapack-collect:4318/kong
       content_type: application/json
 ```
 
@@ -254,12 +254,12 @@ plugins:
 
 For a tool whose OpenTelemetry export leaves the prompts out (Codex, Cline, Aider, OpenCode), a
 gateway that exports no logs (Portkey), or for the exact request bytes a provider received, let
-`logpak server` record what it forwards. Each request body is on disk before it reaches the
+`deltapack server` record what it forwards. Each request body is on disk before it reaches the
 upstream, so the file is a record of what the model was asked. If a write fails, the error is
 logged and the request is still forwarded.
 
 ```bash
-logpak server --upstream https://api.anthropic.com --record-dir /var/log/logpak
+deltapack server --upstream https://api.anthropic.com --record-dir /var/log/deltapack
 ```
 
 ```bash
@@ -270,26 +270,26 @@ API keys pass straight through. Headers are never written to the file.
 
 ### On files you already have
 
-One JSON object per line in, an `.lpk` file out: exported spans, a gateway's JSON-lines log, an
+One JSON object per line in, an `.dpk` file out: exported spans, a gateway's JSON-lines log, an
 eval run's requests. Pack before you ship to object storage and the bucket holds about a hundredth
 of the bytes.
 
 ```bash
-logpak log pack spans.lpk --window 32 < exported-spans.jsonl
+deltapack log pack spans.dpk --window 32 < exported-spans.jsonl
 ```
 
 ```bash
-logpak log unpack spans.lpk | cmp - exported-spans.jsonl    # silent: every byte is back
+deltapack log unpack spans.dpk | cmp - exported-spans.jsonl    # silent: every byte is back
 ```
 
 `--window` is how many traces or conversations are interleaved in the file (default 16).
 
 ### Embedded in Rust or Python
 
-Rust: `logpak::log::Writer` appends, `logpak::log::Reader` indexes and reads.
+Rust: `deltapack::log::Writer` appends, `deltapack::log::Reader` indexes and reads.
 
 ```rust
-let mut log = logpak::log::Writer::new(std::io::BufWriter::new(file), 16)?; // window
+let mut log = deltapack::log::Writer::new(std::io::BufWriter::new(file), 16)?; // window
 log.append(b"2026-11-20T14:15:00Z trace=ab12", body)?;                         // meta, body
 ```
 
@@ -297,23 +297,23 @@ Python ([python/](python/README.md)): the same files, from an ingest path or a n
 and reads release the GIL.
 
 ```python
-import logpak
+import deltapack
 
-with logpak.Writer("spans.lpk", window=16) as w:
+with deltapack.Writer("spans.dpk", window=16) as w:
     w.append(span_bytes, meta=b"trace=ab12")
 
-for meta, body in logpak.Reader("/var/log/logpak/1763650000000-4242-000000.lpk"):
+for meta, body in deltapack.Reader("/var/log/deltapack/1763650000000-4242-000000.dpk"):
     ...
 ```
 
 ### Reading it back
 
 ```bash
-logpak log ls /var/log/logpak/1763650000000-4242-000000.lpk       # index, base, bytes stored, meta
+deltapack log ls /var/log/deltapack/1763650000000-4242-000000.dpk       # index, base, bytes stored, meta
 ```
 
 ```bash
-logpak log get /var/log/logpak/1763650000000-4242-000000.lpk 17 > request-17.json
+deltapack log get /var/log/deltapack/1763650000000-4242-000000.dpk 17 > request-17.json
 ```
 
 `get` writes one record byte for byte, which for a recorded request is the exact body the provider
@@ -327,15 +327,15 @@ protobuf, with its attributes as plain JSON; any other record whole, as `body`. 
 file, its record and the time it was received.
 
 ```bash
-logpak log show --trace 4bf92f3577b34da6a3ce929d0e0e4736 ~/logpak/*.lpk     # one trace, every span
+deltapack log show --trace 4bf92f3577b34da6a3ce929d0e0e4736 ~/deltapack/*.dpk     # one trace, every span
 ```
 
 ```bash
-logpak log show --since 2h ~/logpak/*.lpk | jq -r 'select(.name == "chat") | .attributes["gen_ai.request.model"]'
+deltapack log show --since 2h ~/deltapack/*.dpk | jq -r 'select(.name == "chat") | .attributes["gen_ai.request.model"]'
 ```
 
 ```bash
-duckdb -c "SELECT name, count(*) FROM read_json('spans.jsonl') GROUP BY name"   # after: logpak log show … > spans.jsonl
+duckdb -c "SELECT name, count(*) FROM read_json('spans.jsonl') GROUP BY name"   # after: deltapack log show … > spans.jsonl
 ```
 
 `--trace` skips the batches whose meta does not list the trace. Trace ids are hex, as OTLP/JSON
@@ -356,8 +356,8 @@ ms or a duration ago (`90s`, `15m`, `2h`, `7d`).
 - Compressed bodies (gzip, deflate, brotli, zstd, snappy) are stored decoded, so the delta sees the content. Headers, and so credentials, are
   never stored.
 - Recording never takes your traffic down: a failed write is counted in
-  `logpak_record_failures_total`, and the request goes on.
-- The format is small and public ([SPEC.md §7](SPEC.md#7-lpk1-a-log-of-bodies-stored-as-deltas)):
+  `deltapack_record_failures_total`, and the request goes on.
+- The format is small and public ([SPEC.md §7](SPEC.md#7-dpk1-a-log-of-bodies-stored-as-deltas)):
   a file of Zstandard frames, each behind a few varints.
 
 ### Measured end to end
@@ -367,19 +367,19 @@ exporter (protobuf and gzip) through `collect` into the real backends:
 
 | Pipeline | What arrived | Stored |
 |---|---|---:|
-| SDK → `collect --forward` → Langfuse 3.227 | all 7,643 spans, in Langfuse and in the recording | **3.26 MB** of LPK1 for 338.6 MB of protobuf (104×). Langfuse itself kept 31.6 MiB in ClickHouse (ZSTD(3)) and 356 MB of raw events in S3 |
+| SDK → `collect --forward` → Langfuse 3.227 | all 7,643 spans, in Langfuse and in the recording | **3.26 MB** of DPK1 for 338.6 MB of protobuf (104×). Langfuse itself kept 31.6 MiB in ClickHouse (ZSTD(3)) and 356 MB of raw events in S3 |
 | SDK → `collect --forward` → OpenTelemetry Collector 0.115 | all 7,343 chat spans, the same span ids at both ends | 2.63 MB for 338.5 MB (129×) |
 | SDK over gRPC (gzip) → `collect --forward` → OpenTelemetry Collector 0.115 (OTLP/HTTP) | all 7,343 chat spans | 3.28 MB for 338.6 MB (103×) |
 | 12 conversations, 4 at a time → Kong 3.9 `ai-proxy` → `http-log` → `collect` | all 329 log entries, each with the request's full message list | 325 KB for 16.8 MB of Kong logs (52×) |
 
-CI runs Logpak against the real images of **LiteLLM** 1.110, **Kong** 3.9 and **Portkey** 1.15
+CI runs Deltapack against the real images of **LiteLLM** 1.110, **Kong** 3.9 and **Portkey** 1.15
 on every pull request ([tests/gateways/](tests/gateways/test_gateways.py)).
 
 ### What it is not
 
 - A query engine. `log show` finds records by trace and time and writes JSON lines for `jq`,
   DuckDB or pandas to query; it reads every record of the files it is given. Keep your tracing
-  backend for search and dashboards, and Logpak for the full bodies behind them.
+  backend for search and dashboards, and Deltapack for the full bodies behind them.
 - A general log compressor. The gain comes from records that repeat earlier records, which is what
   LLM requests and spans do. On logs without that shape, expect what zstd gives.
 - Fast enough for everything. One record per span writes at about 12 MB/s on one core, because a
@@ -397,40 +397,40 @@ whole, as a delta against the empty body. The writer picks the base by trying th
 restarts a chain with a whole record before reading one would mean rebuilding 4,096 records or
 1 GiB.
 
-## The same codec on the wire: LPD1
+## The same codec on the wire: DPD1
 
 The delta that shrinks a log also shrinks the request. An agent uploads its whole conversation on
-every call. With LPD1 the client sends each request as a delta against one the server already
+every call. With DPD1 the client sends each request as a delta against one the server already
 holds, and the server rebuilds the exact body before your handler, or the provider, sees it. It is
 plain HTTP: a pair of headers and a `content-encoding` ([SPEC.md](SPEC.md)).
 
-| A 6 MiB request that… | plain | zstd, per request¹ | **LPD1** |
+| A 6 MiB request that… | plain | zstd, per request¹ | **DPD1** |
 |---|---:|---:|---:|
 | adds one turn to the previous request | 6 MiB | ~1.6 MiB | **141 bytes** |
 | also edits the system prompt at the top | 6 MiB | ~1.6 MiB | **748 bytes** |
 
 ¹ At the 3.8× that one zstd frame per request averaged on public agent trajectories, measured
-before the 0.1 release ([the research report](https://github.com/aperiodic-io/logpak/blob/907d44e/docs/research/compression-research.md), kept in git history).
+before the 0.1 release ([the research report](https://github.com/aperiodic-io/deltapack/blob/907d44e/docs/research/compression-research.md), kept in git history).
 
 This is for agents on slow or metered links, and for egress you pay for: on public agent traffic,
 1 TB a month of request uploads at $0.09/GB costs $90 plain, $23.56 with per-request zstd and $1.43
-with LPD1, by the same measurements.
+with DPD1, by the same measurements.
 It does not change what the model sees. Token counts, your LLM bill and provider prompt caching are
 as before, because the provider receives the same bytes.
 
-Run `logpak server` near the provider and `logpak client` next to the tool. Neither needs
+Run `deltapack server` near the provider and `deltapack client` next to the tool. Neither needs
 code changes:
 
 ```bash
-logpak server --listen 0.0.0.0:8080 --upstream https://api.anthropic.com
+deltapack server --listen 0.0.0.0:8080 --upstream https://api.anthropic.com
 ```
 
 ```bash
-docker run -p 8080:8080 ghcr.io/aperiodic-io/logpak server --upstream https://api.anthropic.com
+docker run -p 8080:8080 ghcr.io/aperiodic-io/deltapack server --upstream https://api.anthropic.com
 ```
 
 ```bash
-logpak client --upstream https://logpak.example.com
+deltapack client --upstream https://deltapack.example.com
 ```
 
 ```bash
@@ -438,17 +438,17 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude
 ```
 
 For OpenAI-style clients, point `OPENAI_BASE_URL` at the client and use
-`--upstream https://api.openai.com` on the server. Put `logpak client` in front of an OTLP
+`--upstream https://api.openai.com` on the server. Put `deltapack client` in front of an OTLP
 exporter and its batches cross the network to `collect` as deltas too. Add
 `--metrics 127.0.0.1:9464` to either side to see the bytes saved.
 
 ```
 client                                    server
-  │  POST  (full body)  lpd1-keep: ?1       │
+  │  POST  (full body)  dpd1-keep: ?1       │
   │ ──────────────────────────────────────▶ │  keeps the body
-  │ ◀────────────────────────────────────── │  lpd1-kept: <sha256>
+  │ ◀────────────────────────────────────── │  dpd1-kept: <sha256>
   │                                         │
-  │  POST  content-encoding: lpd1           │
+  │  POST  content-encoding: dpd1           │
   │  (delta: base hash, target hash, edit)  │
   │ ──────────────────────────────────────▶ │  rebuilds, checks SHA-256,
   │                                         │  hands the original body on
@@ -458,7 +458,7 @@ client                                    server
   forwarded. The handler gets the original bytes, `content-length` and all, so request signing and
   prompt caching are unaffected.
 - The worst case is one normal request. A client deltas only against a body the server confirmed
-  it kept (`lpd1-kept`). A server without LPD1 never confirms, so the client sends plain requests.
+  it kept (`dpd1-kept`). A server without DPD1 never confirms, so the client sends plain requests.
   A server that lost a base (restart, eviction, another replica) answers `409`, and the client
   resends that one request in full.
 - Bases are named by content hash, not by session or connection, so any request can be retried on
@@ -468,101 +468,101 @@ client                                    server
 
 | You control | Use |
 |---|---|
-| Both ends: your agent and your API, agents talking to each other, your inference server | The library: [`Client`](src/client.rs) on the sending side, [`Lpd1Layer`](src/server.rs) (a `tower` layer) on the receiving side. |
-| Only the client: you call Anthropic, OpenAI, … | `logpak server` as a reverse proxy near the provider. It is the same layer in front of a forwarder. |
-| Neither: a CLI tool such as Claude Code or Codex | `logpak client` on the tool's machine, talking to a `logpak server`. |
+| Both ends: your agent and your API, agents talking to each other, your inference server | The library: [`Client`](src/client.rs) on the sending side, [`Dpd1Layer`](src/server.rs) (a `tower` layer) on the receiving side. |
+| Only the client: you call Anthropic, OpenAI, … | `deltapack server` as a reverse proxy near the provider. It is the same layer in front of a forwarder. |
+| Neither: a CLI tool such as Claude Code or Codex | `deltapack client` on the tool's machine, talking to a `deltapack server`. |
 
-### The LPD1 library (Rust)
+### The DPD1 library (Rust)
 
 ```toml
 [dependencies]
-logpak = "0.1"                                           # codec, client, server layer
-# logpak = { version = "0.1", default-features = false } # codec and client only
+deltapack = "0.1"                                           # codec, client, server layer
+# deltapack = { version = "0.1", default-features = false } # codec and client only
 ```
 
 **Server.** Wrap your handler. Here it is axum, but any `tower` stack works:
 
 ```rust
 use std::{sync::Arc, time::Duration};
-use logpak::{server::{Lpd1Layer, Config}, store::Store};
+use deltapack::{server::{Dpd1Layer, Config}, store::Store};
 
 let store = Arc::new(Store::new(1 << 30, Duration::from_secs(1800))); // 1 GiB of bases, 30 min idle TTL
 let app = axum::Router::new()
     .route("/v1/messages", axum::routing::post(messages))
-    .layer(Lpd1Layer::new(store, Config::default()));
+    .layer(Dpd1Layer::new(store, Config::default()));
 ```
 
-The handler receives each request as the client built it. Requests without LPD1 headers pass
+The handler receives each request as the client built it. Requests without DPD1 headers pass
 through untouched and unbuffered.
 
 **Client.** Wrap your HTTP call. One `Client` serves concurrent requests and conversations:
 
 ```rust
-let client = logpak::client::Client::new(4); // remembers 4 confirmed bases
+let client = deltapack::client::Client::new(4); // remembers 4 confirmed bases
 let request = client.prepare(body);
 let mut response = send(request.wire_body(), &request.headers()).await;
-if request.is_delta() && response.headers().contains_key(logpak::ERROR) {
+if request.is_delta() && response.headers().contains_key(deltapack::ERROR) {
     // the server no longer has the base; it did not forward the request
     response = send(request.body(), &request.plain_headers()).await;
 }
-client.confirm(&request, response.headers().get(logpak::KEPT).and_then(|v| v.to_str().ok()));
+client.confirm(&request, response.headers().get(deltapack::KEPT).and_then(|v| v.to_str().ok()));
 ```
 
 ## Proxy reference
 
-**`logpak server`**: LPD1 in front of an HTTP API.
+**`deltapack server`**: DPD1 in front of an HTTP API.
 
 | Flag | Env | Default | |
 |---|---|---|---|
-| `--upstream` | `LOGPAK_UPSTREAM` | (required) | The API to forward to. Its path is kept: `https://gw/x` + `/v1/messages` → `https://gw/x/v1/messages`. |
-| `--listen` | `LOGPAK_LISTEN` | `0.0.0.0:8080` | |
-| `--store-bytes` | `LOGPAK_STORE_BYTES` | 1 GiB | Memory for kept bases, all tenants together. The least recently used goes first. |
-| `--ttl-seconds` | `LOGPAK_TTL_SECONDS` | 1800 | A base unused this long is dropped. |
-| `--max-body` | `LOGPAK_MAX_BODY` | 64 MiB | The largest body kept or rebuilt. |
-| `--scope-header` | `LOGPAK_SCOPE_HEADERS` | `authorization,x-api-key` | The headers that identify a tenant. Bases never cross them. |
-| `--metrics` | `LOGPAK_METRICS` | off | Prometheus text at `http://<addr>/metrics`, on its own port. |
-| `--record-dir` | `LOGPAK_RECORD_DIR` | off | Store every request body forwarded in a new LPK1 file here. Requests are then buffered (up to `--max-body`). |
-| `--record-window` | `LOGPAK_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per conversation in flight. |
-| `--rotate-bytes` | `LOGPAK_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. |
+| `--upstream` | `DELTAPACK_UPSTREAM` | (required) | The API to forward to. Its path is kept: `https://gw/x` + `/v1/messages` → `https://gw/x/v1/messages`. |
+| `--listen` | `DELTAPACK_LISTEN` | `0.0.0.0:8080` | |
+| `--store-bytes` | `DELTAPACK_STORE_BYTES` | 1 GiB | Memory for kept bases, all tenants together. The least recently used goes first. |
+| `--ttl-seconds` | `DELTAPACK_TTL_SECONDS` | 1800 | A base unused this long is dropped. |
+| `--max-body` | `DELTAPACK_MAX_BODY` | 64 MiB | The largest body kept or rebuilt. |
+| `--scope-header` | `DELTAPACK_SCOPE_HEADERS` | `authorization,x-api-key` | The headers that identify a tenant. Bases never cross them. |
+| `--metrics` | `DELTAPACK_METRICS` | off | Prometheus text at `http://<addr>/metrics`, on its own port. |
+| `--record-dir` | `DELTAPACK_RECORD_DIR` | off | Store every request body forwarded in a new DPK1 file here. Requests are then buffered (up to `--max-body`). |
+| `--record-window` | `DELTAPACK_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per conversation in flight. |
+| `--rotate-bytes` | `DELTAPACK_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. |
 
-**`logpak collect`**: a log sink that stores what is posted to it in LPK1 ([above](#quick-start-point-your-opentelemetry-exporter-at-logpak)).
+**`deltapack collect`**: a log sink that stores what is posted to it in DPK1 ([above](#quick-start-point-your-opentelemetry-exporter-at-deltapack)).
 
 | Flag | Env | Default | |
 |---|---|---|---|
-| `--record-dir` | `LOGPAK_RECORD_DIR` | (required) | The new LPK1 file goes here. |
-| `--forward` | `LOGPAK_FORWARD` | none | The backend each request is sent on to: as received, or a gRPC Export as OTLP/HTTP protobuf. Without one, each is acknowledged. |
-| `--listen` | `LOGPAK_LISTEN` | `127.0.0.1:4318,127.0.0.1:4317` | Where to listen; each address takes OTLP/HTTP and OTLP/gRPC. On loopback: whoever reaches it can fill the disk. In a container, `0.0.0.0:4318,0.0.0.0:4317` on a private network. |
-| `--record-window` | `LOGPAK_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per trace or exporter interleaved. |
-| `--rotate-bytes` | `LOGPAK_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. Every file reads on its own; deleting old ones (or shipping them to object storage) is yours to schedule. |
-| `--max-body` | `LOGPAK_MAX_BODY` | 64 MiB | The largest body stored, after decoding; larger ones are answered 413. |
-| `--metrics` | `LOGPAK_METRICS` | off | |
+| `--record-dir` | `DELTAPACK_RECORD_DIR` | (required) | The new DPK1 file goes here. |
+| `--forward` | `DELTAPACK_FORWARD` | none | The backend each request is sent on to: as received, or a gRPC Export as OTLP/HTTP protobuf. Without one, each is acknowledged. |
+| `--listen` | `DELTAPACK_LISTEN` | `127.0.0.1:4318,127.0.0.1:4317` | Where to listen; each address takes OTLP/HTTP and OTLP/gRPC. On loopback: whoever reaches it can fill the disk. In a container, `0.0.0.0:4318,0.0.0.0:4317` on a private network. |
+| `--record-window` | `DELTAPACK_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per trace or exporter interleaved. |
+| `--rotate-bytes` | `DELTAPACK_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. Every file reads on its own; deleting old ones (or shipping them to object storage) is yours to schedule. |
+| `--max-body` | `DELTAPACK_MAX_BODY` | 64 MiB | The largest body stored, after decoding; larger ones are answered 413. |
+| `--metrics` | `DELTAPACK_METRICS` | off | |
 
-**`logpak client`**: for tools you cannot change. They post plain requests to it, and it sends
+**`deltapack client`**: for tools you cannot change. They post plain requests to it, and it sends
 deltas on.
 
 | Flag | Env | Default | |
 |---|---|---|---|
-| `--upstream` | `LOGPAK_UPSTREAM` | (required) | The `logpak server` to send to. |
-| `--listen` | `LOGPAK_LISTEN` | `127.0.0.1:8787` | |
-| `--bases` | `LOGPAK_BASES` | 8 | Confirmed bases remembered: about one per conversation in flight. |
-| `--max-body` | `LOGPAK_MAX_BODY` | 64 MiB | |
-| `--metrics` | `LOGPAK_METRICS` | off | |
+| `--upstream` | `DELTAPACK_UPSTREAM` | (required) | The `deltapack server` to send to. |
+| `--listen` | `DELTAPACK_LISTEN` | `127.0.0.1:8787` | |
+| `--bases` | `DELTAPACK_BASES` | 8 | Confirmed bases remembered: about one per conversation in flight. |
+| `--max-body` | `DELTAPACK_MAX_BODY` | 64 MiB | |
+| `--metrics` | `DELTAPACK_METRICS` | off | |
 
 ### Metrics
 
 | Metric | |
 |---|---|
-| `logpak_server_deltas_total`, `logpak_server_delta_bytes_total`, `logpak_server_rebuilt_bytes_total` | Deltas received, their bytes on the wire, and the bytes they rebuilt to. |
-| `logpak_server_kept_total`, `logpak_server_store_bytes` | Bodies kept, and memory held now. |
-| `logpak_server_refused_total` | Deltas refused (unknown base, corrupt, too large). The client resent each in full. |
-| `logpak_client_requests_total`, `logpak_client_deltas_total`, `logpak_client_resent_total` | Requests, how many went as deltas, and how many were resent in full. |
-| `logpak_client_body_bytes_total`, `logpak_client_wire_bytes_total` | Request bytes, and what was sent for them. Their ratio is your saving. |
-| `logpak_recorded_total`, `logpak_recorded_body_bytes_total`, `logpak_recorded_file_bytes_total` | Records stored (`--record-dir`, `collect`), their bytes, and the bytes of the files holding them. Their ratio is the storage saving. |
-| `logpak_record_failures_total` | Records that could not be written (disk full, I/O error). The request was still forwarded; the next record goes to a new file. |
+| `deltapack_server_deltas_total`, `deltapack_server_delta_bytes_total`, `deltapack_server_rebuilt_bytes_total` | Deltas received, their bytes on the wire, and the bytes they rebuilt to. |
+| `deltapack_server_kept_total`, `deltapack_server_store_bytes` | Bodies kept, and memory held now. |
+| `deltapack_server_refused_total` | Deltas refused (unknown base, corrupt, too large). The client resent each in full. |
+| `deltapack_client_requests_total`, `deltapack_client_deltas_total`, `deltapack_client_resent_total` | Requests, how many went as deltas, and how many were resent in full. |
+| `deltapack_client_body_bytes_total`, `deltapack_client_wire_bytes_total` | Request bytes, and what was sent for them. Their ratio is your saving. |
+| `deltapack_recorded_total`, `deltapack_recorded_body_bytes_total`, `deltapack_recorded_file_bytes_total` | Records stored (`--record-dir`, `collect`), their bytes, and the bytes of the files holding them. Their ratio is the storage saving. |
+| `deltapack_record_failures_total` | Records that could not be written (disk full, I/O error). The request was still forwarded; the next record goes to a new file. |
 
 ### Deploying
 
-- **Place `logpak server` near the provider** (same region). The saving is on the hop from the
+- **Place `deltapack server` near the provider** (same region). The saving is on the hop from the
   client to it.
 - **Replicas:** bases live in each process's memory. Route a tenant's requests to the same replica
   (consistent hashing on `authorization`). Otherwise a request may land where its base is not, and
@@ -588,7 +588,7 @@ Hashing the rebuilt body is most of the rebuild time.
 
 ## Security
 
-LPD1 relies on TLS and on your API's authentication. Bases are per tenant, so a client can never
+DPD1 relies on TLS and on your API's authentication. Bases are per tenant, so a client can never
 use, or learn of, another tenant's base. Compressing secrets together with attacker-influenced
 content has a length side channel, as with any compression. See [SPEC.md §5](SPEC.md#5-scope-and-security)
 and [SECURITY.md](SECURITY.md).
@@ -596,8 +596,8 @@ and [SECURITY.md](SECURITY.md).
 ## Status
 
 **0.1.** The wire format is version 1 and stable for 0.x. The Rust library, both proxies, `collect`
-and the Python bindings for LPK1 are complete and tested. Not built yet: Python bindings for the
-LPD1 client, bindings for TypeScript and Go, and a base store shared across server replicas (use
+and the Python bindings for DPK1 are complete and tested. Not built yet: Python bindings for the
+DPD1 client, bindings for TypeScript and Go, and a base store shared across server replicas (use
 sticky routing; see [Deploying](#deploying)).
 
 ## Development

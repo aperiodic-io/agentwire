@@ -1,4 +1,4 @@
-"""LPK1 (SPEC.md §7): LLM request logs and trace spans stored as deltas against earlier records."""
+"""DPK1 (SPEC.md §7): LLM request logs and trace spans stored as deltas against earlier records."""
 
 from collections.abc import Iterator
 from os import PathLike
@@ -8,7 +8,7 @@ _Bytes = Union[bytes, bytearray]
 _Path = Union[str, PathLike[str]]
 
 class Writer:
-    """Appends records to a new LPK1 file (never an existing one: FileExistsError)."""
+    """Appends records to a new DPK1 file (never an existing one: FileExistsError)."""
 
     def __init__(self, path: _Path, window: int = 16) -> None: ...
     def append(self, body: _Bytes, meta: Optional[_Bytes] = None) -> int:
@@ -19,7 +19,7 @@ class Writer:
     def __exit__(self, *exc: object) -> bool: ...
 
 class Reader:
-    """Reads an LPK1 file; a record that does not rebuild the body it names raises ValueError."""
+    """Reads an DPK1 file; a record that does not rebuild the body it names raises ValueError."""
 
     def __init__(self, path: _Path, max_body: int = 64 << 20) -> None: ...
     def __len__(self) -> int: ...

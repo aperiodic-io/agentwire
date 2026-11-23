@@ -1,4 +1,4 @@
-# Kong AI Gateway (DB-less): ai-proxy in front of the mock model, its payload logs to logpak collect
+# Kong AI Gateway (DB-less): ai-proxy in front of the mock model, its payload logs to deltapack collect
 _format_version: "3.0"
 services:
   - name: llm

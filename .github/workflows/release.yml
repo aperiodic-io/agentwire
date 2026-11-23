@@ -1,6 +1,6 @@
 name: release
 # A tag `vX.Y.Z` on main publishes that version: the crate to crates.io, the image to
-# ghcr.io/aperiodic-io/logpak:X.Y.Z (and :latest), and a GitHub release with its CHANGELOG entry.
+# ghcr.io/aperiodic-io/deltapack:X.Y.Z (and :latest), and a GitHub release with its CHANGELOG entry.
 # The tag's commit has passed ci.yml on main; this checks only that the tag and the version agree.
 on:
   push:
@@ -32,8 +32,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/aperiodic-io/logpak:${{ github.ref_name }}
-            ghcr.io/aperiodic-io/logpak:latest
+            ghcr.io/aperiodic-io/deltapack:${{ github.ref_name }}
+            ghcr.io/aperiodic-io/deltapack:latest
           cache-from: type=gha,scope=image
           cache-to: type=gha,scope=image,mode=max,ignore-error=true
 
