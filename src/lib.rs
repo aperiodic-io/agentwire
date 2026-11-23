@@ -17,5 +17,6 @@ pub const ENCODING: &str = "lpd1";
 
 /// Lowercase hex, as `lpd1-kept` carries a hash.
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes.iter().flat_map(|b| [DIGITS[usize::from(b >> 4)] as char, DIGITS[usize::from(b & 15)] as char]).collect()
 }

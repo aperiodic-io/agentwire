@@ -33,6 +33,9 @@ pub fn trace_ids(signal: Signal, body: &[u8]) -> String {
     let mut ids = Vec::new();
     let read = if body.first() == Some(&b'{') {
         json_ids(body, &mut ids)
+    } else if body.trim_ascii_start().first() == Some(&b'{') {
+        // JSON after whitespace, or protobuf that starts "\n{": `show` tells which
+        false
     } else {
         // the export's resources, their scopes, their spans or log records, and the id in each
         let leaf = if signal == Signal::Traces { 1 } else { 9 };
@@ -85,6 +88,9 @@ fn json_ids(body: &[u8], ids: &mut Vec<String>) -> bool {
         let Some(rest) = rest.strip_prefix(b":") else { continue };
         let Some(rest) = rest.trim_ascii_start().strip_prefix(b"\"") else { continue };
         let id = rest.split(|&b| b == b'"').next().unwrap_or(rest);
+        if id.contains(&b'\\') {
+            return false; // an escape: `show` would read an id this does not see
+        }
         if id.len() == 32 && id.iter().all(u8::is_ascii_hexdigit) && rest.get(32) == Some(&b'"') {
             let id = String::from_utf8_lossy(id).to_ascii_lowercase();
             if !add(ids, id) {
@@ -202,6 +208,8 @@ pub fn when(s: &str, now: u64) -> Result<u64, String> {
 // ---- OTLP, flattened ------------------------------------------------------------------------------
 
 /// OTLP/JSON's shape (as JSON exporters send it, and as [`decode`] builds it from protobuf) to rows.
+// ponytail: a record's rows are built in memory, each with a copy of its resource: a hostile 64 MiB
+// batch takes GBs to show. Stream the rows, or cap the spans shown per record, if that bites.
 fn flatten(export: &Value) -> Option<Vec<Value>> {
     let (resources, scopes, items, signal) = match (export.get("resourceSpans"), export.get("resourceLogs")) {
         (Some(r), _) => (r, "scopeSpans", "spans", "span"),
@@ -240,9 +248,9 @@ fn span(s: &Value) -> Map<String, Value> {
         })
         .collect();
     let mut row = Map::new();
-    row.insert("trace_id".into(), id(&s["traceId"]));
-    row.insert("span_id".into(), id(&s["spanId"]));
-    row.insert("parent_span_id".into(), id(&s["parentSpanId"]));
+    row.insert("trace_id".into(), id(&s["traceId"], 32));
+    row.insert("span_id".into(), id(&s["spanId"], 16));
+    row.insert("parent_span_id".into(), id(&s["parentSpanId"], 16));
     row.insert("name".into(), s["name"].clone());
     row.insert("kind".into(), s["kind"].clone());
     row.insert("start".into(), nanos(&s["startTimeUnixNano"]));
@@ -255,8 +263,8 @@ fn span(s: &Value) -> Map<String, Value> {
 
 fn log_record(l: &Value) -> Map<String, Value> {
     let mut row = Map::new();
-    row.insert("trace_id".into(), id(&l["traceId"]));
-    row.insert("span_id".into(), id(&l["spanId"]));
+    row.insert("trace_id".into(), id(&l["traceId"], 32));
+    row.insert("span_id".into(), id(&l["spanId"], 16));
     row.insert("time".into(), nanos(&l["timeUnixNano"]));
     row.insert("observed".into(), nanos(&l["observedTimeUnixNano"]));
     row.insert("severity".into(), l["severityNumber"].clone());
@@ -267,11 +275,12 @@ fn log_record(l: &Value) -> Map<String, Value> {
     row
 }
 
-/// A trace or span id as lowercase hex; `null` when absent, empty or not hex (it would not match a
-/// `--trace` and must not reach a meta, whose fields are split on spaces and commas).
-fn id(v: &Value) -> Value {
+/// A trace id (`len` 32) or span id (16) as lowercase hex; `null` when it is not that many hex
+/// digits. A trace id is shown only when [`trace_ids`] would list it, so `--trace` finds every
+/// trace `show` names.
+fn id(v: &Value, len: usize) -> Value {
     match v.as_str() {
-        Some(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit()) => s.to_ascii_lowercase().into(),
+        Some(s) if s.len() == len && s.bytes().all(|b| b.is_ascii_hexdigit()) => s.to_ascii_lowercase().into(),
         _ => Value::Null,
     }
 }
@@ -642,11 +651,11 @@ mod tests {
     #[test]
     fn a_json_trace_export_flattens_as_protobuf_does() {
         let body = br#" {"resourceSpans":[{"scopeSpans":[{"scope":{"name":"s"},"spans":[
-            {"traceId":"ABCD","spanId":"01","parentSpanId":"","startTimeUnixNano":"5","endTimeUnixNano":"x","name":"n"}]}]}]}"#;
+            {"traceId":"ABCDABCDABCDABCDABCDABCDABCDABCD","spanId":"01","parentSpanId":"","startTimeUnixNano":"5","endTimeUnixNano":"x","name":"n"}]}]}]}"#;
         let rows = rows(body, None).unwrap();
         assert_eq!(
             (&rows[0]["trace_id"], &rows[0]["parent_span_id"], &rows[0]["start"], &rows[0]["end"], &rows[0]["scope"]),
-            (&json!("abcd"), &Value::Null, &json!(5), &Value::Null, &json!("s"))
+            (&json!("abcd".repeat(8)), &Value::Null, &json!(5), &Value::Null, &json!("s"))
         );
     }
 
@@ -788,6 +797,33 @@ mod tests {
     }
 
     #[test]
+    fn show_and_the_index_agree_on_what_a_trace_id_is() {
+        // an id the index does not list must not be shown either, or --trace could not find it
+        for (trace, span) in [(&[1u8; 8][..], &[2u8; 8][..]), (&[1; 16], &[2; 4])] {
+            let body = pb(1, 2, &pb(2, 2, &pb(2, 2, &[pb(1, 2, trace), pb(2, 2, span)].concat())));
+            let row = &rows(&body, Some(Signal::Traces)).unwrap()[0];
+            let listed = trace_ids(Signal::Traces, &body);
+            assert_eq!(row["trace_id"].as_str().unwrap_or("-"), listed, "{row}");
+            let span_id = (span.len() == 8).then(|| logpak::hex(span));
+            assert_eq!(row["span_id"].as_str(), span_id.as_deref(), "a span id is 8 bytes");
+        }
+    }
+
+    #[test]
+    fn json_that_does_not_start_with_its_brace_is_not_indexed() {
+        let id = "c".repeat(32);
+        let body = format!(r#" {{"resourceSpans":[{{"scopeSpans":[{{"spans":[{{"traceId":"{id}"}}]}}]}}]}}"#);
+        assert_eq!(trace_ids(Signal::Traces, body.as_bytes()), "?");
+        assert_eq!(rows(body.as_bytes(), None).unwrap()[0]["trace_id"], id.as_str(), "show reads it");
+    }
+
+    #[test]
+    fn an_escaped_trace_id_is_not_indexed() {
+        let body = format!(r#"{{"traceId":"\u0063{}"}}"#, "c".repeat(31));
+        assert_eq!(trace_ids(Signal::Traces, body.as_bytes()), "?");
+    }
+
+    #[test]
     fn json_trace_ids_are_found_by_key_alone() {
         let id = "c".repeat(32);
         let spaced = format!(r#"{{"resourceLogs":[{{"scopeLogs":[{{"logRecords":[{{ "traceId" :  "{id}" }}]}}]}}]}}"#);
@@ -826,7 +862,7 @@ mod tests {
         assert_eq!(&body[..2], b"\n{");
         let rows = rows(&body, Some(Signal::Traces)).unwrap();
         assert_eq!(rows[0]["name"], "chat");
-        assert_eq!(trace_ids(Signal::Traces, &body), "ab".repeat(16));
+        assert_eq!(trace_ids(Signal::Traces, &body), "?", "JSON after whitespace, or this: read the body to know");
     }
 
     #[test]
