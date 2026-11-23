@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
-description = "AWD1: send each LLM request as a delta against the previous one. Codec, client, tower server layer and proxies."
+description = "A compression codec for LLM logs and traces: each record stored (AWL1) or sent (AWD1) as a delta against an earlier one."
 repository = "https://github.com/aperiodic-io/agentwire"
 readme = "README.md"
-keywords = ["compression", "llm", "delta", "http", "zstd"]
+keywords = ["compression", "llm", "logging", "delta", "zstd"]
 categories = ["compression", "network-programming", "web-programming::http-server"]
 include = ["/src", "/README.md", "/SPEC.md", "/LICENSE"]
 
