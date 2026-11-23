@@ -43,10 +43,9 @@ cargo install deltapack --features proxy
 ```
 
 Or run the image `ghcr.io/aperiodic-io/deltapack`. From the next release on, each release also carries
-a binary for Linux (x86_64, aarch64; static musl, any distribution) and macOS (Apple silicon) on
-its [release page](https://github.com/aperiodic-io/deltapack/releases). musl's allocator is slower
-under many threads: for the most throughput on Linux, build with cargo or use the image. A macOS
-binary downloaded in a browser is quarantined: `xattr -d com.apple.quarantine deltapack`.
+a binary for Linux (x86_64 and aarch64, static musl, any distribution) on its
+[release page](https://github.com/aperiodic-io/deltapack/releases). musl's allocator is slower under
+many threads: for the most throughput, build with cargo or use the image. On macOS, use cargo.
 
 ```bash
 deltapack collect --record-dir ~/deltapack        # OTLP/HTTP on 127.0.0.1:4318, OTLP/gRPC on :4317

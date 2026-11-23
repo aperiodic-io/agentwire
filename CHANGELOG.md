@@ -5,9 +5,8 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
-- Each release carries a `deltapack` binary for Linux (x86_64 and aarch64, static musl) and macOS
-  (arm64), each with its SHA-256 (`scripts/binary.sh`); CI builds and runs them on every pull
-  request.
+- Each release carries a `deltapack` binary for Linux (x86_64 and aarch64, static musl), each with
+  its SHA-256 (`scripts/binary.sh`); CI builds and runs them on every pull request.
 - `deltapack log stats FILE…`: each file's records, the bytes they stand for, its bytes on disk and
   the ratio; then the total.
 - `collect` and `server --record-dir` take `--keep-bytes` and `--keep-days`, which delete the

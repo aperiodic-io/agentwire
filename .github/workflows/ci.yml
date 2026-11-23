@@ -201,7 +201,6 @@ jobs:
         include:
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
-          - { os: macos-14, target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
     env: { RUSTFLAGS: "" } # the release build, as release.yml makes it
     steps:
