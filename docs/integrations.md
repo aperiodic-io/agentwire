@@ -41,6 +41,10 @@ CI runs only LiteLLM, Kong, Portkey, Langfuse and the OpenTelemetry Collector
 - [Coding agents](#coding-agents): Claude Code, Claude Agent SDK, Gemini CLI, Qwen Code, GitHub
   Copilot CLI, VS Code Copilot, Goose, Codex CLI, OpenHands, Kilo Code, Cline, Roo Code, OpenCode,
   Aider, Continue, SWE-agent, mini-swe-agent, Crush, Pi, Zed
+- [Personal and autonomous agents](#personal-and-autonomous-agents): OpenClaw, Hermes Agent, nanobot,
+  Open Interpreter, Letta, Agent Zero, OpenManus, AutoGPT
+- [Agent workflow platforms](#agent-workflow-platforms): n8n, Dify, Langflow, Flowise, Open WebUI,
+  LibreChat, AnythingLLM, Activepieces, Rivet
 - [SDKs and agent frameworks](#sdks-and-agent-frameworks): OpenTelemetry GenAI, OpenLLMetry,
   OpenInference, Langfuse, LangSmith, Logfire and Pydantic AI, LangChain, LlamaIndex, OpenAI Agents
   SDK, Vercel AI SDK, Mastra, CrewAI, AutoGen, Microsoft Agent Framework, Semantic Kernel, Spring
@@ -62,12 +66,15 @@ CI runs only LiteLLM, Kong, Portkey, Langfuse and the OpenTelemetry Collector
 |---|---|---|
 | Claude Code, Claude Agent SDK | full request | A |
 | Gemini CLI, Qwen Code, GitHub Copilot CLI, VS Code Copilot, Goose | messages | A |
+| OpenClaw, Hermes Agent (through NeMo Relay) | messages, once content capture is on | A |
+| Dify, Langflow and Flowise (through their Phoenix integration), n8n (Agents feature) | messages | A |
 | OTel GenAI, OpenLLMetry and OpenInference instrumentors; Langfuse, LangSmith, Logfire, Pydantic AI, LangChain, LlamaIndex, OpenAI Agents SDK (Python), Vercel AI SDK, Mastra, CrewAI, Microsoft Agent Framework, Semantic Kernel, Spring AI, Strands, Google ADK, smolagents, Haystack, DSPy, Agno | messages, once content capture is on | A |
 | LiteLLM, Kong, APISIX, Bifrost, Envoy AI Gateway, Traefik Hub, agentgateway, OpenRouter, Cloudflare | messages or payload logs | A |
-| Codex CLI | prompts only | B (A for prompts and replies) |
-| OpenHands, Kilo Code, TensorZero, AutoGen | content *(unverified)* | A, B if prompts are missing |
-| Cline | metadata only | B |
-| Roo Code, OpenCode, Aider, Continue, SWE-agent, mini-swe-agent, Crush, Pi, Zed, OpenAI Agents SDK (JS), LangChain4j, Genkit | no OTel with content | B |
+| Codex CLI, Open Interpreter | prompts only | B (A for prompts and replies) |
+| OpenHands, Kilo Code, Letta, TensorZero, AutoGen | content *(unverified)* | A, B if prompts are missing |
+| Cline, Open WebUI, LibreChat | metadata only | B |
+| n8n (AI Agent node), AnythingLLM, Activepieces, Rivet | no OTel with content | B |
+| Roo Code, OpenCode, Aider, Continue, SWE-agent, mini-swe-agent, Crush, Pi, Zed, nanobot, Agent Zero, OpenManus, AutoGPT, OpenAI Agents SDK (JS), LangChain4j, Genkit | no OTel with content | B |
 | Portkey (open source), Helicone, Vercel AI Gateway, MLflow AI Gateway, Higress | no payload export | B |
 | AWS Bedrock, Azure API Management, Vertex AI | provider logs | C |
 
@@ -603,6 +610,415 @@ Over OTel: **no OTel**.
 the docs *(unverified)*. Zed-hosted models cannot be redirected.
 
 Docs: [API access](https://zed.dev/docs/ai/use-api-access).
+
+---
+
+## Personal and autonomous agents
+
+Long-running agents that act on your behalf across chat apps, a browser or a shell. They run for
+hours and re-send their whole context on every step, which is the shape Logpak compresses best.
+
+**In Docker?** Inside a container, `127.0.0.1` is the container itself. Run `logpak` on a network
+the container can reach (`logpak collect --listen 0.0.0.0:4318,0.0.0.0:4317`, or
+`logpak server --listen 0.0.0.0:8080`, on a private network), and point the agent at
+`host.docker.internal` or the service name.
+
+### OpenClaw
+
+Over OTel: **messages**, once `captureContent` is on: input and output messages, tool content and
+tool definitions. Provider-internal thinking is always left out.
+
+**A.** Install the official plugin, then turn on diagnostics in `~/.openclaw/openclaw.json`. It
+exports OTLP/HTTP protobuf only (gRPC is retired), so use `:4318`. OpenClaw appends `/v1/traces`,
+`/v1/metrics` and `/v1/logs` to `endpoint`.
+
+```bash
+openclaw plugins install @openclaw/diagnostics-otel
+```
+
+```bash
+openclaw plugins enable diagnostics-otel
+```
+
+```json5
+{
+  diagnostics: {
+    enabled: true,
+    otel: {
+      enabled: true,
+      endpoint: "http://127.0.0.1:4318",
+      protocol: "http/protobuf",
+      serviceName: "openclaw",
+      traces: true,
+      logs: true,            // off by default
+      captureContent: true,  // off by default: without it, spans carry no prompts
+    },
+  },
+}
+```
+
+The standard `OTEL_EXPORTER_OTLP_*` variables work as fallbacks.
+
+**B.** Override a provider's `baseUrl` under `models.providers`, for example
+`models.providers.anthropic.baseUrl: "http://127.0.0.1:8080"`. For a custom provider, set `api`
+(`openai-completions`, `openai-responses` or `anthropic-messages`) and `baseUrl:
+"http://127.0.0.1:8081/v1"`.
+
+- ChatGPT/Codex sign-in goes to `chatgpt.com`, not `api.openai.com`, so it bypasses B.
+- Responses traffic over that sign-in tries WebSocket first. Force SSE per model with
+  `agents.defaults.models["openai/<model>"].params.transport: "sse"`.
+
+**C.** `openclaw sessions export-trajectory --session-key <key>` writes `events.jsonl` (with
+`prompts.json`) under `<workspace>/.openclaw/trajectory-exports/`:
+
+```bash
+logpak log pack openclaw.lpk < events.jsonl
+```
+
+Docs: [OpenTelemetry setup](https://docs.openclaw.ai/gateway/opentelemetry/setup),
+[configuration](https://docs.openclaw.ai/gateway/opentelemetry/configuration),
+[model providers](https://docs.openclaw.ai/concepts/model-providers).
+
+### Hermes Agent
+
+Over OTel: **messages**, through the built-in NeMo Relay. Hermes's own gateway monitoring also
+speaks OTLP, but carries health and lifecycle data only, never prompts.
+
+**A.** Turn on NeMo Relay's observability component, in `~/.config/nemo-relay/plugins.toml` (or the
+file `HERMES_NEMO_RELAY_PLUGINS_TOML` names):
+
+```toml
+[[components]]
+kind = "observability"
+enabled = true
+
+[components.config]
+version = 4
+
+[components.config.opentelemetry]
+enabled = true
+
+[[components.config.opentelemetry.endpoints]]
+type = "gen_ai"                               # or "openinference", "full"
+endpoint = "http://127.0.0.1:4318/v1/traces"
+transport = "http_binary"
+service_name = "hermes-agent"
+```
+
+- With the component on, `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318` alone also starts the
+  export.
+- `gen_ai` spans carry the prompt and response messages by default. `enable_full_payloads = false`
+  trims repeated history; it does not remove the messages.
+- Relay asks for HTTPS on remote endpoints unless the host is allowlisted. Loopback is assumed fine
+  *(unverified)*.
+
+**B.** In `~/.hermes/config.yaml`:
+
+```yaml
+model:
+  provider: custom
+  base_url: http://127.0.0.1:8081/v1
+  key_env: OPENAI_API_KEY
+```
+
+- Hermes sends `OPENAI_API_KEY` only to `*.openai.com` or to the origin of the `OPENAI_BASE_URL`
+  it is paired with. That's why the proxy entry names its key with `key_env`.
+- `ANTHROPIC_BASE_URL=http://127.0.0.1:8080` redirects the Anthropic provider *(the `/v1`
+  convention is unverified)*.
+- Sign-in providers (Nous Portal, ChatGPT/Codex, Claude Max, xAI) call their own endpoints, and may
+  bypass B *(unverified)*.
+
+**C.** `hermes sessions export sessions.jsonl` writes one session per line, and `--format trace`
+writes Claude-Code-style JSON lines. `HERMES_DUMP_REQUESTS=true` writes each API request payload to
+the log files.
+
+```bash
+hermes sessions export sessions.jsonl && logpak log pack hermes.lpk < sessions.jsonl
+```
+
+Docs: [NeMo Relay](https://hermes-agent.nousresearch.com/docs/integrations/nemo-relay),
+[providers](https://hermes-agent.nousresearch.com/docs/integrations/providers),
+[environment variables](https://hermes-agent.nousresearch.com/docs/reference/environment-variables),
+[session storage](https://hermes-agent.nousresearch.com/docs/developer-guide/session-storage).
+
+### nanobot
+
+Over OTel: **no OTel** (a Langfuse plugin, not OTLP).
+
+**B.** In `~/.nanobot/config.json`, set a provider's `apiBase`, with the version path where the
+endpoint needs one:
+
+```json
+{ "providers": {
+    "custom":    { "apiKey": "<key>", "apiBase": "http://127.0.0.1:8081/v1" },
+    "anthropic": { "apiKey": "<key>", "apiBase": "http://127.0.0.1:8080" } } }
+```
+
+Sign-in providers (`nanobot provider login openai-codex`, `github-copilot`, `xai-grok`) take no
+`apiBase`.
+
+Docs: [providers](https://github.com/HKUDS/nanobot/blob/main/docs/providers.md),
+[configuration](https://github.com/HKUDS/nanobot/blob/main/docs/configuration.md).
+
+### Open Interpreter
+
+Over OTel: **prompts only** *(unverified: from its config schema)*. The current Open Interpreter
+is a Rust fork of Codex, with Codex's configuration.
+
+**B.** In `~/.openinterpreter/config.toml`:
+
+```toml
+model_provider = "logpak"
+
+[model_providers.logpak]
+base_url = "http://127.0.0.1:8081/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"   # or "chat"
+```
+
+Leave `supports_websockets` off on this provider.
+
+**A (prompts).** The schema has a Codex-style `[otel]` table with `log_user_prompt` and an
+`exporter = { otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "binary" } }`
+*(unverified)*.
+
+Docs: [config](https://www.openinterpreter.com/docs/terminal/config).
+
+### Letta
+
+Over OTel: *(unverified)*.
+
+**B.** Agents on Letta Cloud call models from Letta's servers, which need a public endpoint. With the
+local backend, the model calls start on your machine:
+
+```bash
+letta --backend local connect lmstudio --base-url http://127.0.0.1:8081/v1
+```
+
+Or run `/connect` and choose the "OpenAI-compatible API" provider with the same base URL.
+
+Docs: [models](https://docs.letta.com/configuration/models/).
+
+### Agent Zero
+
+Over OTel: **no OTel**.
+
+**B.** In the web UI's Settings, pick "OpenAI Compatible" for each model slot (Main, Utility,
+Embedding), and set its API base URL to `http://host.docker.internal:8081/v1`. Agent Zero runs in
+Docker, so see [In Docker?](#personal-and-autonomous-agents) above.
+
+Docs: [installation](https://github.com/agent0ai/agent-zero/blob/main/docs/setup/installation.md).
+
+### OpenManus
+
+Over OTel: **no OTel**.
+
+**B.** In `config/config.toml`, the `[llm]` section's `base_url`. OpenManus calls every provider
+through an OpenAI-compatible client, so the path includes `/v1/`:
+
+```toml
+[llm]
+model = "<model>"
+base_url = "http://127.0.0.1:8080/v1/"
+api_key = "<key>"
+```
+
+Docs: [config.example.toml](https://github.com/FoundationAgents/OpenManus/blob/main/config/config.example.toml).
+
+### AutoGPT
+
+Over OTel: **no OTel** (traces go to PostHog).
+
+**B.** In `autogpt_platform/backend/.env`, AutoPilot calls any OpenAI-compatible endpoint:
+
+```bash
+CHAT_USE_LOCAL=true
+CHAT_BASE_URL=http://host.docker.internal:8081/v1
+CHAT_API_KEY=<key>
+```
+
+The platform runs in Docker, so see [In Docker?](#personal-and-autonomous-agents) above.
+
+Docs: [.env.default](https://github.com/Significant-Gravitas/AutoGPT/blob/master/autogpt_platform/backend/.env.default).
+
+---
+
+## Agent workflow platforms
+
+Self-hosted platforms where agents are built from nodes or flows, and chat front-ends used as agent
+hubs. Most run in Docker: see the [Docker note](#personal-and-autonomous-agents) for reaching
+Logpak from a container.
+
+### n8n
+
+Over OTel: **messages** for workflows built with n8n's Agents feature (v2.33 and later). The classic
+**AI Agent node** shows up only as a `node.execute` span, with no content: use B for it.
+
+**A.** OTLP traces, in preview since v2.19. Set these on every instance, workers included:
+
+```bash
+N8N_OTEL_ENABLED=true
+N8N_OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318
+N8N_OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf   # or grpc (v2.39 and later)
+N8N_OTEL_TRACES_PRODUCTION_ONLY=false           # export manual and test runs too
+```
+
+Agent spans record inputs and outputs by default (`N8N_AGENTS_TRACING_RECORD_INPUTS` and
+`N8N_AGENTS_TRACING_RECORD_OUTPUTS`).
+
+**B.** In the OpenAI credential, set **Base URL** to `http://host.docker.internal:8081/v1`. In the
+Anthropic credential, set **Base URL** to `http://host.docker.internal:8080` (no `/v1`).
+
+**C.** `GET /api/v1/executions?includeData=true` returns execution data as JSON, one array per page.
+Turn it into one line per execution with `jq -c '.data[]'`.
+
+Docs: [OpenTelemetry](https://docs.n8n.io/deploy/host-n8n/keep-n8n-running/trace-executions-with-opentelemetry),
+[environment variables](https://docs.n8n.io/deploy/host-n8n/configure-n8n/basic-configuration/use-environment-variables/opentelemetry).
+
+### Dify
+
+Over OTel: **messages**. LLM node spans carry `gen_ai.input.messages` and `gen_ai.output.messages`
+(on Community and Cloud editions; on Enterprise, set `ENTERPRISE_INCLUDE_CONTENT=true`).
+
+**A.** In the API and worker containers' environment:
+
+```bash
+ENABLE_OTEL=true
+OTLP_BASE_ENDPOINT=http://host.docker.internal:4318   # Dify appends /v1/traces and /v1/metrics
+OTEL_SAMPLING_RATE=1.0                                 # the default, 0.1, traces one request in ten
+```
+
+`OTEL_EXPORTER_OTLP_PROTOCOL=grpc` switches to gRPC (`:4317`).
+
+Per app, the Monitoring page's **OpenTelemetry** tracing provider works too. Set its endpoint to
+`http://host.docker.internal:4318`. Its requests pass Dify's SSRF egress policy, so a private
+address has to be allowed in the `ssrf_proxy` configuration.
+
+**B.** In the model provider settings, set the base URL field:
+
+| Provider plugin | Field | Value |
+|---|---|---|
+| OpenAI | API Base URL | `http://host.docker.internal:8081` (Dify adds `/v1` when it is missing) |
+| OpenAI-API-compatible | API Base URL | `http://host.docker.internal:8081/v1` |
+| Anthropic | API URL | `http://host.docker.internal:8080` |
+
+Docs: [environment variables](https://docs.dify.ai/en/self-host/configuration/environments).
+
+### Langflow
+
+Over OTel: **messages**, through the Phoenix integration. Langflow's own OTel traces have one
+`flow.execute` span per run, with no prompts.
+
+**A.** Point the Phoenix integration at the collector. It exports OTLP/HTTP protobuf to
+`<endpoint>/v1/traces`, with OpenInference's LangChain instrumentation, which records LLM inputs and
+outputs:
+
+```bash
+PHOENIX_COLLECTOR_ENDPOINT=http://127.0.0.1:4318
+```
+
+On a host other than `localhost` or `127.0.0.1` (`host.docker.internal`, say), Langflow also wants
+`PHOENIX_API_KEY`. Any value works, because the collector does not check it.
+
+**B.** In the OpenAI model component, set **OpenAI API Base** (an advanced field) to
+`http://127.0.0.1:8081/v1`. In the Anthropic component, set **Anthropic API URL** to
+`http://127.0.0.1:8080`.
+
+Docs: [OpenTelemetry](https://docs.langflow.org/observability-opentelemetry),
+[Arize Phoenix](https://docs.langflow.org/integrations-arize).
+
+### Flowise
+
+Over OTel: **messages**, through the Phoenix analytics integration. Flowise's native OTel exports
+metrics only.
+
+**A.** In the chatflow's Analytics settings, choose Phoenix. Create a "Phoenix API" credential with
+**Endpoint** `http://host.docker.internal:4318` and any **API Key**. Flowise exports OTLP/HTTP
+protobuf to `<endpoint>/v1/traces`, with OpenInference's LangChain instrumentation, which includes
+prompts and responses.
+
+**B.** In the ChatOpenAI node's additional parameters, set **Base Path** to
+`http://host.docker.internal:8081/v1`. The ChatAnthropic node has no base-URL field.
+
+Docs: [analytics](https://docs.flowiseai.com/using-flowise/analytics).
+
+### Open WebUI
+
+Over OTel: **metadata only** (HTTP, database and Redis spans, no GenAI attributes).
+
+**B.** Point the OpenAI connection at the recording server:
+
+```bash
+OPENAI_API_BASE_URL=http://host.docker.internal:8081/v1
+```
+
+The setting is a PersistentConfig: after the first start, the value in Admin Settings, Connections
+wins, so change it there (or set `ENABLE_PERSISTENT_CONFIG=False`).
+
+Docs: [OpenTelemetry](https://docs.openwebui.com/reference/monitoring/otel).
+
+### LibreChat
+
+Over OTel: **metadata only** (`OTEL_TRACING_ENABLED` traces the server, database and outbound HTTP,
+without prompts).
+
+**B.** In `librechat.yaml`, add a custom endpoint. LibreChat appends `/chat/completions`:
+
+```yaml
+endpoints:
+  custom:
+    - name: "via-logpak"
+      apiKey: "${OPENAI_API_KEY}"
+      baseURL: "http://host.docker.internal:8081/v1"
+      models: { default: ["<model>"] }
+```
+
+For Anthropic, `ANTHROPIC_REVERSE_PROXY=http://host.docker.internal:8080`.
+
+Docs: [custom endpoints](https://www.librechat.ai/docs/configuration/librechat_yaml/object_structure/custom_endpoint),
+[logging](https://www.librechat.ai/docs/configuration/logging).
+
+### AnythingLLM
+
+Over OTel: **no OTel**.
+
+**B.** Use the Generic OpenAI provider, in the UI or in `.env`:
+
+```bash
+LLM_PROVIDER=generic-openai
+GENERIC_OPEN_AI_BASE_PATH=http://host.docker.internal:8081/v1
+GENERIC_OPEN_AI_API_KEY=<key>
+GENERIC_OPEN_AI_MODEL_PREF=<model>
+```
+
+**C.** Admin, Workspace Chats, Export, as JSONL (or `GET /api/v1/system/export-chats?type=jsonl`
+with a developer API key). Each line is a prompt and its response.
+
+```bash
+logpak log pack anythingllm.lpk < chats.jsonl
+```
+
+Docs: [.env.example](https://github.com/Mintplex-Labs/anything-llm/blob/master/docker/.env.example).
+
+### Activepieces
+
+Over OTel: logs only (`AP_OTEL_ENABLED=true`); whether they carry prompts is *(unverified)*.
+
+**B.** In Admin, AI Providers, add **Other (OpenAI Compatible)** with base URL
+`http://host.docker.internal:8081/v1`. The built-in OpenAI and Anthropic providers take no base URL.
+
+Docs: [AI providers](https://www.activepieces.com/docs/admin-guide/guides/setup-ai-providers),
+[OpenTelemetry](https://www.activepieces.com/docs/install/configure-operate/setup-opentelemetry).
+
+### Rivet
+
+Over OTel: **no OTel**.
+
+**B.** In Settings, **OpenAI Endpoint** takes the full URL: `http://127.0.0.1:8081/v1/chat/completions`.
+The Anthropic plugin's **Anthropic API Endpoint** (or `ANTHROPIC_API_ENDPOINT`) defaults to
+`https://api.anthropic.com/v1`, so use `http://127.0.0.1:8080/v1`.
+
+Docs: [repository](https://github.com/Ironclad/rivet).
 
 ---
 
