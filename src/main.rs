@@ -1,8 +1,8 @@
-//! `agentwire server`: the AWD1 layer as a reverse proxy in front of an HTTP API.
-//! `agentwire client`: a local proxy that sends what a tool posts to it as AWD1 deltas.
-//! `agentwire collect`: a log sink (OTLP/HTTP, a gateway's HTTP log plugin) that stores every
-//! request body in AWL1, and forwards it unchanged when given a backend.
-//! `agentwire log`: pack, list and read AWL1 files (what `--record-dir` and `collect` write).
+//! `logpak server`: the LPD1 layer as a reverse proxy in front of an HTTP API.
+//! `logpak client`: a local proxy that sends what a tool posts to it as LPD1 deltas.
+//! `logpak collect`: a log sink (OTLP/HTTP, a gateway's HTTP log plugin) that stores every
+//! request body in LPK1, and forwards it unchanged when given a backend.
+//! `logpak log`: pack, list and read LPK1 files (what `--record-dir` and `collect` write).
 
 use std::convert::Infallible;
 use std::fs::File;
@@ -16,11 +16,6 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use agentwire::client::Client;
-use agentwire::log;
-use agentwire::server::{Awd1Layer, Config, InnerBody, Stats};
-use agentwire::store::Store;
-use agentwire::{ERROR, KEPT};
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use http::header::{self, HeaderMap, HeaderName};
@@ -32,6 +27,11 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
+use logpak::client::Client;
+use logpak::log;
+use logpak::server::{Config, InnerBody, Lpd1Layer, Stats};
+use logpak::store::Store;
+use logpak::{ERROR, KEPT};
 use tokio::net::TcpListener;
 use tower_layer::Layer;
 
@@ -49,91 +49,91 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Mode {
-    /// Rebuild AWD1 requests and forward them, byte-exact, to the upstream API.
+    /// Rebuild LPD1 requests and forward them, byte-exact, to the upstream API.
     Server {
-        #[arg(long, env = "AGENTWIRE_LISTEN", default_value = "0.0.0.0:8080")]
+        #[arg(long, env = "LOGPAK_LISTEN", default_value = "0.0.0.0:8080")]
         listen: SocketAddr,
         /// The API requests are forwarded to, e.g. https://api.anthropic.com
-        #[arg(long, env = "AGENTWIRE_UPSTREAM")]
+        #[arg(long, env = "LOGPAK_UPSTREAM")]
         upstream: reqwest::Url,
         /// Bytes of kept bases held in memory, across all tenants.
-        #[arg(long, env = "AGENTWIRE_STORE_BYTES", default_value_t = 1 << 30)]
+        #[arg(long, env = "LOGPAK_STORE_BYTES", default_value_t = 1 << 30)]
         store_bytes: usize,
         /// Seconds a base unused is kept.
-        #[arg(long, env = "AGENTWIRE_TTL_SECONDS", default_value_t = 1800)]
+        #[arg(long, env = "LOGPAK_TTL_SECONDS", default_value_t = 1800)]
         ttl_seconds: u64,
         /// The largest body kept or rebuilt.
-        #[arg(long, env = "AGENTWIRE_MAX_BODY", default_value_t = 64 << 20)]
+        #[arg(long, env = "LOGPAK_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
         /// The headers that identify a tenant (repeat the flag); bases are never shared across them.
-        #[arg(long = "scope-header", env = "AGENTWIRE_SCOPE_HEADERS", value_delimiter = ',', default_values_t = [String::from("authorization"), String::from("x-api-key")])]
+        #[arg(long = "scope-header", env = "LOGPAK_SCOPE_HEADERS", value_delimiter = ',', default_values_t = [String::from("authorization"), String::from("x-api-key")])]
         scope_headers: Vec<String>,
         /// Serve Prometheus metrics at http://<addr>/metrics.
-        #[arg(long, env = "AGENTWIRE_METRICS")]
+        #[arg(long, env = "LOGPAK_METRICS")]
         metrics: Option<SocketAddr>,
         /// Store every request body forwarded, with its time, method and path (never its headers),
-        /// in a new AWL1 file in this directory; read it with `agentwire log`.
-        #[arg(long, env = "AGENTWIRE_RECORD_DIR")]
+        /// in a new LPK1 file in this directory; read it with `logpak log`.
+        #[arg(long, env = "LOGPAK_RECORD_DIR")]
         record_dir: Option<PathBuf>,
         /// Records a new one may delta against: about one per conversation in flight.
-        #[arg(long, env = "AGENTWIRE_RECORD_WINDOW", default_value_t = 16)]
+        #[arg(long, env = "LOGPAK_RECORD_WINDOW", default_value_t = 16)]
         record_window: usize,
-        /// Start a new AWL1 file once one reaches this size; every file reads on its own.
-        #[arg(long, env = "AGENTWIRE_ROTATE_BYTES", default_value_t = 1 << 30)]
+        /// Start a new LPK1 file once one reaches this size; every file reads on its own.
+        #[arg(long, env = "LOGPAK_ROTATE_BYTES", default_value_t = 1 << 30)]
         rotate_bytes: u64,
     },
     /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
-    /// AWL1, gzip decoded; forward each request as received when given a backend. Also accepts
-    /// AWD1 deltas from `agentwire client`.
+    /// LPK1, decoded (gzip, deflate, br, zstd, snappy); forward each request as received when given a backend. Also accepts
+    /// LPD1 deltas from `logpak client`.
     Collect {
         /// Where to listen (repeat, or comma-separate); each address takes OTLP/HTTP and OTLP/gRPC.
         /// Loopback by default: anyone who can reach it can fill the disk. In a container, give
         /// 0.0.0.0:4318,0.0.0.0:4317 and put it on a private network.
-        #[arg(long, env = "AGENTWIRE_LISTEN", value_delimiter = ',', default_value = "127.0.0.1:4318,127.0.0.1:4317")]
+        #[arg(long, env = "LOGPAK_LISTEN", value_delimiter = ',', default_value = "127.0.0.1:4318,127.0.0.1:4317")]
         listen: Vec<SocketAddr>,
-        /// The new AWL1 file goes in this directory; read it with `agentwire log`.
-        #[arg(long, env = "AGENTWIRE_RECORD_DIR")]
+        /// The new LPK1 file goes in this directory; read it with `logpak log`.
+        #[arg(long, env = "LOGPAK_RECORD_DIR")]
         record_dir: PathBuf,
         /// The backend each request is forwarded to, as received, e.g.
         /// https://cloud.langfuse.com/api/public/otel. Without one, each request is answered 200.
-        #[arg(long, env = "AGENTWIRE_FORWARD")]
+        #[arg(long, env = "LOGPAK_FORWARD")]
         forward: Option<reqwest::Url>,
         /// Records a new one may delta against: about one per trace or exporter interleaved.
-        #[arg(long, env = "AGENTWIRE_RECORD_WINDOW", default_value_t = 16)]
+        #[arg(long, env = "LOGPAK_RECORD_WINDOW", default_value_t = 16)]
         record_window: usize,
-        /// Start a new AWL1 file once one reaches this size; every file reads on its own.
-        #[arg(long, env = "AGENTWIRE_ROTATE_BYTES", default_value_t = 1 << 30)]
+        /// Start a new LPK1 file once one reaches this size; every file reads on its own.
+        #[arg(long, env = "LOGPAK_ROTATE_BYTES", default_value_t = 1 << 30)]
         rotate_bytes: u64,
-        /// The largest body stored, after gzip decoding.
-        #[arg(long, env = "AGENTWIRE_MAX_BODY", default_value_t = 64 << 20)]
+        /// The largest body stored, after decoding.
+        #[arg(long, env = "LOGPAK_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
-        #[arg(long, env = "AGENTWIRE_METRICS")]
+        #[arg(long, env = "LOGPAK_METRICS")]
         metrics: Option<SocketAddr>,
     },
-    /// Accept plain requests from a local tool and send them to an `agentwire server` as deltas.
+    /// Accept plain requests from a local tool and send them to a `logpak server` as deltas.
     Client {
-        #[arg(long, env = "AGENTWIRE_LISTEN", default_value = "127.0.0.1:8787")]
+        #[arg(long, env = "LOGPAK_LISTEN", default_value = "127.0.0.1:8787")]
         listen: SocketAddr,
-        /// The `agentwire server` (or an AWD1-aware API) to send to.
-        #[arg(long, env = "AGENTWIRE_UPSTREAM")]
+        /// The `logpak server` (or an LPD1-aware API) to send to.
+        #[arg(long, env = "LOGPAK_UPSTREAM")]
         upstream: reqwest::Url,
         /// Bodies remembered as bases: about one per conversation in flight.
-        #[arg(long, env = "AGENTWIRE_BASES", default_value_t = 8)]
+        #[arg(long, env = "LOGPAK_BASES", default_value_t = 8)]
         bases: usize,
         /// The largest request body accepted from the tool.
-        #[arg(long, env = "AGENTWIRE_MAX_BODY", default_value_t = 64 << 20)]
+        #[arg(long, env = "LOGPAK_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
-        #[arg(long, env = "AGENTWIRE_METRICS")]
+        #[arg(long, env = "LOGPAK_METRICS")]
         metrics: Option<SocketAddr>,
     },
-    /// Read and write AWL1 files: bodies stored as deltas against earlier ones.
+    /// Read and write LPK1 files: bodies stored as deltas against earlier ones.
     #[command(subcommand)]
     Log(LogCmd),
 }
 
 #[derive(Subcommand)]
 enum LogCmd {
-    /// Store each line of stdin (JSON lines: spans, requests) as a record of a new AWL1 file.
+    /// Store each line of stdin (JSON lines: spans, requests) as a record of a new LPK1 file.
     Pack {
         file: PathBuf,
         /// Records a new one may delta against: about one per trace or conversation interleaved.
@@ -164,9 +164,7 @@ async fn main() -> Result<(), BoxError> {
         return run_log(cmd);
     }
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "agentwire=info".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "logpak=info".into()))
         .init();
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -226,7 +224,7 @@ async fn main() -> Result<(), BoxError> {
     }
 }
 
-/// The AWD1 layer in front of `forward`, until shutdown.
+/// The LPD1 layer in front of `forward`, until shutdown.
 async fn run_server(
     listen: Vec<SocketAddr>,
     store: Store,
@@ -235,7 +233,7 @@ async fn run_server(
     forward: Forward,
 ) -> Result<(), BoxError> {
     let store = Arc::new(store);
-    let layer = Awd1Layer::new(store.clone(), config);
+    let layer = Lpd1Layer::new(store.clone(), config);
     if let Some(addr) = metrics {
         let (stats, store, record) = (layer.stats().clone(), store.clone(), forward.record.clone());
         serve_metrics(addr, move || {
@@ -301,7 +299,7 @@ fn lock(r: &Recorder) -> std::sync::MutexGuard<'_, Recording> {
     r.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// AWL1 files in `dir`, named by when each was opened, so a restart never appends to or replaces
+/// LPK1 files in `dir`, named by when each was opened, so a restart never appends to or replaces
 /// one, and in order by name. Each is self-contained: a new one starts without bases.
 struct Recording {
     dir: PathBuf,
@@ -336,11 +334,11 @@ impl Recording {
     }
 
     fn create(dir: &std::path::Path, window: usize, seq: u64) -> io::Result<(PathBuf, log::Writer<BufWriter<File>>)> {
-        let path = dir.join(format!("{}-{}-{seq:06}.awl", unix_ms(), std::process::id()));
+        let path = dir.join(format!("{}-{}-{seq:06}.lpk", unix_ms(), std::process::id()));
         let file = File::options().write(true).create_new(true).open(&path)?;
         tracing::info!(path = %path.display(), "recording");
         let mut w = log::Writer::new(BufWriter::new(file), window)?;
-        w.flush()?; // a valid, empty AWL1 file before the first record
+        w.flush()?; // a valid, empty LPK1 file before the first record
         Ok((path, w))
     }
 
@@ -374,10 +372,10 @@ impl Recording {
     fn metrics(&self) -> String {
         let on_disk = self.closed + std::fs::metadata(&self.path).map_or(0, |m| m.len());
         format!(
-            "# TYPE agentwire_recorded_total counter\nagentwire_recorded_total {}\n\
-             # TYPE agentwire_recorded_body_bytes_total counter\nagentwire_recorded_body_bytes_total {}\n\
-             # TYPE agentwire_recorded_file_bytes_total counter\nagentwire_recorded_file_bytes_total {on_disk}\n\
-             # TYPE agentwire_record_failures_total counter\nagentwire_record_failures_total {}\n",
+            "# TYPE logpak_recorded_total counter\nlogpak_recorded_total {}\n\
+             # TYPE logpak_recorded_body_bytes_total counter\nlogpak_recorded_body_bytes_total {}\n\
+             # TYPE logpak_recorded_file_bytes_total counter\nlogpak_recorded_file_bytes_total {on_disk}\n\
+             # TYPE logpak_record_failures_total counter\nlogpak_record_failures_total {}\n",
             self.recorded, self.body_bytes, self.failures,
         )
     }
@@ -387,7 +385,7 @@ fn unix_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())
 }
 
-/// The inner service of `agentwire server` and `collect`: records the request (if recording), then
+/// The inner service of `logpak server` and `collect`: records the request (if recording), then
 /// sends it on to the upstream, or answers it (a collector without a backend).
 #[derive(Clone)]
 struct Forward {
@@ -473,16 +471,9 @@ async fn export(
         Err(code) => return grpc::error(code, "not one length-prefixed message"),
     };
     let message = if compressed {
-        let gzip = parts.headers.get("grpc-encoding").is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"gzip"));
-        if !gzip {
-            return grpc::error(grpc::Code::Unimplemented, "only gzip compression is supported");
-        }
-        match gunzip(message, max_body) {
+        match grpc_decoded(&parts.headers, message, max_body) {
             Ok(m) => m,
-            Err(StatusCode::PAYLOAD_TOO_LARGE) => {
-                return grpc::error(grpc::Code::ResourceExhausted, "the export exceeds the size limit");
-            }
-            Err(_) => return grpc::error(grpc::Code::InvalidArgument, "the message is not gzip"),
+            Err((code, why)) => return grpc::error(code, why),
         }
     } else {
         body.slice_ref(message)
@@ -606,30 +597,98 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
     }
 }
 
-/// The body as stored and delta'd: gzip decoded (at most `max` bytes), with "-" for its encoding;
-/// any other encoding kept as sent, and named.
+/// The body as stored and delta'd: decoded from every content coding it names (gzip, deflate, br,
+/// zstd, snappy), at most `max` bytes, with "-" for its encoding. A coding none of these is kept as
+/// sent, and named.
 fn decoded(headers: &HeaderMap, body: Bytes, max: usize) -> Result<(Bytes, String), StatusCode> {
     let encoding = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).unwrap_or("").trim();
-    if encoding.is_empty() || encoding.eq_ignore_ascii_case("identity") {
-        return Ok((body, "-".to_owned()));
+    let mut out = body.clone();
+    // codings are listed in the order they were applied
+    for coding in encoding.rsplit(',').map(str::trim) {
+        if coding.is_empty() || coding.eq_ignore_ascii_case("identity") {
+            continue;
+        }
+        match decompress(coding, &out, max) {
+            Some(decoded) => out = decoded?,
+            None => return Ok((body, encoding.replace(' ', ""))),
+        }
     }
-    if !encoding.eq_ignore_ascii_case("gzip") && !encoding.eq_ignore_ascii_case("x-gzip") {
-        return Ok((body, encoding.replace(' ', "")));
-    }
-    Ok((gunzip(&body, max)?, "-".to_owned()))
+    Ok((out, "-".to_owned()))
 }
 
-/// Gzip (one member or several) decoded to at most `max` bytes: 413 past it, 400 for what is not gzip.
-fn gunzip(body: &[u8], max: usize) -> Result<Bytes, StatusCode> {
+/// A compressed gRPC message, decoded by the request's `grpc-encoding`.
+fn grpc_decoded(headers: &HeaderMap, message: &[u8], max: usize) -> Result<Bytes, (grpc::Code, &'static str)> {
+    let coding = headers.get("grpc-encoding").and_then(|v| v.to_str().ok()).unwrap_or("");
+    match decompress(coding, message, max) {
+        None => Err((grpc::Code::Unimplemented, "unsupported grpc-encoding")),
+        Some(Ok(m)) => Ok(m),
+        Some(Err(StatusCode::PAYLOAD_TOO_LARGE)) => {
+            Err((grpc::Code::ResourceExhausted, "the export exceeds the size limit"))
+        }
+        Some(Err(_)) => Err((grpc::Code::InvalidArgument, "the message does not decode")),
+    }
+}
+
+/// `data` decoded from one coding, to at most `max` bytes: 413 past it, 400 for what does not decode;
+/// `None` for a coding not known here.
+fn decompress(coding: &str, data: &[u8], max: usize) -> Option<Result<Bytes, StatusCode>> {
+    Some(match coding.to_ascii_lowercase().as_str() {
+        "gzip" | "x-gzip" => bounded(flate2::read::MultiGzDecoder::new(data), max), // one member or several
+        // RFC 9110's deflate is zlib; some senders send the bare deflate stream
+        "deflate" => bounded(flate2::read::ZlibDecoder::new(data), max).or_else(|code| match code {
+            StatusCode::BAD_REQUEST => bounded(flate2::read::DeflateDecoder::new(data), max),
+            code => Err(code),
+        }),
+        "br" => bounded(brotli_decompressor::Decompressor::new(data, 4096), max),
+        "zstd" => unzstd(data, max),
+        // the framing format opens with its stream identifier; without it, `snappy` is one raw block
+        "x-snappy-framed" => bounded(snap::read::FrameDecoder::new(data), max),
+        "snappy" if data.starts_with(b"\xff\x06\x00\x00sNaPpY") => bounded(snap::read::FrameDecoder::new(data), max),
+        "snappy" => match snap::raw::decompress_len(data) {
+            Ok(n) if n > max => Err(StatusCode::PAYLOAD_TOO_LARGE),
+            Ok(_) => {
+                snap::raw::Decoder::new().decompress_vec(data).map(Bytes::from).map_err(|_| StatusCode::BAD_REQUEST)
+            }
+            Err(_) => Err(StatusCode::BAD_REQUEST),
+        },
+        _ => return None,
+    })
+}
+
+/// Reads a decoder to its end, but never past `max` bytes.
+fn bounded(decoder: impl Read, max: usize) -> Result<Bytes, StatusCode> {
     let mut out = Vec::new();
-    flate2::read::MultiGzDecoder::new(body)
-        .take(max as u64 + 1)
-        .read_to_end(&mut out)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    decoder.take(max as u64 + 1).read_to_end(&mut out).map_err(|_| StatusCode::BAD_REQUEST)?;
     if out.len() > max {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     Ok(Bytes::from(out))
+}
+
+/// Zstandard frames, one or several, whether or not they state their size, in a window no larger
+/// than LPD1's own (2^27).
+fn unzstd(data: &[u8], max: usize) -> Result<Bytes, StatusCode> {
+    let mut dctx = zstd_safe::DCtx::create();
+    dctx.set_parameter(zstd_safe::DParameter::WindowLogMax(27)).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut input = zstd_safe::InBuffer::around(data);
+    let mut out = Vec::new();
+    loop {
+        // one block at a time: at most a block past `max` before it is refused
+        out.reserve(zstd_safe::DCtx::out_size());
+        let pos = out.len();
+        let (hint, full) = {
+            let mut buf = zstd_safe::OutBuffer::around_pos(&mut out, pos);
+            let hint = dctx.decompress_stream(&mut buf, &mut input).map_err(|_| StatusCode::BAD_REQUEST)?;
+            (hint, buf.pos() == buf.capacity())
+        };
+        if out.len() > max {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        if input.pos() == data.len() && !full {
+            // all read and all flushed: done at a frame's end, cut short inside one
+            return if hint == 0 { Ok(Bytes::from(out)) } else { Err(StatusCode::BAD_REQUEST) };
+        }
+    }
 }
 
 /// A collector's answer: OTLP/HTTP's empty success, in the request's content type.
@@ -674,8 +733,8 @@ impl ClientProxy {
             Ok(b) => b.to_bytes(),
             Err(_) => return status(StatusCode::PAYLOAD_TOO_LARGE),
         };
-        // a delta of gzip bytes finds nothing: decode first. A body in another encoding goes as is
-        // (`awd1` must be its only content coding)
+        // a delta of compressed bytes finds nothing: decode first. A body in a coding not known here goes as is
+        // (`lpd1` must be its only content coding)
         let body = match decoded(&parts.headers, body, self.max_body) {
             Ok((body, encoding)) if encoding == "-" => {
                 parts.headers.remove(header::CONTENT_ENCODING);
@@ -724,11 +783,11 @@ impl ClientStats {
     fn render(&self) -> String {
         let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
         format!(
-            "# TYPE agentwire_client_requests_total counter\nagentwire_client_requests_total {}\n\
-             # TYPE agentwire_client_deltas_total counter\nagentwire_client_deltas_total {}\n\
-             # TYPE agentwire_client_resent_total counter\nagentwire_client_resent_total {}\n\
-             # TYPE agentwire_client_body_bytes_total counter\nagentwire_client_body_bytes_total {}\n\
-             # TYPE agentwire_client_wire_bytes_total counter\nagentwire_client_wire_bytes_total {}\n",
+            "# TYPE logpak_client_requests_total counter\nlogpak_client_requests_total {}\n\
+             # TYPE logpak_client_deltas_total counter\nlogpak_client_deltas_total {}\n\
+             # TYPE logpak_client_resent_total counter\nlogpak_client_resent_total {}\n\
+             # TYPE logpak_client_body_bytes_total counter\nlogpak_client_body_bytes_total {}\n\
+             # TYPE logpak_client_wire_bytes_total counter\nlogpak_client_wire_bytes_total {}\n",
             g(&self.requests),
             g(&self.deltas),
             g(&self.resent),
@@ -741,12 +800,12 @@ impl ClientStats {
 fn server_metrics(stats: &Stats, store: &Store) -> String {
     let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
     format!(
-        "# TYPE agentwire_server_deltas_total counter\nagentwire_server_deltas_total {}\n\
-         # TYPE agentwire_server_delta_bytes_total counter\nagentwire_server_delta_bytes_total {}\n\
-         # TYPE agentwire_server_rebuilt_bytes_total counter\nagentwire_server_rebuilt_bytes_total {}\n\
-         # TYPE agentwire_server_kept_total counter\nagentwire_server_kept_total {}\n\
-         # TYPE agentwire_server_refused_total counter\nagentwire_server_refused_total {}\n\
-         # TYPE agentwire_server_store_bytes gauge\nagentwire_server_store_bytes {}\n",
+        "# TYPE logpak_server_deltas_total counter\nlogpak_server_deltas_total {}\n\
+         # TYPE logpak_server_delta_bytes_total counter\nlogpak_server_delta_bytes_total {}\n\
+         # TYPE logpak_server_rebuilt_bytes_total counter\nlogpak_server_rebuilt_bytes_total {}\n\
+         # TYPE logpak_server_kept_total counter\nlogpak_server_kept_total {}\n\
+         # TYPE logpak_server_refused_total counter\nlogpak_server_refused_total {}\n\
+         # TYPE logpak_server_store_bytes gauge\nlogpak_server_store_bytes {}\n",
         g(&stats.deltas),
         g(&stats.delta_bytes),
         g(&stats.rebuilt_bytes),
@@ -824,7 +883,119 @@ mod tests {
         assert_eq!(decoded(&with("gzip"), two_members.into(), 5), Ok((plain.clone(), "-".into())));
         assert_eq!(decoded(&with("gzip"), gz(b"hello!"), 5), Err(StatusCode::PAYLOAD_TOO_LARGE));
         assert_eq!(decoded(&with("gzip"), plain.clone(), 5), Err(StatusCode::BAD_REQUEST), "not gzip");
-        assert_eq!(decoded(&with("br"), plain.clone(), 5), Ok((plain, "br".into())));
+        assert_eq!(decoded(&with("lz4"), plain.clone(), 5), Ok((plain, "lz4".into())));
+    }
+
+    /// Every coding an exporter or log shipper may pick, so no batch is stored still compressed
+    /// (which leaves a delta nothing to find).
+    fn encoded(coding: &str, b: &[u8]) -> Bytes {
+        let mut out = Vec::new();
+        match coding {
+            "deflate" => {
+                let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                e.write_all(b).unwrap();
+                out = e.finish().unwrap();
+            }
+            "raw-deflate" => {
+                let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+                e.write_all(b).unwrap();
+                out = e.finish().unwrap();
+            }
+            "br" => {
+                brotli::BrotliCompress(&mut &b[..], &mut out, &Default::default()).unwrap();
+            }
+            "zstd" => {
+                out = vec![0; zstd_safe::compress_bound(b.len())];
+                let n = zstd_safe::compress(&mut out[..], b, 3).unwrap();
+                out.truncate(n);
+            }
+            "snappy" => out = snap::raw::Encoder::new().compress_vec(b).unwrap(),
+            "snappy-framed" => {
+                let mut w = snap::write::FrameEncoder::new(Vec::new());
+                w.write_all(b).unwrap();
+                out = w.into_inner().unwrap();
+            }
+            _ => unreachable!(),
+        }
+        Bytes::from(out)
+    }
+
+    #[test]
+    fn deflate_brotli_zstd_and_snappy_are_decoded_within_the_limit() {
+        let with = |enc: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::CONTENT_ENCODING, enc.parse().unwrap());
+            h
+        };
+        let plain = Bytes::from_static(b"hello");
+        for (fixture, name) in [
+            ("deflate", "deflate"),
+            ("raw-deflate", "deflate"), // RFC 9110 says zlib; some senders send it bare
+            ("br", "br"),
+            ("zstd", "zstd"),
+            ("zstd", "ZSTD"),
+            ("snappy", "snappy"),
+            ("snappy-framed", "snappy"),
+            ("snappy-framed", "x-snappy-framed"),
+        ] {
+            assert_eq!(
+                decoded(&with(name), encoded(fixture, b"hello"), 5),
+                Ok((plain.clone(), "-".into())),
+                "{fixture}"
+            );
+            assert_eq!(
+                decoded(&with(name), encoded(fixture, b"hello!"), 5),
+                Err(StatusCode::PAYLOAD_TOO_LARGE),
+                "{fixture} past the limit"
+            );
+            // raw snappy opens with the decoded length: these bytes claim more than the limit
+            let refused = if name == "snappy" { StatusCode::PAYLOAD_TOO_LARGE } else { StatusCode::BAD_REQUEST };
+            assert_eq!(decoded(&with(name), Bytes::from_static(b"\xff\xfe not it"), 5), Err(refused), "{fixture}");
+        }
+        // zstd: frames back to back, and one cut short
+        let two_frames = [encoded("zstd", b"hel"), encoded("zstd", b"lo")].concat();
+        assert_eq!(decoded(&with("zstd"), two_frames.into(), 5), Ok((plain.clone(), "-".into())));
+        // a body many output blocks long, within the limit and past it
+        let big: Vec<u8> = (0..1_000_000u32).flat_map(|i| (i % 251).to_le_bytes()).collect();
+        let packed = encoded("zstd", &big);
+        assert_eq!(decoded(&with("zstd"), packed.clone(), big.len()), Ok((Bytes::from(big.clone()), "-".into())));
+        assert_eq!(decoded(&with("zstd"), packed, big.len() - 1), Err(StatusCode::PAYLOAD_TOO_LARGE));
+        let cut = encoded("zstd", b"hello");
+        assert_eq!(decoded(&with("zstd"), cut.slice(..cut.len() - 2), 5), Err(StatusCode::BAD_REQUEST));
+        // codings applied in order are undone in reverse; one unknown keeps the body as sent
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&encoded("br", b"hello")).unwrap();
+        let br_then_gzip = Bytes::from(gz.finish().unwrap());
+        // (every layer is held to the limit: the brotli layer is longer than "hello")
+        assert_eq!(decoded(&with("br, gzip"), br_then_gzip.clone(), 64), Ok((plain, "-".into())));
+        assert_eq!(decoded(&with("lz4, gzip"), br_then_gzip.clone(), 64), Ok((br_then_gzip, "lz4,gzip".into())));
+    }
+
+    #[test]
+    fn a_grpc_message_is_decoded_by_its_grpc_encoding() {
+        let with = |enc: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("grpc-encoding", enc.parse().unwrap());
+            h
+        };
+        for coding in ["deflate", "zstd", "snappy"] {
+            assert_eq!(
+                grpc_decoded(&with(coding), &encoded(coding, b"hello"), 5),
+                Ok(Bytes::from_static(b"hello")),
+                "{coding}"
+            );
+        }
+        assert_eq!(
+            grpc_decoded(&with("zstd"), &encoded("zstd", b"hello!"), 5).unwrap_err().0,
+            grpc::Code::ResourceExhausted
+        );
+        assert_eq!(grpc_decoded(&with("zstd"), b"not it", 5).unwrap_err().0, grpc::Code::InvalidArgument);
+        assert_eq!(grpc_decoded(&with("lz4"), b"hello", 5).unwrap_err().0, grpc::Code::Unimplemented);
+        assert_eq!(
+            grpc_decoded(&HeaderMap::new(), b"hello", 5).unwrap_err().0,
+            grpc::Code::Unimplemented,
+            "compressed, no encoding"
+        );
     }
 
     #[test]
@@ -844,7 +1015,7 @@ mod tests {
 
     #[test]
     fn a_failed_write_moves_recording_to_a_new_file_and_loses_nothing_after_it() {
-        let dir = std::env::temp_dir().join(format!("agentwire-recording-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("logpak-recording-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut r = Recording::open(dir.clone(), 4, 1 << 30).unwrap();
         r.append(b"m", Bytes::from_static(b"before")).unwrap();
@@ -864,13 +1035,13 @@ mod tests {
             })
             .collect();
         assert_eq!(bodies, [&b"before"[..], b"after"]);
-        assert!(r.metrics().contains("agentwire_record_failures_total 1\n"));
+        assert!(r.metrics().contains("logpak_record_failures_total 1\n"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn files_rotated_within_a_millisecond_get_their_own_names_in_order() {
-        let dir = std::env::temp_dir().join(format!("agentwire-rotation-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("logpak-rotation-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut r = Recording::open(dir.clone(), 1, 1).unwrap(); // every record fills its file
         for body in ["a", "b", "c"] {

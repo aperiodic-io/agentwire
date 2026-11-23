@@ -1,8 +1,8 @@
 //! Any bytes as a delta against any base: refused, or rebuilt into exactly the body it names.
 #![no_main]
 
-use agentwire::codec;
 use libfuzzer_sys::fuzz_target;
+use logpak::codec;
 
 fuzz_target!(|input: (&[u8], &[u8])| {
     let (base, delta) = input;

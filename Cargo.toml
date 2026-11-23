@@ -1,10 +1,10 @@
 [package]
-name = "agentwire"
+name = "logpak"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
-description = "A compression codec for LLM logs and traces: each record stored (AWL1) or sent (AWD1) as a delta against an earlier one."
+description = "A compression codec for LLM logs and traces: each record stored (LPK1) or sent (LPD1) as a delta against an earlier one."
 repository = "https://github.com/aperiodic-io/agentwire"
 readme = "README.md"
 keywords = ["compression", "llm", "logging", "delta", "zstd"]
@@ -13,17 +13,19 @@ include = ["/src", "/README.md", "/SPEC.md", "/LICENSE"]
 
 [features]
 default = ["server"]
-# the tower layer that decodes AWD1 requests (src/server.rs)
+# the tower layer that decodes LPD1 requests (src/server.rs)
 server = ["dep:http", "dep:http-body", "dep:http-body-util", "dep:tower-layer", "dep:tower-service"]
-# the `agentwire` binary: the server layer as a reverse proxy, and a local client proxy
+# the `logpak` binary: the server layer as a reverse proxy, and a local client proxy
 proxy = [
   "server",
   "dep:clap",
   "dep:flate2",
+  "dep:brotli-decompressor",
   "dep:futures-util",
   "dep:hyper",
   "dep:hyper-util",
   "dep:reqwest",
+  "dep:snap",
   "dep:tokio",
   "dep:tracing",
   "dep:tracing-subscriber",
@@ -41,8 +43,11 @@ tower-layer = { version = "0.3", optional = true }
 tower-service = { version = "0.3", optional = true }
 
 clap = { version = "4", features = ["derive", "env"], optional = true }
-# gzip request bodies (OTLP exporters' default) are decoded before they are deltas or records
+# compressed request bodies (gzip, deflate, br, zstd, snappy) are decoded before they are deltas
+# or records; zstd is zstd-safe's
 flate2 = { version = "1", optional = true }
+brotli-decompressor = { version = "6", optional = true }
+snap = { version = "1", optional = true }
 futures-util = { version = "0.3", default-features = false, optional = true }
 hyper = { version = "1", features = ["server", "http1", "http2"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful", "service"], optional = true }
@@ -52,6 +57,7 @@ tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
 
 [dev-dependencies]
+brotli = "9"                 # brotli fixtures for the decoding tests
 cucumber = "0.23"
 flate2 = "1"
 futures-util = { version = "0.3", default-features = false }
@@ -67,7 +73,7 @@ tower-layer = "0.3"
 tower-service = "0.3"
 
 [[bin]]
-name = "agentwire"
+name = "logpak"
 required-features = ["proxy"]
 
 [[test]]

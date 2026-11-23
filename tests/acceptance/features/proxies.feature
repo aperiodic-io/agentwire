@@ -1,11 +1,11 @@
 Feature: Requests cross the network as deltas and reach the API byte for byte
-  A tool posts to `agentwire client` on its machine, which sends each request to `agentwire server`
+  A tool posts to `logpak client` on its machine, which sends each request to `logpak server`
   as a delta against the previous one. The server rebuilds it and forwards it to the API.
 
   Background:
     Given an upstream API
-    And an agentwire server in front of it
-    And an agentwire client in front of that server
+    And a logpak server in front of it
+    And a logpak client in front of that server
 
   Scenario: A conversation reaches the API unchanged, and only its first request is sent in full
     When a tool sends a conversation of 12 turns through the client
@@ -21,7 +21,7 @@ Feature: Requests cross the network as deltas and reach the API byte for byte
 
   Scenario: A restarted server forgets its bases, and the next request is resent in full
     When a tool sends a conversation of 4 turns through the client
-    And the agentwire server restarts
+    And the logpak server restarts
     And the tool sends 4 more turns of that conversation
     Then the upstream received every request byte for byte
     And the client resent 1 request in full
@@ -33,14 +33,14 @@ Feature: Requests cross the network as deltas and reach the API byte for byte
     Then the upstream received every request byte for byte
     And the client resent 1 request in full
 
-  Scenario: A client without AWD1 is served as before
+  Scenario: A client without LPD1 is served as before
     When a plain client posts "hello" straight to the server
     Then the upstream received every request byte for byte
-    And the response has no awd1 headers
+    And the response has no lpd1 headers
 
   Scenario: A corrupt delta is refused, and the API never sees it
     When a client keeps a base on the server, then posts a corrupt delta against it
-    Then the server answers 400 with the awd1-error "corrupt"
+    Then the server answers 400 with the lpd1-error "corrupt"
     And the upstream received only the base
 
   Scenario: A tool is told when the API cannot be reached
@@ -49,5 +49,5 @@ Feature: Requests cross the network as deltas and reach the API byte for byte
     Then the tool is answered 502
 
   Scenario: A body in a content coding the client cannot decode reaches the API as it was sent
-    When a tool posts a brotli-encoded body through the client
-    Then the upstream received it unchanged, still brotli-encoded
+    When a tool posts an lz4-encoded body through the client
+    Then the upstream received it unchanged, still lz4-encoded

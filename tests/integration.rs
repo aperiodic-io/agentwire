@@ -6,14 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use agentwire::client::Client;
-use agentwire::server::{Awd1, Awd1Layer, Config, InnerBody, Stats};
-use agentwire::store::Store;
-use agentwire::{ENCODING, ERROR, KEEP, KEPT, codec, hex};
 use bytes::Bytes;
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH};
 use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
+use logpak::client::Client;
+use logpak::server::{Config, InnerBody, Lpd1, Lpd1Layer, Stats};
+use logpak::store::Store;
+use logpak::{ENCODING, ERROR, KEEP, KEPT, codec, hex};
 use tower_layer::Layer;
 use tower_service::Service;
 
@@ -47,10 +47,10 @@ where
     }
 }
 
-fn server(max_body: usize) -> (Awd1<Upstream>, Upstream, Arc<Store>, Arc<Stats>) {
+fn server(max_body: usize) -> (Lpd1<Upstream>, Upstream, Arc<Store>, Arc<Stats>) {
     let upstream = Upstream::default();
     let store = Arc::new(Store::new(1 << 24, Duration::from_secs(60)));
-    let layer = Awd1Layer::new(store.clone(), Config { max_body, ..Config::default() });
+    let layer = Lpd1Layer::new(store.clone(), Config { max_body, ..Config::default() });
     let stats = layer.stats().clone();
     (layer.layer(upstream.clone()), upstream, store, stats)
 }
@@ -63,7 +63,7 @@ fn request(body: &[u8], headers: &[(&str, &str)]) -> Request<Full<Bytes>> {
     r.body(Full::new(Bytes::copy_from_slice(body))).unwrap()
 }
 
-async fn send(s: &mut Awd1<Upstream>, r: Request<Full<Bytes>>) -> Response<Full<Bytes>> {
+async fn send(s: &mut Lpd1<Upstream>, r: Request<Full<Bytes>>) -> Response<Full<Bytes>> {
     s.call(r).await.unwrap()
 }
 
@@ -89,7 +89,7 @@ async fn a_plain_request_passes_through_untouched_and_unkept() {
 }
 
 #[tokio::test]
-async fn a_kept_request_is_answered_with_its_hash_and_forwarded_without_awd1_headers() {
+async fn a_kept_request_is_answered_with_its_hash_and_forwarded_without_lpd1_headers() {
     let (mut s, up, store, _) = server(1 << 20);
     let r = send(&mut s, request(b"hello", &[(KEEP, "?1")])).await;
     assert_eq!(header(&r, KEPT), Some(hex(&codec::hash(b"hello")).as_str()));
@@ -150,7 +150,7 @@ async fn a_corrupt_or_oversized_delta_is_refused_with_its_code() {
     *d.last_mut().unwrap() ^= 0xff;
     let r = send(&mut s, request(&d, &[("content-encoding", ENCODING)])).await;
     assert_eq!((r.status(), header(&r, ERROR)), (StatusCode::BAD_REQUEST, Some("corrupt")));
-    let r = send(&mut s, request(b"AWD1\x07", &[("content-encoding", ENCODING)])).await;
+    let r = send(&mut s, request(b"LPD1\x07", &[("content-encoding", ENCODING)])).await;
     assert_eq!((r.status(), header(&r, ERROR)), (StatusCode::BAD_REQUEST, Some("unsupported-version")));
     let r = send(&mut s, request(&[0; 201], &[("content-encoding", ENCODING)])).await;
     assert_eq!((r.status(), header(&r, ERROR)), (StatusCode::PAYLOAD_TOO_LARGE, Some("too-large")));
@@ -200,9 +200,9 @@ impl Service<Request<InnerBody<Full<Bytes>>>> for Busy {
 #[test]
 fn the_layer_is_ready_only_when_the_inner_service_is() {
     let store = Arc::new(Store::new(1 << 20, Duration::from_secs(60)));
-    let mut s = Awd1Layer::new(store, Config::default()).layer(Busy);
+    let mut s = Lpd1Layer::new(store, Config::default()).layer(Busy);
     let mut cx = Context::from_waker(std::task::Waker::noop());
-    let ready = <Awd1<Busy> as Service<Request<Full<Bytes>>>>::poll_ready(&mut s, &mut cx);
+    let ready = <Lpd1<Busy> as Service<Request<Full<Bytes>>>>::poll_ready(&mut s, &mut cx);
     assert!(ready.is_pending());
 }
 
@@ -210,7 +210,7 @@ fn the_layer_is_ready_only_when_the_inner_service_is() {
 async fn a_body_that_fails_to_arrive_is_refused_as_malformed_not_too_large() {
     let upstream = Upstream::default();
     let store = Arc::new(Store::new(1 << 20, Duration::from_secs(60)));
-    let mut s = Awd1Layer::new(store, Config::default()).layer(upstream.clone());
+    let mut s = Lpd1Layer::new(store, Config::default()).layer(upstream.clone());
     let broken = futures_util::stream::iter([
         Ok(http_body::Frame::data(Bytes::from_static(b"half a bo"))),
         Err(std::io::Error::other("connection reset")),

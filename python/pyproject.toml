@@ -3,8 +3,8 @@ requires = ["maturin>=1.8,<2"]
 build-backend = "maturin"
 
 [project]
-name = "agentwire"
-description = "AWL1: LLM request logs and trace spans stored as deltas against earlier records, every one checked by SHA-256."
+name = "logpak"
+description = "LPK1: LLM request logs and trace spans stored as deltas against earlier records, every one checked by SHA-256."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.9"

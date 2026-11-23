@@ -1,5 +1,5 @@
-//! Python bindings for AWL1 (SPEC.md §7): `agentwire.Writer` appends records to a new file and
-//! `agentwire.Reader` reads them back, each body checked by SHA-256. The GIL is released while a
+//! Python bindings for LPK1 (SPEC.md §7): `logpak.Writer` appends records to a new file and
+//! `logpak.Reader` reads them back, each body checked by SHA-256. The GIL is released while a
 //! record is encoded or rebuilt.
 
 use std::borrow::Cow;
@@ -7,12 +7,12 @@ use std::fs::File;
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
 
-use awl::log;
+use lpk::log;
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-/// A file that is not AWL1, or a record that does not rebuild the body it names: `ValueError`.
+/// A file that is not LPK1, or a record that does not rebuild the body it names: `ValueError`.
 /// Everything else is the `OSError` it is (`FileExistsError`, `FileNotFoundError`, …).
 fn err(e: io::Error) -> PyErr {
     match e.kind() {
@@ -21,9 +21,9 @@ fn err(e: io::Error) -> PyErr {
     }
 }
 
-/// Appends records to a new AWL1 file (never an existing one). Each body is stored as a delta
+/// Appends records to a new LPK1 file (never an existing one). Each body is stored as a delta
 /// against one of the `window` latest records. Use it as a context manager, or `close()` it.
-#[pyclass(module = "agentwire")]
+#[pyclass(module = "logpak")]
 struct Writer {
     inner: Option<log::Writer<BufWriter<File>>>,
 }
@@ -69,10 +69,10 @@ impl Writer {
     }
 }
 
-/// Reads an AWL1 file: `len(r)`, `r[i]` (one record's body), `r.meta(i)`, `r.records()`, and
+/// Reads an LPK1 file: `len(r)`, `r[i]` (one record's body), `r.meta(i)`, `r.records()`, and
 /// `for meta, body in r` (every record, in order, each rebuilt once). `max_body` caps any body it
 /// will rebuild.
-#[pyclass(module = "agentwire")]
+#[pyclass(module = "logpak")]
 struct Reader {
     path: PathBuf,
     max_body: usize,
@@ -136,7 +136,7 @@ impl Reader {
 }
 
 /// `(meta, body)` for every record of a file, in order.
-#[pyclass(module = "agentwire")]
+#[pyclass(module = "logpak")]
 struct Records {
     inner: log::Records<File>,
 }
@@ -158,7 +158,7 @@ impl Records {
 }
 
 #[pymodule]
-fn agentwire(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn logpak(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Writer>()?;
     m.add_class::<Reader>()?;
     m.add_class::<Records>()?;

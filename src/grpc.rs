@@ -1,4 +1,4 @@
-//! OTLP over gRPC, as `agentwire collect` serves it: one unary Export call per request, over HTTP/2.
+//! OTLP over gRPC, as `logpak collect` serves it: one unary Export call per request, over HTTP/2.
 //! The request's one length-prefixed message is what is stored, and what goes on to an OTLP/HTTP
 //! backend; the outcome goes back as a gRPC status.
 

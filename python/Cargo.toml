@@ -1,20 +1,20 @@
 [package]
-name = "agentwire-python"
+name = "logpak-python"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
-description = "Python bindings for AWL1: LLM request logs and trace spans stored as deltas."
+description = "Python bindings for LPK1: LLM request logs and trace spans stored as deltas."
 repository = "https://github.com/aperiodic-io/agentwire"
 publish = false
 
 [lib]
-# the Python module is `agentwire`; the Rust crate it wraps is renamed `awl` here
-name = "agentwire"
+# the Python module is `logpak`; the Rust crate it wraps is renamed `lpk` here
+name = "logpak"
 crate-type = ["cdylib"]
 
 [dependencies]
-awl = { package = "agentwire", path = "..", default-features = false }
+lpk = { package = "logpak", path = "..", default-features = false }
 bytes = "1"
 # one wheel for CPython 3.9 and later
 pyo3 = { version = "0.30", features = ["extension-module", "abi3-py39"] }

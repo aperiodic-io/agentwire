@@ -1,8 +1,8 @@
-//! The server side: a tower layer that rebuilds AWD1 request bodies before the inner service sees them.
+//! The server side: a tower layer that rebuilds LPD1 request bodies before the inner service sees them.
 //!
 //! The inner service (an LLM API handler, or a forwarder to one) receives every request exactly as
-//! the client built it: the rebuilt body, `content-length` set, and no `awd1-*` or `awd1` encoding.
-//! A request without AWD1 headers passes through untouched and unbuffered.
+//! the client built it: the rebuilt body, `content-length` set, and no `lpd1-*` or `lpd1` encoding.
+//! A request without LPD1 headers passes through untouched and unbuffered.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -53,15 +53,15 @@ pub struct Stats {
 }
 
 #[derive(Debug, Clone)]
-pub struct Awd1Layer {
+pub struct Lpd1Layer {
     store: Arc<Store>,
     config: Arc<Config>,
     stats: Arc<Stats>,
 }
 
-impl Awd1Layer {
+impl Lpd1Layer {
     pub fn new(store: Arc<Store>, config: Config) -> Self {
-        Awd1Layer { store, config: Arc::new(config), stats: Arc::default() }
+        Lpd1Layer { store, config: Arc::new(config), stats: Arc::default() }
     }
 
     pub fn stats(&self) -> &Arc<Stats> {
@@ -69,23 +69,23 @@ impl Awd1Layer {
     }
 }
 
-impl<S> tower_layer::Layer<S> for Awd1Layer {
-    type Service = Awd1<S>;
+impl<S> tower_layer::Layer<S> for Lpd1Layer {
+    type Service = Lpd1<S>;
 
-    fn layer(&self, inner: S) -> Awd1<S> {
-        Awd1 { inner, layer: self.clone() }
+    fn layer(&self, inner: S) -> Lpd1<S> {
+        Lpd1 { inner, layer: self.clone() }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct Awd1<S> {
+pub struct Lpd1<S> {
     inner: S,
-    layer: Awd1Layer,
+    layer: Lpd1Layer,
 }
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
-impl<S, B, R> tower_service::Service<Request<B>> for Awd1<S>
+impl<S, B, R> tower_service::Service<Request<B>> for Lpd1<S>
 where
     S: tower_service::Service<Request<InnerBody<B>>, Response = Response<R>> + Clone + Send + 'static,
     S::Future: Send,
@@ -142,7 +142,7 @@ where
     }
 }
 
-impl Awd1Layer {
+impl Lpd1Layer {
     /// The body the client built, and its hash: read in full (at most `max_body`), and rebuilt if a delta.
     async fn rebuild<B>(&self, scope: &Scope, body: B, delta: bool) -> Result<(Bytes, codec::Hash), Error>
     where

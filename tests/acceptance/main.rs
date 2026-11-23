@@ -1,4 +1,4 @@
-//! Acceptance: `agentwire client` and `agentwire server` as real processes, between a tool (this
+//! Acceptance: `logpak client` and `logpak server` as real processes, between a tool (this
 //! test) and a recording upstream API, with a byte-counting TCP relay on the network between them.
 
 use std::collections::HashMap;
@@ -9,13 +9,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agentwire::{KEEP, KEPT, codec, hex};
 use bytes::Bytes;
 use cucumber::{World, given, then, when};
 use http::{HeaderMap, Request, Response};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use logpak::{KEEP, KEPT, codec, hex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
@@ -153,12 +153,12 @@ async fn relay(target: SocketAddr) -> (SocketAddr, Arc<Mutex<SocketAddr>>, Arc<A
     (addr, to, up)
 }
 
-/// Starts `agentwire <args>` on a free port and reads the addresses it logs.
+/// Starts `logpak <args>` on a free port and reads the addresses it logs.
 async fn spawn(args: &[&str]) -> Proc {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_agentwire"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_logpak"))
         .args(args)
         .args(["--listen", "127.0.0.1:0", "--metrics", "127.0.0.1:0"])
-        .env("RUST_LOG", "agentwire=debug")
+        .env("RUST_LOG", "logpak=debug")
         .env("NO_COLOR", "1")
         .stdout(Stdio::piped())
         .kill_on_drop(true)
@@ -241,12 +241,12 @@ async fn an_upstream(w: &mut Proxies) {
     w.upstream = Some(upstream().await);
 }
 
-#[given("an agentwire server in front of it")]
+#[given("a logpak server in front of it")]
 async fn a_server(w: &mut Proxies) {
     w.start_server().await;
 }
 
-#[given("an agentwire client in front of that server")]
+#[given("a logpak client in front of that server")]
 async fn a_client(w: &mut Proxies) {
     let relayed = relay(w.server.as_ref().unwrap().addr).await;
     let upstream = format!("http://{}", relayed.0);
@@ -290,7 +290,7 @@ async fn two_conversations(w: &mut Proxies, turns: usize) {
     }
 }
 
-#[when("the agentwire server restarts")]
+#[when("the logpak server restarts")]
 async fn restart(w: &mut Proxies) {
     w.server = None; // killed on drop
     w.start_server().await;
@@ -316,22 +316,22 @@ async fn answered(w: &mut Proxies, status: u16) {
 
 #[then(expr = "the server reports {int} deltas and no refusals")]
 async fn server_reports(w: &mut Proxies, deltas: u64) {
-    assert_eq!(w.metric(&w.server, "agentwire_server_deltas_total").await, deltas);
-    assert_eq!(w.metric(&w.server, "agentwire_server_refused_total").await, 0);
+    assert_eq!(w.metric(&w.server, "logpak_server_deltas_total").await, deltas);
+    assert_eq!(w.metric(&w.server, "logpak_server_refused_total").await, 0);
     let (wire, rebuilt) = (
-        w.metric(&w.server, "agentwire_server_delta_bytes_total").await,
-        w.metric(&w.server, "agentwire_server_rebuilt_bytes_total").await,
+        w.metric(&w.server, "logpak_server_delta_bytes_total").await,
+        w.metric(&w.server, "logpak_server_rebuilt_bytes_total").await,
     );
     let later: u64 = w.sent.iter().filter(|s| !s.first_of_conversation).map(|s| s.body.len() as u64).sum();
     assert_eq!(rebuilt, later, "the deltas rebuilt every request after the first");
     assert!(wire > 0 && wire * 50 < rebuilt, "{wire} delta bytes for {rebuilt}");
-    assert!(w.metric(&w.server, "agentwire_server_store_bytes").await > 0);
+    assert!(w.metric(&w.server, "logpak_server_store_bytes").await > 0);
 }
 
 #[then(expr = "the client reports sending under {int}% of its requests' bytes")]
 async fn client_reports(w: &mut Proxies, percent: u64) {
-    let body = w.metric(&w.client, "agentwire_client_body_bytes_total").await;
-    let wire = w.metric(&w.client, "agentwire_client_wire_bytes_total").await;
+    let body = w.metric(&w.client, "logpak_client_body_bytes_total").await;
+    let wire = w.metric(&w.client, "logpak_client_wire_bytes_total").await;
     assert_eq!(body, w.sent.iter().map(|s| s.body.len() as u64).sum::<u64>());
     assert!(wire * 100 < body * percent, "{wire} bytes sent for {body}");
 }
@@ -352,7 +352,7 @@ async fn corrupt_delta(w: &mut Proxies) {
     );
     let mut delta = codec::encode(&base, &codec::hash(&base), &target, &codec::hash(&target));
     *delta.last_mut().unwrap() ^= 0xff;
-    w.last = Some(w.post_to_server(delta, &[("content-encoding", "awd1")]).await);
+    w.last = Some(w.post_to_server(delta, &[("content-encoding", "lpd1")]).await);
 }
 
 #[then("the upstream received every request byte for byte")]
@@ -362,7 +362,7 @@ async fn byte_for_byte(w: &mut Proxies) {
     for (i, ((headers, body), sent)) in recorded.iter().zip(&w.sent).enumerate() {
         assert_eq!(body, &sent.body, "request {i}");
         assert_eq!(headers["content-length"], body.len().to_string());
-        assert!(headers.keys().all(|k| !k.as_str().starts_with("awd1")), "request {i}: {headers:?}");
+        assert!(headers.keys().all(|k| !k.as_str().starts_with("lpd1")), "request {i}: {headers:?}");
         assert!(headers.get("content-encoding").is_none(), "request {i}");
     }
 }
@@ -387,20 +387,20 @@ async fn ratio(w: &mut Proxies, percent: u64) {
 
 #[then(expr = "the client resent {int} request(s) in full")]
 async fn resent(w: &mut Proxies, n: u64) {
-    assert_eq!(w.metric(&w.client, "agentwire_client_resent_total").await, n);
+    assert_eq!(w.metric(&w.client, "logpak_client_resent_total").await, n);
 }
 
-#[then("the response has no awd1 headers")]
-async fn no_awd1_headers(w: &mut Proxies) {
+#[then("the response has no lpd1 headers")]
+async fn no_lpd1_headers(w: &mut Proxies) {
     let (status, headers) = w.last.as_ref().unwrap();
     assert_eq!(*status, 200);
-    assert!(headers.keys().all(|k| !k.as_str().starts_with("awd1")), "{headers:?}");
+    assert!(headers.keys().all(|k| !k.as_str().starts_with("lpd1")), "{headers:?}");
 }
 
-#[then(expr = "the server answers {int} with the awd1-error {string}")]
+#[then(expr = "the server answers {int} with the lpd1-error {string}")]
 async fn refused(w: &mut Proxies, status: u16, code: String) {
     let (got, headers) = w.last.as_ref().unwrap();
-    assert_eq!((*got, headers["awd1-error"].to_str().unwrap()), (status, code.as_str()));
+    assert_eq!((*got, headers["lpd1-error"].to_str().unwrap()), (status, code.as_str()));
 }
 
 #[then("the upstream received only the base")]
@@ -414,15 +414,15 @@ async fn only_the_base(w: &mut Proxies) {
 fn scratch(name: &str) -> std::path::PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("agentwire-acceptance-{}-{name}-{n}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("logpak-acceptance-{}-{name}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-/// `agentwire log <args>`, its stdout; it must succeed.
+/// `logpak log <args>`, its stdout; it must succeed.
 async fn log(args: &[&str], stdin: &[u8]) -> Vec<u8> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_agentwire"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_logpak"))
         .arg("log")
         .args(args)
         .stdin(Stdio::piped())
@@ -433,11 +433,11 @@ async fn log(args: &[&str], stdin: &[u8]) -> Vec<u8> {
     input.write_all(stdin).await.unwrap();
     drop(input);
     let out = child.wait_with_output().await.unwrap();
-    assert!(out.status.success(), "agentwire log {args:?}: {}", out.status);
+    assert!(out.status.success(), "logpak log {args:?}: {}", out.status);
     out.stdout
 }
 
-#[given("an agentwire server in front of it, recording to a directory")]
+#[given("a logpak server in front of it, recording to a directory")]
 async fn a_recording_server(w: &mut Proxies) {
     w.record_dir = Some(scratch("record"));
     w.start_server().await;
@@ -447,7 +447,7 @@ async fn a_recording_server(w: &mut Proxies) {
 fn recording(w: &Proxies) -> String {
     let files: Vec<_> = std::fs::read_dir(w.record_dir.as_ref().unwrap()).unwrap().map(|e| e.unwrap().path()).collect();
     assert_eq!(files.len(), 1, "{files:?}");
-    assert_eq!(files[0].extension().unwrap(), "awl");
+    assert_eq!(files[0].extension().unwrap(), "lpk");
     files[0].to_str().unwrap().to_owned()
 }
 
@@ -488,9 +488,9 @@ async fn spans_as_json_lines(w: &mut Proxies, traces: usize, spans: usize) {
     }
 }
 
-#[when("they are packed with `agentwire log pack`")]
+#[when("they are packed with `logpak log pack`")]
 async fn pack(w: &mut Proxies) {
-    let file = scratch("pack").join("spans.awl");
+    let file = scratch("pack").join("spans.lpk");
     log(&["pack", file.to_str().unwrap()], &jsonl(&w.lines)).await;
     w.packed = Some(file);
 }
@@ -499,13 +499,13 @@ fn jsonl(lines: &[Bytes]) -> Vec<u8> {
     lines.iter().flat_map(|l| [&l[..], b"\n"].concat()).collect()
 }
 
-#[then("`agentwire log unpack` gives back the same lines")]
+#[then("`logpak log unpack` gives back the same lines")]
 async fn unpack(w: &mut Proxies) {
     let file = w.packed.as_ref().unwrap().to_str().unwrap();
     assert!(log(&["unpack", file], b"").await == jsonl(&w.lines));
 }
 
-#[then(expr = "`agentwire log get` gives back span {int} alone")]
+#[then(expr = "`logpak log get` gives back span {int} alone")]
 async fn get_one(w: &mut Proxies, i: usize) {
     let file = w.packed.as_ref().unwrap().to_str().unwrap();
     assert_eq!(log(&["get", file, &i.to_string()], b"").await, w.lines[i]);
@@ -584,17 +584,17 @@ impl Proxies {
     }
 }
 
-#[given("an agentwire collector recording to a directory")]
+#[given("a logpak collector recording to a directory")]
 async fn a_collector(w: &mut Proxies) {
     w.start_collector(&[]).await;
 }
 
-#[given("an agentwire collector in front of it, recording to a directory")]
+#[given("a logpak collector in front of it, recording to a directory")]
 async fn a_forwarding_collector(w: &mut Proxies) {
     w.start_collector(&[]).await;
 }
 
-#[given(expr = "an agentwire collector recording to a directory, starting a new file every {int} bytes")]
+#[given(expr = "a logpak collector recording to a directory, starting a new file every {int} bytes")]
 async fn a_rotating_collector(w: &mut Proxies, bytes: u64) {
     w.start_collector(&["--rotate-bytes", &bytes.to_string()]).await;
 }
@@ -620,10 +620,10 @@ async fn recording_spans_files(w: &mut Proxies) {
 
 #[then(expr = "the collector reports {int} records stored in under {int}% of their bytes, and no failures")]
 async fn collector_reports(w: &mut Proxies, records: u64, percent: u64) {
-    assert_eq!(w.metric(&w.server, "agentwire_recorded_total").await, records);
-    assert_eq!(w.metric(&w.server, "agentwire_record_failures_total").await, 0);
-    let body = w.metric(&w.server, "agentwire_recorded_body_bytes_total").await;
-    let stored = w.metric(&w.server, "agentwire_recorded_file_bytes_total").await;
+    assert_eq!(w.metric(&w.server, "logpak_recorded_total").await, records);
+    assert_eq!(w.metric(&w.server, "logpak_record_failures_total").await, 0);
+    let body = w.metric(&w.server, "logpak_recorded_body_bytes_total").await;
+    let stored = w.metric(&w.server, "logpak_recorded_file_bytes_total").await;
     assert_eq!(body, w.sent.iter().map(|s| s.body.len() as u64).sum::<u64>());
     let on_disk: u64 =
         std::fs::read_dir(w.record_dir.as_ref().unwrap()).unwrap().map(|e| e.unwrap().metadata().unwrap().len()).sum();
@@ -631,7 +631,7 @@ async fn collector_reports(w: &mut Proxies, records: u64, percent: u64) {
     assert!(stored * 100 < body * percent, "{stored} stored for {body}");
 }
 
-#[given(expr = "an agentwire collector recording to a directory, with a size limit of {int} bytes")]
+#[given(expr = "a logpak collector recording to a directory, with a size limit of {int} bytes")]
 async fn a_small_collector(w: &mut Proxies, bytes: u64) {
     w.start_collector(&["--max-body", &bytes.to_string()]).await;
 }
@@ -648,7 +648,7 @@ async fn refused_as_a_base(w: &mut Proxies, status: u16) {
     refused_unrecorded(w, status).await;
 }
 
-#[given("an agentwire client in front of that collector")]
+#[given("a logpak client in front of that collector")]
 async fn a_client_before_the_collector(w: &mut Proxies) {
     a_client(w).await;
 }
@@ -836,18 +836,18 @@ async fn grpc_sized(w: &mut Proxies, kind: String, n: usize) {
 }
 
 #[when(
-    regex = r"^a gRPC exporter sends (an export compressed with deflate|an export flagged as gzip that is not gzip|a call to a method other than Export)$"
+    regex = r"^a gRPC exporter sends (an export compressed with lz4|an export flagged as gzip that is not gzip|a call to a method other than Export)$"
 )]
 async fn grpc_refused(w: &mut Proxies, call: String) {
     let to = w.server.as_ref().unwrap().addr;
     let (path, framed, gz) = match call.as_str() {
-        "an export compressed with deflate" => (TRACE_EXPORT, grpc_frame(true, b"deflated"), false),
+        "an export compressed with lz4" => (TRACE_EXPORT, grpc_frame(true, b"lz4 frame"), false),
         "an export flagged as gzip that is not gzip" => (TRACE_EXPORT, grpc_frame(true, b"not gzip"), true),
         _ => ("/grpc.health.v1.Health/Check", grpc_frame(false, b""), false),
     };
-    // `false` for gzip with a compressed frame: grpc_call sends no grpc-encoding, so say deflate
-    let (status, body) = if call.contains("deflate") {
-        grpc_call_with(to, path, framed, Some("deflate")).await
+    // `false` for gzip with a compressed frame: grpc_call sends no grpc-encoding, so say lz4
+    let (status, body) = if call.contains("lz4") {
+        grpc_call_with(to, path, framed, Some("lz4")).await
     } else {
         grpc_call(to, path, framed, gz).await
     };
@@ -873,25 +873,25 @@ async fn refused_unrecorded(w: &mut Proxies, status: u16) {
     assert!(listed.is_empty(), "{}", String::from_utf8_lossy(&listed));
 }
 
-#[when("a tool posts a brotli-encoded body through the client")]
-async fn brotli_through_client(w: &mut Proxies) {
-    // not real brotli: the client must not need to read it, only to leave it alone. Two turns, so
+#[when("a tool posts an lz4-encoded body through the client")]
+async fn lz4_through_client(w: &mut Proxies) {
+    // not real lz4 (a coding logpak does not decode): the client must not need to read it, only to leave it alone. Two turns, so
     // the second would have a base to delta against.
     let to = w.client.as_ref().unwrap().addr;
     for turn in [3, 4] {
-        let body = conversation("br", turn);
-        w.post_batch(to, "/v1/messages", body.clone(), &[("content-encoding", "br")]).await;
+        let body = conversation("lz4", turn);
+        w.post_batch(to, "/v1/messages", body.clone(), &[("content-encoding", "lz4")]).await;
         w.gzipped.push(body);
     }
 }
 
-#[then("the upstream received it unchanged, still brotli-encoded")]
-async fn upstream_received_brotli(w: &mut Proxies) {
+#[then("the upstream received it unchanged, still lz4-encoded")]
+async fn upstream_received_lz4(w: &mut Proxies) {
     let recorded = w.recorded();
     assert_eq!(recorded.len(), 2);
     for ((headers, body), sent) in recorded.iter().zip(&w.gzipped) {
         assert!(body == sent);
-        assert_eq!(headers["content-encoding"], "br");
+        assert_eq!(headers["content-encoding"], "lz4");
     }
 }
 
