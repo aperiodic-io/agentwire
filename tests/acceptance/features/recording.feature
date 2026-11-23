@@ -17,3 +17,4 @@ Feature: Every request is stored as a delta, and read back byte for byte
     Then `deltapack log unpack` gives back the same lines
     And `deltapack log get` gives back span 17 alone
     And the packed file takes under 25% of the lines' bytes
+    And `deltapack log stats` reports its 24 records, the lines' bytes, the file's size and their ratio

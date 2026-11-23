@@ -5,6 +5,8 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- `deltapack log stats FILE…`: each file's records, the bytes they stand for, its bytes on disk and
+  the ratio; then the total.
 - `collect` and `server --record-dir` take `--keep-bytes` and `--keep-days`, which delete the
   oldest closed files, and `--on-rotate`, which runs a command on each file once it is closed, one at
   a time (and at start on files left from an earlier run or whose command failed; retention keeps a

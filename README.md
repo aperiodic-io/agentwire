@@ -339,8 +339,15 @@ duckdb -c "SELECT name, count(*) FROM read_json('spans.jsonl') GROUP BY name"   
 ```
 
 `--trace` skips the batches whose meta does not list the trace. Trace ids are hex, as OTLP/JSON
-requires; the spans of an exporter that writes them in base64 are shown, but `--trace` cannot find them. `--since` and `--until` take Unix
-ms or a duration ago (`90s`, `15m`, `2h`, `7d`).
+requires; the spans of an exporter that writes them in base64 are shown, but `--trace` cannot find
+them. `--since` and `--until` take Unix ms or a duration ago (`90s`, `15m`, `2h`, `7d`).
+
+`stats` says what the files save: records, the bytes they stand for, the bytes on disk, and the
+ratio, per file and in total.
+
+```bash
+deltapack log stats ~/deltapack/*.dpk
+```
 
 ## What you can rely on
 

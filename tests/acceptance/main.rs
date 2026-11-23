@@ -1257,6 +1257,45 @@ async fn second_collector_refused(w: &mut Proxies) {
     assert!(err.contains("another process"), "{err}");
 }
 
+/// `deltapack log stats` names, record counts, body bytes and file bytes, from its lines.
+fn stats_of(out: &str) -> Vec<(String, u64, u64, u64, String)> {
+    out.lines()
+        .map(|l| {
+            // "<name> <n> records, <body> bytes in <file> on disk (<ratio>x)"
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let n = |i: usize| f[i].trim_end_matches(',').parse::<u64>().unwrap_or_else(|_| panic!("{l}"));
+            (f[0].to_owned(), n(1), n(3), n(6), f[9].to_owned())
+        })
+        .collect()
+}
+
+#[then(expr = "`deltapack log stats` reports its {int} records, the lines' bytes, the file's size and their ratio")]
+async fn stats_of_packed(w: &mut Proxies, records: u64) {
+    let file = w.packed.as_ref().unwrap();
+    let stats = stats_of(&String::from_utf8(log(&["stats", file.to_str().unwrap()], b"").await).unwrap());
+    let body: u64 = w.lines.iter().map(|l| l.len() as u64).sum();
+    let disk = std::fs::metadata(file).unwrap().len();
+    let ratio = format!("({:.1}x)", body as f64 / disk as f64);
+    assert_eq!(stats, [(file.to_str().unwrap().to_owned(), records, body, disk, ratio)]);
+}
+
+#[then("`deltapack log stats` over every file reports each file, then their total")]
+async fn stats_of_files(w: &mut Proxies) {
+    let files = files_in(w.record_dir.as_ref().unwrap());
+    let mut args = vec!["stats".to_owned()];
+    args.extend(files.iter().map(|f| f.0.to_str().unwrap().to_owned()));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let stats = stats_of(&String::from_utf8(log(&args, b"").await).unwrap());
+    assert_eq!(stats.len(), files.len() + 1, "{stats:?}");
+    let (records, body, disk) = stats[..files.len()].iter().fold((0, 0, 0), |a, s| (a.0 + s.1, a.1 + s.2, a.2 + s.3));
+    assert_eq!(records, w.sent.len() as u64);
+    assert_eq!(body, w.sent.iter().map(|s| s.body.len() as u64).sum::<u64>());
+    assert_eq!(disk, files.iter().map(|f| f.1).sum::<u64>());
+    let total = &stats[files.len()];
+    assert_eq!((total.0.as_str(), total.1, total.2, total.3), ("total", records, body, disk));
+    assert_eq!(total.4, format!("({:.1}x)", body as f64 / disk as f64));
+}
+
 #[tokio::main]
 async fn main() {
     Proxies::cucumber().fail_on_skipped().run_and_exit("tests/acceptance/features").await;
