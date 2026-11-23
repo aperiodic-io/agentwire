@@ -16,7 +16,7 @@ span 2  [system][tools][turn 1][turn 2]             + [turn 2]
 span 3  [system][tools][turn 1][turn 2][turn 3]     + [turn 3]
 ```
 
-logpak stores each record as a delta against the earlier record it shares the most with, so a
+Logpak stores each record as a delta against the earlier record it shares the most with, so a
 record costs about its new bytes. Here are 7,343 OTel GenAI spans from 300 public SWE-agent runs,
 16 traces in flight, 337 MB of JSON lines:
 
@@ -24,11 +24,11 @@ record costs about its new bytes. Here are 7,343 OTel GenAI spans from 300 publi
 |---|---:|---:|
 | zstd-1 in 1 MiB blocks, arrival order (how a column store compresses) | 34.6 MB | 9.7× |
 | messages deduplicated per trace, then zstd-1 blocks | 14.6 MB | 23× |
-| **logpak, one record per span** | **3.2 MB** | **105×** |
+| **Logpak, one record per span** | **3.2 MB** | **105×** |
 
 A block compressor loses here because it only sees one block. With 16 agents running, the previous
 copy of a prompt usually sits in a different block, and a late prompt is larger than a block
-anyway. logpak looks for the previous copy by record, whatever its size.
+anyway. Logpak looks for the previous copy by record, whatever its size.
 
 At that ratio a terabyte of spans is under 10 GB. You can afford to keep every prompt in full,
 without sampling or truncating, and still pull any single request out in milliseconds.
@@ -67,6 +67,11 @@ logpak log unpack spans.awl | cmp - exported-spans.jsonl    # silent: every byte
 
 All five write the same AWL1 files, and [`logpak log`](#reading-it-back) and both libraries read
 them all.
+
+**[docs/integrations.md](docs/integrations.md) has step-by-step setups for each tool.** It covers
+20 coding agents (Claude Code, Codex, Gemini CLI, Copilot, Goose, OpenCode, Aider, Cline, …), 25
+SDKs and agent frameworks, 15 gateways, AWS Bedrock, Azure and Vertex AI logs, 6 telemetry
+pipelines, 20 observability backends to forward to, and self-hosted inference servers.
 
 ### 1. In front of your tracing backend
 
@@ -218,13 +223,13 @@ exporter (protobuf and gzip) through `collect` into the real backends:
 | SDK over gRPC (gzip) → `collect --forward` → OpenTelemetry Collector 0.115 (OTLP/HTTP) | all 7,343 chat spans | 3.28 MB for 338.6 MB (103×) |
 | 12 conversations, 4 at a time → Kong 3.9 `ai-proxy` → `http-log` → `collect` | all 329 log entries, each with the request's full message list | 325 KB for 16.8 MB of Kong logs (52×) |
 
-CI runs logpak against the real images of **LiteLLM** 1.110, **Kong** 3.9 and **Portkey** 1.15
+CI runs Logpak against the real images of **LiteLLM** 1.110, **Kong** 3.9 and **Portkey** 1.15
 on every pull request ([tests/gateways/](tests/gateways/test_gateways.py)).
 
 ### What it is not
 
 - A query engine. Records are read by position, and `meta` is yours to index. Keep your tracing
-  backend for search and dashboards, and logpak for the full bodies behind them.
+  backend for search and dashboards, and Logpak for the full bodies behind them.
 - A general log compressor. The gain comes from records that repeat earlier records, which is what
   LLM requests and spans do. On logs without that shape, expect what zstd gives.
 - Fast enough for everything. One record per span writes at about 12 MB/s on one core, because a
@@ -315,7 +320,7 @@ client                                    server
 |---|---|
 | Both ends: your agent and your API, agents talking to each other, your inference server | The library: [`Client`](src/client.rs) on the sending side, [`Awd1Layer`](src/server.rs) (a `tower` layer) on the receiving side. |
 | Only the client: you call Anthropic, OpenAI, … | `logpak server` as a reverse proxy near the provider. It is the same layer in front of a forwarder. |
-| Neither: a CLI tool such as Claude Code or Codex | `logpak client` on the tool's machine, talking to an `logpak server`. |
+| Neither: a CLI tool such as Claude Code or Codex | `logpak client` on the tool's machine, talking to a `logpak server`. |
 
 ### The AWD1 library (Rust)
 
