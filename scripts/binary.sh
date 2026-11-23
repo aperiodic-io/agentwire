@@ -9,11 +9,11 @@ case "$target" in
     command -v musl-gcc > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q musl-tools; }
     export CC_${target//-/_}=musl-gcc ;;
 esac
-rustup toolchain install --profile minimal "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+rustup toolchain install # the one rust-toolchain.toml names
 rustup target add "$target"
 cargo build --release --locked --features proxy --target "$target"
 name="deltapack-$version-$target"
 mkdir -p "$name"
-cp "target/$target/release/deltapack" LICENSE README.md "$name/"
-tar czf "$name.tar.gz" "$name"
+cp "${CARGO_TARGET_DIR:-target}/$target/release/deltapack" LICENSE README.md "$name/"
+COPYFILE_DISABLE=1 tar czf "$name.tar.gz" "$name" # no macOS ._ entries
 shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"

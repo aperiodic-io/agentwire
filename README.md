@@ -45,7 +45,8 @@ cargo install deltapack --features proxy
 Or run the image `ghcr.io/aperiodic-io/deltapack`. From the next release on, each release also carries
 a binary for Linux (x86_64, aarch64; static musl, any distribution) and macOS (Apple silicon) on
 its [release page](https://github.com/aperiodic-io/deltapack/releases). musl's allocator is slower
-under many threads: for the most throughput on Linux, build with cargo or use the image.
+under many threads: for the most throughput on Linux, build with cargo or use the image. A macOS
+binary downloaded in a browser is quarantined: `xattr -d com.apple.quarantine deltapack`.
 
 ```bash
 deltapack collect --record-dir ~/deltapack        # OTLP/HTTP on 127.0.0.1:4318, OTLP/gRPC on :4317
@@ -348,7 +349,8 @@ requires; the spans of an exporter that writes them in base64 are shown, but `--
 them. `--since` and `--until` take Unix ms or a duration ago (`90s`, `15m`, `2h`, `7d`).
 
 `stats` says what the files save: records, the bytes they stand for, the bytes on disk, and the
-ratio, per file and in total.
+ratio, per file (its name last, after a tab) and in total. A file it cannot read is named on stderr
+and skipped, and the command fails once the others are counted.
 
 ```bash
 deltapack log stats ~/deltapack/*.dpk

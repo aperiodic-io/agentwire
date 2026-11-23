@@ -193,9 +193,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: fuzz-artifacts, path: fuzz/artifacts }
 
-  # the release binaries build, and run (release.yml attaches them to each release)
+  # the release binaries build, and run (release.yml attaches them to each release); on main too,
+  # so that the cache pull requests restore is saved
   binaries:
-    if: github.event_name == 'pull_request'
     strategy:
       matrix:
         include:

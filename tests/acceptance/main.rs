@@ -1261,10 +1261,11 @@ async fn second_collector_refused(w: &mut Proxies) {
 fn stats_of(out: &str) -> Vec<(String, u64, u64, u64, String)> {
     out.lines()
         .map(|l| {
-            // "<name> <n> records, <body> bytes in <file> on disk (<ratio>x)"
-            let f: Vec<&str> = l.split_whitespace().collect();
+            // "<n> records, <body> bytes in <file> on disk (<ratio>x)\t<name>"
+            let (counts, name) = l.split_once('\t').unwrap_or_else(|| panic!("no tab: {l}"));
+            let f: Vec<&str> = counts.split_whitespace().collect();
             let n = |i: usize| f[i].trim_end_matches(',').parse::<u64>().unwrap_or_else(|_| panic!("{l}"));
-            (f[0].to_owned(), n(1), n(3), n(6), f[9].to_owned())
+            (name.to_owned(), n(0), n(2), n(5), f[8].to_owned())
         })
         .collect()
 }
@@ -1292,8 +1293,32 @@ async fn stats_of_files(w: &mut Proxies) {
     assert_eq!(body, w.sent.iter().map(|s| s.body.len() as u64).sum::<u64>());
     assert_eq!(disk, files.iter().map(|f| f.1).sum::<u64>());
     let total = &stats[files.len()];
-    assert_eq!((total.0.as_str(), total.1, total.2, total.3), ("total", records, body, disk));
+    assert_eq!((total.0.as_str(), total.1, total.2, total.3), ("(total)", records, body, disk));
     assert_eq!(total.4, format!("({:.1}x)", body as f64 / disk as f64));
+}
+
+#[then(
+    "`deltapack log stats` over it, a copy whose name has a space and an empty file reports both copies and their total, names the empty file and fails"
+)]
+async fn stats_with_a_bad_file(w: &mut Proxies) {
+    let packed = w.packed.clone().unwrap();
+    let copy = packed.with_file_name("a copy.dpk");
+    let empty = packed.with_file_name("empty.dpk");
+    std::fs::copy(&packed, &copy).unwrap();
+    std::fs::write(&empty, b"").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_deltapack"))
+        .args(["log", "stats"])
+        .args([&packed, &empty, &copy])
+        .output()
+        .await
+        .unwrap();
+    assert!(!out.status.success(), "a file it could not read fails the command");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(empty.to_str().unwrap()), "{stderr}");
+    let stats = stats_of(&String::from_utf8(out.stdout).unwrap());
+    let names: Vec<&str> = stats.iter().map(|s| s.0.as_str()).collect();
+    assert_eq!(names, [packed.to_str().unwrap(), copy.to_str().unwrap(), "(total)"]);
+    assert_eq!((stats[2].1, stats[2].2, stats[2].3), (stats[0].1 * 2, stats[0].2 * 2, stats[0].3 * 2));
 }
 
 #[tokio::main]
