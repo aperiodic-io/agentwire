@@ -782,6 +782,11 @@ mod tests {
         let span_with = |id: Vec<u8>| pb(1, 2, &pb(2, 2, &pb(2, 2, &id)));
         assert_eq!(trace_ids(Signal::Traces, &span_with(pb(1, 0, &enc(1)))), "?", "a varint where the id belongs");
         assert_eq!(trace_ids(Signal::Traces, &span_with(pb(7, 1, &[0; 8]))), "-", "other fields are skipped");
+        // a scope whose name is 16 bytes: field 1 of the scope, not of a span
+        let scope = pb(1, 2, &pb(1, 2, b"0123456789abcdef"));
+        let span = pb(2, 2, &pb(1, 2, &[0xaa; 16]));
+        let body = pb(1, 2, &pb(2, 2, &[scope, span].concat()));
+        assert_eq!(trace_ids(Signal::Traces, &body), "aa".repeat(16), "only the path to the ids is walked");
     }
 
     #[test]
