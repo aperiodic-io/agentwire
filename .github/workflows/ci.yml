@@ -56,7 +56,7 @@ jobs:
 
   # logpak with LiteLLM, Kong AI Gateway and Portkey as their real containers (tests/gateways/):
   # requests through logpak client and server reach a mock model through each gateway, and each
-  # gateway's logs are stored in AWL1
+  # gateway's logs are stored in LPK1
   gateways:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

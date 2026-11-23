@@ -1,18 +1,22 @@
 # Changelog
 
-This project follows [Semantic Versioning](https://semver.org). The AWD1 wire format has its own
+This project follows [Semantic Versioning](https://semver.org). The LPD1 wire format has its own
 version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
 - Renamed from agentwire to **Logpak**. The crate, binary, Python module and Docker image are
   `logpak` (`ghcr.io/aperiodic-io/logpak`); environment variables are `LOGPAK_*` (were
-  `AGENTWIRE_*`) and metrics `logpak_*` (were `agentwire_*`). The AWD1 wire format, the AWL1 file
-  format, the `awd1-*` headers and `.awl` files are unchanged, so existing recordings read as before.
+  `AGENTWIRE_*`) and metrics `logpak_*` (were `agentwire_*`).
+- The wire and file formats take Logpak's prefixes: AWD1 is now **LPD1** (magic `LPD1`, headers
+  `lpd1-keep`, `lpd1-kept`, `lpd1-error`, `content-encoding: lpd1`), and AWL1 is now **LPK1** (magic
+  `LPK1`, files `.lpk`). Nothing else in either layout changed. Files and clients from before this
+  change are not read: no release had shipped the old prefixes. A client and server on different
+  sides of the change fall back to plain requests, since neither confirms the other's headers.
 - `collect`, `server --record-dir` and `client` decode deflate, brotli, zstd and snappy request
   bodies, as well as gzip, and a list of codings in order; `collect` does the same for gRPC
   messages by their `grpc-encoding`. A body in another coding is still stored or sent as is.
-- Python bindings for AWL1 (`python/`, built with maturin, one abi3 wheel for CPython 3.9+):
+- Python bindings for LPK1 (`python/`, built with maturin, one abi3 wheel for CPython 3.9+):
   `logpak.Writer` and `logpak.Reader`, reading and writing the same files as the CLI and
   `collect`.
 - `logpak::log::Records`: a `Reader` iterates its records in order (`for (record, body) in
@@ -21,18 +25,18 @@ version byte (SPEC.md); a crate release that changes it says so here.
   default 127.0.0.1:4318 and 127.0.0.1:4317. An Export call's message is stored decompressed; with
   `--forward` it goes on as OTLP/HTTP protobuf, and the backend's answer comes back as the gRPC
   status.
-- AWL1 (SPEC.md §7): logs of LLM requests or trace spans stored as AWD1 deltas against earlier
+- LPK1 (SPEC.md §7): logs of LLM requests or trace spans stored as LPD1 deltas against earlier
   records, every record checked by SHA-256. `logpak::log::{Writer, Reader}`.
 - `logpak server --record-dir`: stores each request it forwards (body, time, method, path).
-- `logpak log pack | unpack | get | ls`: JSON lines in and out of AWL1 files.
-- `logpak collect`: an OTLP/HTTP and HTTP-log sink that stores what is posted in AWL1, and
+- `logpak log pack | unpack | get | ls`: JSON lines in and out of LPK1 files.
+- `logpak collect`: an OTLP/HTTP and HTTP-log sink that stores what is posted in LPK1, and
   forwards it unchanged with `--forward`. Gzip bodies are stored decoded. It listens on loopback
   unless told otherwise.
 - Recording (`collect`, `server --record-dir`) starts a new, self-contained file at
   `--rotate-bytes` (1 GiB), moves to a new file after a failed write, and reports
   `logpak_recorded_*` and `logpak_record_failures_total` metrics.
 - `logpak client` decodes gzip request bodies before it deltas them, and sends a body in any
-  other content coding as is (an `awd1` delta of it used to drop that coding).
+  other content coding as is (an `lpd1` delta of it used to drop that coding).
 
 ## [0.1.0]
 

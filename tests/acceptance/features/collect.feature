@@ -1,6 +1,6 @@
 Feature: Logs and traces cross the network as deltas and are stored as deltas
   An OTLP exporter (or a gateway's HTTP log plugin) posts batches of spans, each carrying the whole
-  prompt. `logpak collect` stores every batch in AWL1, and forwards it to the real backend when
+  prompt. `logpak collect` stores every batch in LPK1, and forwards it to the real backend when
   given one (`--forward`). `logpak client` in front of the exporter sends each batch as a delta
   against the previous one.
 

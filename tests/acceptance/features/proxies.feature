@@ -33,14 +33,14 @@ Feature: Requests cross the network as deltas and reach the API byte for byte
     Then the upstream received every request byte for byte
     And the client resent 1 request in full
 
-  Scenario: A client without AWD1 is served as before
+  Scenario: A client without LPD1 is served as before
     When a plain client posts "hello" straight to the server
     Then the upstream received every request byte for byte
-    And the response has no awd1 headers
+    And the response has no lpd1 headers
 
   Scenario: A corrupt delta is refused, and the API never sees it
     When a client keeps a base on the server, then posts a corrupt delta against it
-    Then the server answers 400 with the awd1-error "corrupt"
+    Then the server answers 400 with the lpd1-error "corrupt"
     And the upstream received only the base
 
   Scenario: A tool is told when the API cannot be reached

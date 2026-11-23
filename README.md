@@ -35,22 +35,22 @@ without sampling or truncating, and still pull any single request out in millise
 
 ## Try it on your own logs
 
-One JSON object per line in, an `.awl` file out. No service to run and nothing to change.
+One JSON object per line in, an `.lpk` file out. No service to run and nothing to change.
 
 ```bash
 cargo install logpak --features proxy
 ```
 
 ```bash
-logpak log pack spans.awl --window 32 < exported-spans.jsonl
+logpak log pack spans.lpk --window 32 < exported-spans.jsonl
 ```
 
 ```bash
-ls -l exported-spans.jsonl spans.awl
+ls -l exported-spans.jsonl spans.lpk
 ```
 
 ```bash
-logpak log unpack spans.awl | cmp - exported-spans.jsonl    # silent: every byte is back
+logpak log unpack spans.lpk | cmp - exported-spans.jsonl    # silent: every byte is back
 ```
 
 `--window` is how many traces or conversations are interleaved in the file (default 16).
@@ -69,7 +69,7 @@ whose export leaves the prompts out.
 | Files of exported spans or request logs | [`logpak log pack`](#4-on-files-you-already-have) | nothing |
 | Your own ingest path or notebook | [the Rust or Python library](#5-embedded-in-rust-or-python) | a few lines |
 
-All five write the same AWL1 files, and [`logpak log`](#reading-it-back) and both libraries read
+All five write the same LPK1 files, and [`logpak log`](#reading-it-back) and both libraries read
 them all.
 
 **[docs/integrations.md](docs/integrations.md) has step-by-step setups for each tool**, OTel first
@@ -176,21 +176,21 @@ and reads release the GIL.
 ```python
 import logpak
 
-with logpak.Writer("spans.awl", window=16) as w:
+with logpak.Writer("spans.lpk", window=16) as w:
     w.append(span_bytes, meta=b"trace=ab12")
 
-for meta, body in logpak.Reader("/var/log/logpak/1763650000000-4242-000000.awl"):
+for meta, body in logpak.Reader("/var/log/logpak/1763650000000-4242-000000.lpk"):
     ...
 ```
 
 ### Reading it back
 
 ```bash
-logpak log ls /var/log/logpak/1763650000000-4242-000000.awl       # index, base, bytes stored, meta
+logpak log ls /var/log/logpak/1763650000000-4242-000000.lpk       # index, base, bytes stored, meta
 ```
 
 ```bash
-logpak log get /var/log/logpak/1763650000000-4242-000000.awl 17 > request-17.json
+logpak log get /var/log/logpak/1763650000000-4242-000000.lpk 17 > request-17.json
 ```
 
 `get` writes one record byte for byte, which for a recorded request is the exact body the provider
@@ -213,7 +213,7 @@ type and the encoding the body is still in.
   never stored.
 - Recording never takes your traffic down: a failed write is counted in
   `logpak_record_failures_total`, and the request goes on.
-- The format is small and public ([SPEC.md §7](SPEC.md#7-awl1-a-log-of-bodies-stored-as-deltas)):
+- The format is small and public ([SPEC.md §7](SPEC.md#7-lpk1-a-log-of-bodies-stored-as-deltas)):
   a file of Zstandard frames, each behind a few varints.
 
 ### Measured end to end
@@ -223,7 +223,7 @@ exporter (protobuf and gzip) through `collect` into the real backends:
 
 | Pipeline | What arrived | Stored |
 |---|---|---:|
-| SDK → `collect --forward` → Langfuse 3.227 | all 7,643 spans, in Langfuse and in the recording | **3.26 MB** of AWL1 for 338.6 MB of protobuf (104×). Langfuse itself kept 31.6 MiB in ClickHouse (ZSTD(3)) and 356 MB of raw events in S3 |
+| SDK → `collect --forward` → Langfuse 3.227 | all 7,643 spans, in Langfuse and in the recording | **3.26 MB** of LPK1 for 338.6 MB of protobuf (104×). Langfuse itself kept 31.6 MiB in ClickHouse (ZSTD(3)) and 356 MB of raw events in S3 |
 | SDK → `collect --forward` → OpenTelemetry Collector 0.115 | all 7,343 chat spans, the same span ids at both ends | 2.63 MB for 338.5 MB (129×) |
 | SDK over gRPC (gzip) → `collect --forward` → OpenTelemetry Collector 0.115 (OTLP/HTTP) | all 7,343 chat spans | 3.28 MB for 338.6 MB (103×) |
 | 12 conversations, 4 at a time → Kong 3.9 `ai-proxy` → `http-log` → `collect` | all 329 log entries, each with the request's full message list | 325 KB for 16.8 MB of Kong logs (52×) |
@@ -252,14 +252,14 @@ whole, as a delta against the empty body. The writer picks the base by trying th
 restarts a chain with a whole record before reading one would mean rebuilding 4,096 records or
 1 GiB.
 
-## The same codec on the wire: AWD1
+## The same codec on the wire: LPD1
 
 The delta that shrinks a log also shrinks the request. An agent uploads its whole conversation on
-every call. With AWD1 the client sends each request as a delta against one the server already
+every call. With LPD1 the client sends each request as a delta against one the server already
 holds, and the server rebuilds the exact body before your handler, or the provider, sees it. It is
 plain HTTP: a pair of headers and a `content-encoding` ([SPEC.md](SPEC.md)).
 
-| A 6 MiB request that… | plain | zstd, per request¹ | **AWD1** |
+| A 6 MiB request that… | plain | zstd, per request¹ | **LPD1** |
 |---|---:|---:|---:|
 | adds one turn to the previous request | 6 MiB | ~1.6 MiB | **141 bytes** |
 | also edits the system prompt at the top | 6 MiB | ~1.6 MiB | **748 bytes** |
@@ -269,7 +269,7 @@ plain HTTP: a pair of headers and a `content-encoding` ([SPEC.md](SPEC.md)).
 
 This is for agents on slow or metered links, and for egress you pay for: on public agent traffic,
 1 TB a month of request uploads at $0.09/GB costs $90 plain, $23.56 with per-request zstd and $1.43
-with AWD1 ([research, §6](docs/research/compression-research.md#6-re-sent-context-windows-delta-patch-from)).
+with LPD1 ([research, §6](docs/research/compression-research.md#6-re-sent-context-windows-delta-patch-from)).
 It does not change what the model sees. Token counts, your LLM bill and provider prompt caching are
 as before, because the provider receives the same bytes.
 
@@ -299,11 +299,11 @@ exporter and its batches cross the network to `collect` as deltas too. Add
 
 ```
 client                                    server
-  │  POST  (full body)  awd1-keep: ?1       │
+  │  POST  (full body)  lpd1-keep: ?1       │
   │ ──────────────────────────────────────▶ │  keeps the body
-  │ ◀────────────────────────────────────── │  awd1-kept: <sha256>
+  │ ◀────────────────────────────────────── │  lpd1-kept: <sha256>
   │                                         │
-  │  POST  content-encoding: awd1           │
+  │  POST  content-encoding: lpd1           │
   │  (delta: base hash, target hash, edit)  │
   │ ──────────────────────────────────────▶ │  rebuilds, checks SHA-256,
   │                                         │  hands the original body on
@@ -313,7 +313,7 @@ client                                    server
   forwarded. The handler gets the original bytes, `content-length` and all, so request signing and
   prompt caching are unaffected.
 - The worst case is one normal request. A client deltas only against a body the server confirmed
-  it kept (`awd1-kept`). A server without AWD1 never confirms, so the client sends plain requests.
+  it kept (`lpd1-kept`). A server without LPD1 never confirms, so the client sends plain requests.
   A server that lost a base (restart, eviction, another replica) answers `409`, and the client
   resends that one request in full.
 - Bases are named by content hash, not by session or connection, so any request can be retried on
@@ -323,11 +323,11 @@ client                                    server
 
 | You control | Use |
 |---|---|
-| Both ends: your agent and your API, agents talking to each other, your inference server | The library: [`Client`](src/client.rs) on the sending side, [`Awd1Layer`](src/server.rs) (a `tower` layer) on the receiving side. |
+| Both ends: your agent and your API, agents talking to each other, your inference server | The library: [`Client`](src/client.rs) on the sending side, [`Lpd1Layer`](src/server.rs) (a `tower` layer) on the receiving side. |
 | Only the client: you call Anthropic, OpenAI, … | `logpak server` as a reverse proxy near the provider. It is the same layer in front of a forwarder. |
 | Neither: a CLI tool such as Claude Code or Codex | `logpak client` on the tool's machine, talking to a `logpak server`. |
 
-### The AWD1 library (Rust)
+### The LPD1 library (Rust)
 
 ```toml
 [dependencies]
@@ -339,15 +339,15 @@ logpak = "0.1"                                           # codec, client, server
 
 ```rust
 use std::{sync::Arc, time::Duration};
-use logpak::{server::{Awd1Layer, Config}, store::Store};
+use logpak::{server::{Lpd1Layer, Config}, store::Store};
 
 let store = Arc::new(Store::new(1 << 30, Duration::from_secs(1800))); // 1 GiB of bases, 30 min idle TTL
 let app = axum::Router::new()
     .route("/v1/messages", axum::routing::post(messages))
-    .layer(Awd1Layer::new(store, Config::default()));
+    .layer(Lpd1Layer::new(store, Config::default()));
 ```
 
-The handler receives each request as the client built it. Requests without AWD1 headers pass
+The handler receives each request as the client built it. Requests without LPD1 headers pass
 through untouched and unbuffered.
 
 **Client.** Wrap your HTTP call. One `Client` serves concurrent requests and conversations:
@@ -365,7 +365,7 @@ client.confirm(&request, response.headers().get(logpak::KEPT).and_then(|v| v.to_
 
 ## Proxy reference
 
-**`logpak server`**: AWD1 in front of an HTTP API.
+**`logpak server`**: LPD1 in front of an HTTP API.
 
 | Flag | Env | Default | |
 |---|---|---|---|
@@ -376,15 +376,15 @@ client.confirm(&request, response.headers().get(logpak::KEPT).and_then(|v| v.to_
 | `--max-body` | `LOGPAK_MAX_BODY` | 64 MiB | The largest body kept or rebuilt. |
 | `--scope-header` | `LOGPAK_SCOPE_HEADERS` | `authorization,x-api-key` | The headers that identify a tenant. Bases never cross them. |
 | `--metrics` | `LOGPAK_METRICS` | off | Prometheus text at `http://<addr>/metrics`, on its own port. |
-| `--record-dir` | `LOGPAK_RECORD_DIR` | off | Store every request body forwarded in a new AWL1 file here. Requests are then buffered (up to `--max-body`). |
+| `--record-dir` | `LOGPAK_RECORD_DIR` | off | Store every request body forwarded in a new LPK1 file here. Requests are then buffered (up to `--max-body`). |
 | `--record-window` | `LOGPAK_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per conversation in flight. |
 | `--rotate-bytes` | `LOGPAK_ROTATE_BYTES` | 1 GiB | Start a new file once one reaches this size. |
 
-**`logpak collect`**: a log sink that stores what is posted to it in AWL1 ([above](#1-in-front-of-your-tracing-backend)).
+**`logpak collect`**: a log sink that stores what is posted to it in LPK1 ([above](#1-in-front-of-your-tracing-backend)).
 
 | Flag | Env | Default | |
 |---|---|---|---|
-| `--record-dir` | `LOGPAK_RECORD_DIR` | (required) | The new AWL1 file goes here. |
+| `--record-dir` | `LOGPAK_RECORD_DIR` | (required) | The new LPK1 file goes here. |
 | `--forward` | `LOGPAK_FORWARD` | none | The backend each request is sent on to: as received, or a gRPC Export as OTLP/HTTP protobuf. Without one, each is acknowledged. |
 | `--listen` | `LOGPAK_LISTEN` | `127.0.0.1:4318,127.0.0.1:4317` | Where to listen; each address takes OTLP/HTTP and OTLP/gRPC. On loopback: whoever reaches it can fill the disk. In a container, `0.0.0.0:4318,0.0.0.0:4317` on a private network. |
 | `--record-window` | `LOGPAK_RECORD_WINDOW` | 16 | Records a new one may delta against: about one per trace or exporter interleaved. |
@@ -439,13 +439,13 @@ these as upper bounds:
 | 6 MiB | top edit + new turn | 748 B | 7.9 ms | 13 ms |
 | 32 MiB | top edit + new turn | 3.7 KB | 47 ms | 59 ms |
 
-Hashing the rebuilt body is most of the rebuild time. How AWD1 compares with other ways to compress
+Hashing the rebuilt body is most of the rebuild time. How LPD1 compares with other ways to compress
 agent traffic (per-request zstd, streaming windows, dictionaries, `--patch-from`), measured on public
 agent trajectories, is in [docs/research/](docs/research/compression-research.md).
 
 ## Security
 
-AWD1 relies on TLS and on your API's authentication. Bases are per tenant, so a client can never
+LPD1 relies on TLS and on your API's authentication. Bases are per tenant, so a client can never
 use, or learn of, another tenant's base. Compressing secrets together with attacker-influenced
 content has a length side channel, as with any compression. See [SPEC.md §5](SPEC.md#5-scope-and-security)
 and [SECURITY.md](SECURITY.md).
@@ -453,8 +453,8 @@ and [SECURITY.md](SECURITY.md).
 ## Status
 
 **0.1.** The wire format is version 1 and stable for 0.x. The Rust library, both proxies, `collect`
-and the Python bindings for AWL1 are complete and tested. Not built yet: Python bindings for the
-AWD1 client, bindings for TypeScript and Go, and a base store shared across server replicas (use
+and the Python bindings for LPK1 are complete and tested. Not built yet: Python bindings for the
+LPD1 client, bindings for TypeScript and Go, and a base store shared across server replicas (use
 sticky routing; see [Deploying](#deploying)).
 
 ## Development

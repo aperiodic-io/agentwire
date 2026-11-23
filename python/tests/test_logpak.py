@@ -1,4 +1,4 @@
-"""The logpak Python bindings: AWL1 files written and read from Python."""
+"""The logpak Python bindings: LPK1 files written and read from Python."""
 
 import hashlib
 import json
@@ -22,7 +22,7 @@ def request(conversation: str, turns: int) -> bytes:
 class AwlTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
-        self.path = os.path.join(self.dir, "log.awl")
+        self.path = os.path.join(self.dir, "log.lpk")
 
     def tearDown(self):
         shutil.rmtree(self.dir)
@@ -114,13 +114,13 @@ class AwlTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             list(r)
 
-    def test_what_is_not_an_awl1_file_is_refused(self):
+    def test_what_is_not_an_lpk1_file_is_refused(self):
         with open(self.path, "wb") as f:
             f.write(b"not a log")
         with self.assertRaises(ValueError):
             logpak.Reader(self.path)
         with self.assertRaises(FileNotFoundError):
-            logpak.Reader(os.path.join(self.dir, "missing.awl"))
+            logpak.Reader(os.path.join(self.dir, "missing.lpk"))
 
     def test_an_index_past_the_end_is_an_index_error(self):
         self.write([(b"", b"only")])
@@ -136,7 +136,7 @@ class AwlTest(unittest.TestCase):
 
     def test_writers_in_threads_each_keep_their_own_file(self):
         def write(n):
-            with logpak.Writer(os.path.join(self.dir, f"{n}.awl")) as w:
+            with logpak.Writer(os.path.join(self.dir, f"{n}.lpk")) as w:
                 for t in range(1, 6):
                     w.append(request(str(n), t))
 
@@ -146,7 +146,7 @@ class AwlTest(unittest.TestCase):
         for t in threads:
             t.join()
         for n in range(4):
-            r = logpak.Reader(os.path.join(self.dir, f"{n}.awl"))
+            r = logpak.Reader(os.path.join(self.dir, f"{n}.lpk"))
             self.assertEqual([body for _, body in r], [request(str(n), t) for t in range(1, 6)])
 
     @unittest.skipUnless(os.environ.get("LOGPAK_BIN"), "LOGPAK_BIN: the logpak binary, to read a file it packed")

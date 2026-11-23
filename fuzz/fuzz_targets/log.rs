@@ -1,4 +1,4 @@
-//! Any bytes as an AWL1 file: refused, or read without panicking, and every record that reads
+//! Any bytes as an LPK1 file: refused, or read without panicking, and every record that reads
 //! reads the same by index as in a scan.
 #![no_main]
 

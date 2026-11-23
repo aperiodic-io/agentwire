@@ -8,7 +8,7 @@ For each of LiteLLM, Kong AI Gateway and Portkey:
   tool sent, and every turn after a conversation's first crosses the network as a small delta;
 * at rest: the gateway's log of every request (Kong's http-log, LiteLLM's generic_api callback; for
   Portkey, which exports none, `logpak server --record-dir` in front of it) is stored by logpak
-  in AWL1, holds every request, and takes a fraction of the bytes logged.
+  in LPK1, holds every request, and takes a fraction of the bytes logged.
 
 Needs Docker (host networking, so Linux) and LOGPAK_BIN, the `logpak` binary built with the
 `proxy` feature. Run: LOGPAK_BIN=target/debug/logpak python3 -m unittest tests/gateways/test_gateways.py

@@ -12,7 +12,7 @@ in the path of your model calls, and turning Logpak off is one environment varia
 |---|---|---|
 | **A. OpenTelemetry** (main) | `logpak collect --record-dir DIR [--forward URL]` | the tool exports OTLP with the messages: most frameworks and gateways, and the coding agents marked so below |
 | **B. Recording proxy** (fallback) | `logpak server --upstream URL --record-dir DIR` | the tool exports no content over OTel, or you need the exact API request bytes |
-| **C. Pack a file** | `logpak log pack FILE.awl < lines.jsonl` | logs that already land in files or buckets (Bedrock, Vertex, exports) |
+| **C. Pack a file** | `logpak log pack FILE.lpk < lines.jsonl` | logs that already land in files or buckets (Bedrock, Vertex, exports) |
 
 `collect` also takes plain JSON log POSTs on any path, which is how gateways with an HTTP log
 plugin (Kong, LiteLLM, APISIX) send their payload logs.
@@ -188,7 +188,7 @@ days (`cleanupPeriodDays`). It packs, but each message is stored only once, so e
 ratios. The format is internal to Claude Code.
 
 ```bash
-cat ~/.claude/projects/*/*.jsonl | logpak log pack claude-transcripts.awl
+cat ~/.claude/projects/*/*.jsonl | logpak log pack claude-transcripts.lpk
 ```
 
 Docs: [monitoring](https://code.claude.com/docs/en/monitoring-usage),
@@ -297,7 +297,7 @@ COPILOT_OTEL_FILE_EXPORTER_PATH=~/copilot-otel.jsonl copilot
 ```
 
 ```bash
-logpak log pack copilot.awl < ~/copilot-otel.jsonl
+logpak log pack copilot.lpk < ~/copilot-otel.jsonl
 ```
 
 **B.** Only bring-your-own-key models go through the proxy. In `~/.copilot/providers.json`:
@@ -368,7 +368,7 @@ ANTHROPIC_HOST=http://127.0.0.1:8080 goose session
 the input payload, response and usage. Pack them before they rotate away:
 
 ```bash
-cat ~/.local/state/goose/logs/llm_request.*.jsonl | logpak log pack goose.awl
+cat ~/.local/state/goose/logs/llm_request.*.jsonl | logpak log pack goose.lpk
 ```
 
 Docs: [environment variables](https://goose-docs.ai/docs/guides/environment-variables),
@@ -561,7 +561,7 @@ model:
 step, so steps re-send the conversation and pack well. Emit one step per line:
 
 ```bash
-for t in trajectories/*/*/*/*.traj; do jq -c '.trajectory[]' "$t"; done | logpak log pack swe.awl --window 32
+for t in trajectories/*/*/*/*.traj; do jq -c '.trajectory[]' "$t"; done | logpak log pack swe.lpk --window 32
 ```
 
 Docs: [keys and api_base](https://swe-agent.com/latest/installation/keys/),
@@ -1258,7 +1258,7 @@ aws s3 cp --recursive s3://my-bucket/bedrock/AWSLogs/ ./bedrock-logs/
 ```
 
 ```bash
-find bedrock-logs -name '*.json.gz' | sort | xargs zcat | jq -c . | logpak log pack bedrock.awl --window 32
+find bedrock-logs -name '*.json.gz' | sort | xargs zcat | jq -c . | logpak log pack bedrock.lpk --window 32
 ```
 
 `jq -c .` normalises to one record per line, whatever the files' layout. Bedrock requests are
@@ -1285,7 +1285,7 @@ Request-response logging (`setPublisherModelConfig` with `loggingConfig`) writes
 `full_response` to BigQuery. Pairs over 10 MB are not recorded.
 
 ```bash
-bq query --format=json --max_rows=1000000 --nouse_legacy_sql 'SELECT * FROM `proj.ds.request_response_logging`' | jq -c '.[]' | logpak log pack vertex.awl
+bq query --format=json --max_rows=1000000 --nouse_legacy_sql 'SELECT * FROM `proj.ds.request_response_logging`' | jq -c '.[]' | logpak log pack vertex.lpk
 ```
 
 For large tables, export to GCS as newline-delimited JSON instead, then pack the files.

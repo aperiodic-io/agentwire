@@ -1,8 +1,8 @@
-//! `logpak server`: the AWD1 layer as a reverse proxy in front of an HTTP API.
-//! `logpak client`: a local proxy that sends what a tool posts to it as AWD1 deltas.
+//! `logpak server`: the LPD1 layer as a reverse proxy in front of an HTTP API.
+//! `logpak client`: a local proxy that sends what a tool posts to it as LPD1 deltas.
 //! `logpak collect`: a log sink (OTLP/HTTP, a gateway's HTTP log plugin) that stores every
-//! request body in AWL1, and forwards it unchanged when given a backend.
-//! `logpak log`: pack, list and read AWL1 files (what `--record-dir` and `collect` write).
+//! request body in LPK1, and forwards it unchanged when given a backend.
+//! `logpak log`: pack, list and read LPK1 files (what `--record-dir` and `collect` write).
 
 use std::convert::Infallible;
 use std::fs::File;
@@ -29,7 +29,7 @@ use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use logpak::client::Client;
 use logpak::log;
-use logpak::server::{Awd1Layer, Config, InnerBody, Stats};
+use logpak::server::{Config, InnerBody, Lpd1Layer, Stats};
 use logpak::store::Store;
 use logpak::{ERROR, KEPT};
 use tokio::net::TcpListener;
@@ -49,7 +49,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Mode {
-    /// Rebuild AWD1 requests and forward them, byte-exact, to the upstream API.
+    /// Rebuild LPD1 requests and forward them, byte-exact, to the upstream API.
     Server {
         #[arg(long, env = "LOGPAK_LISTEN", default_value = "0.0.0.0:8080")]
         listen: SocketAddr,
@@ -72,26 +72,26 @@ enum Mode {
         #[arg(long, env = "LOGPAK_METRICS")]
         metrics: Option<SocketAddr>,
         /// Store every request body forwarded, with its time, method and path (never its headers),
-        /// in a new AWL1 file in this directory; read it with `logpak log`.
+        /// in a new LPK1 file in this directory; read it with `logpak log`.
         #[arg(long, env = "LOGPAK_RECORD_DIR")]
         record_dir: Option<PathBuf>,
         /// Records a new one may delta against: about one per conversation in flight.
         #[arg(long, env = "LOGPAK_RECORD_WINDOW", default_value_t = 16)]
         record_window: usize,
-        /// Start a new AWL1 file once one reaches this size; every file reads on its own.
+        /// Start a new LPK1 file once one reaches this size; every file reads on its own.
         #[arg(long, env = "LOGPAK_ROTATE_BYTES", default_value_t = 1 << 30)]
         rotate_bytes: u64,
     },
     /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
-    /// AWL1, decoded (gzip, deflate, br, zstd, snappy); forward each request as received when given a backend. Also accepts
-    /// AWD1 deltas from `logpak client`.
+    /// LPK1, decoded (gzip, deflate, br, zstd, snappy); forward each request as received when given a backend. Also accepts
+    /// LPD1 deltas from `logpak client`.
     Collect {
         /// Where to listen (repeat, or comma-separate); each address takes OTLP/HTTP and OTLP/gRPC.
         /// Loopback by default: anyone who can reach it can fill the disk. In a container, give
         /// 0.0.0.0:4318,0.0.0.0:4317 and put it on a private network.
         #[arg(long, env = "LOGPAK_LISTEN", value_delimiter = ',', default_value = "127.0.0.1:4318,127.0.0.1:4317")]
         listen: Vec<SocketAddr>,
-        /// The new AWL1 file goes in this directory; read it with `logpak log`.
+        /// The new LPK1 file goes in this directory; read it with `logpak log`.
         #[arg(long, env = "LOGPAK_RECORD_DIR")]
         record_dir: PathBuf,
         /// The backend each request is forwarded to, as received, e.g.
@@ -101,7 +101,7 @@ enum Mode {
         /// Records a new one may delta against: about one per trace or exporter interleaved.
         #[arg(long, env = "LOGPAK_RECORD_WINDOW", default_value_t = 16)]
         record_window: usize,
-        /// Start a new AWL1 file once one reaches this size; every file reads on its own.
+        /// Start a new LPK1 file once one reaches this size; every file reads on its own.
         #[arg(long, env = "LOGPAK_ROTATE_BYTES", default_value_t = 1 << 30)]
         rotate_bytes: u64,
         /// The largest body stored, after decoding.
@@ -114,7 +114,7 @@ enum Mode {
     Client {
         #[arg(long, env = "LOGPAK_LISTEN", default_value = "127.0.0.1:8787")]
         listen: SocketAddr,
-        /// The `logpak server` (or an AWD1-aware API) to send to.
+        /// The `logpak server` (or an LPD1-aware API) to send to.
         #[arg(long, env = "LOGPAK_UPSTREAM")]
         upstream: reqwest::Url,
         /// Bodies remembered as bases: about one per conversation in flight.
@@ -126,14 +126,14 @@ enum Mode {
         #[arg(long, env = "LOGPAK_METRICS")]
         metrics: Option<SocketAddr>,
     },
-    /// Read and write AWL1 files: bodies stored as deltas against earlier ones.
+    /// Read and write LPK1 files: bodies stored as deltas against earlier ones.
     #[command(subcommand)]
     Log(LogCmd),
 }
 
 #[derive(Subcommand)]
 enum LogCmd {
-    /// Store each line of stdin (JSON lines: spans, requests) as a record of a new AWL1 file.
+    /// Store each line of stdin (JSON lines: spans, requests) as a record of a new LPK1 file.
     Pack {
         file: PathBuf,
         /// Records a new one may delta against: about one per trace or conversation interleaved.
@@ -224,7 +224,7 @@ async fn main() -> Result<(), BoxError> {
     }
 }
 
-/// The AWD1 layer in front of `forward`, until shutdown.
+/// The LPD1 layer in front of `forward`, until shutdown.
 async fn run_server(
     listen: Vec<SocketAddr>,
     store: Store,
@@ -233,7 +233,7 @@ async fn run_server(
     forward: Forward,
 ) -> Result<(), BoxError> {
     let store = Arc::new(store);
-    let layer = Awd1Layer::new(store.clone(), config);
+    let layer = Lpd1Layer::new(store.clone(), config);
     if let Some(addr) = metrics {
         let (stats, store, record) = (layer.stats().clone(), store.clone(), forward.record.clone());
         serve_metrics(addr, move || {
@@ -299,7 +299,7 @@ fn lock(r: &Recorder) -> std::sync::MutexGuard<'_, Recording> {
     r.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// AWL1 files in `dir`, named by when each was opened, so a restart never appends to or replaces
+/// LPK1 files in `dir`, named by when each was opened, so a restart never appends to or replaces
 /// one, and in order by name. Each is self-contained: a new one starts without bases.
 struct Recording {
     dir: PathBuf,
@@ -334,11 +334,11 @@ impl Recording {
     }
 
     fn create(dir: &std::path::Path, window: usize, seq: u64) -> io::Result<(PathBuf, log::Writer<BufWriter<File>>)> {
-        let path = dir.join(format!("{}-{}-{seq:06}.awl", unix_ms(), std::process::id()));
+        let path = dir.join(format!("{}-{}-{seq:06}.lpk", unix_ms(), std::process::id()));
         let file = File::options().write(true).create_new(true).open(&path)?;
         tracing::info!(path = %path.display(), "recording");
         let mut w = log::Writer::new(BufWriter::new(file), window)?;
-        w.flush()?; // a valid, empty AWL1 file before the first record
+        w.flush()?; // a valid, empty LPK1 file before the first record
         Ok((path, w))
     }
 
@@ -666,7 +666,7 @@ fn bounded(decoder: impl Read, max: usize) -> Result<Bytes, StatusCode> {
 }
 
 /// Zstandard frames, one or several, whether or not they state their size, in a window no larger
-/// than AWD1's own (2^27).
+/// than LPD1's own (2^27).
 fn unzstd(data: &[u8], max: usize) -> Result<Bytes, StatusCode> {
     let mut dctx = zstd_safe::DCtx::create();
     dctx.set_parameter(zstd_safe::DParameter::WindowLogMax(27)).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -734,7 +734,7 @@ impl ClientProxy {
             Err(_) => return status(StatusCode::PAYLOAD_TOO_LARGE),
         };
         // a delta of compressed bytes finds nothing: decode first. A body in a coding not known here goes as is
-        // (`awd1` must be its only content coding)
+        // (`lpd1` must be its only content coding)
         let body = match decoded(&parts.headers, body, self.max_body) {
             Ok((body, encoding)) if encoding == "-" => {
                 parts.headers.remove(header::CONTENT_ENCODING);

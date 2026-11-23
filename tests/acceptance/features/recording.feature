@@ -1,6 +1,6 @@
 Feature: Every request is stored as a delta, and read back byte for byte
   A gateway logs each request for audit and replay; a trace pipeline logs each span. Both re-send
-  the whole prompt every call, so AWL1 stores each as a delta against an earlier record.
+  the whole prompt every call, so LPK1 stores each as a delta against an earlier record.
 
   Scenario: A recording server keeps every request it forwards, in a fraction of its size
     Given an upstream API

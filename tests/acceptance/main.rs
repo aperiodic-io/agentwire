@@ -352,7 +352,7 @@ async fn corrupt_delta(w: &mut Proxies) {
     );
     let mut delta = codec::encode(&base, &codec::hash(&base), &target, &codec::hash(&target));
     *delta.last_mut().unwrap() ^= 0xff;
-    w.last = Some(w.post_to_server(delta, &[("content-encoding", "awd1")]).await);
+    w.last = Some(w.post_to_server(delta, &[("content-encoding", "lpd1")]).await);
 }
 
 #[then("the upstream received every request byte for byte")]
@@ -362,7 +362,7 @@ async fn byte_for_byte(w: &mut Proxies) {
     for (i, ((headers, body), sent)) in recorded.iter().zip(&w.sent).enumerate() {
         assert_eq!(body, &sent.body, "request {i}");
         assert_eq!(headers["content-length"], body.len().to_string());
-        assert!(headers.keys().all(|k| !k.as_str().starts_with("awd1")), "request {i}: {headers:?}");
+        assert!(headers.keys().all(|k| !k.as_str().starts_with("lpd1")), "request {i}: {headers:?}");
         assert!(headers.get("content-encoding").is_none(), "request {i}");
     }
 }
@@ -390,17 +390,17 @@ async fn resent(w: &mut Proxies, n: u64) {
     assert_eq!(w.metric(&w.client, "logpak_client_resent_total").await, n);
 }
 
-#[then("the response has no awd1 headers")]
-async fn no_awd1_headers(w: &mut Proxies) {
+#[then("the response has no lpd1 headers")]
+async fn no_lpd1_headers(w: &mut Proxies) {
     let (status, headers) = w.last.as_ref().unwrap();
     assert_eq!(*status, 200);
-    assert!(headers.keys().all(|k| !k.as_str().starts_with("awd1")), "{headers:?}");
+    assert!(headers.keys().all(|k| !k.as_str().starts_with("lpd1")), "{headers:?}");
 }
 
-#[then(expr = "the server answers {int} with the awd1-error {string}")]
+#[then(expr = "the server answers {int} with the lpd1-error {string}")]
 async fn refused(w: &mut Proxies, status: u16, code: String) {
     let (got, headers) = w.last.as_ref().unwrap();
-    assert_eq!((*got, headers["awd1-error"].to_str().unwrap()), (status, code.as_str()));
+    assert_eq!((*got, headers["lpd1-error"].to_str().unwrap()), (status, code.as_str()));
 }
 
 #[then("the upstream received only the base")]
@@ -447,7 +447,7 @@ async fn a_recording_server(w: &mut Proxies) {
 fn recording(w: &Proxies) -> String {
     let files: Vec<_> = std::fs::read_dir(w.record_dir.as_ref().unwrap()).unwrap().map(|e| e.unwrap().path()).collect();
     assert_eq!(files.len(), 1, "{files:?}");
-    assert_eq!(files[0].extension().unwrap(), "awl");
+    assert_eq!(files[0].extension().unwrap(), "lpk");
     files[0].to_str().unwrap().to_owned()
 }
 
@@ -490,7 +490,7 @@ async fn spans_as_json_lines(w: &mut Proxies, traces: usize, spans: usize) {
 
 #[when("they are packed with `logpak log pack`")]
 async fn pack(w: &mut Proxies) {
-    let file = scratch("pack").join("spans.awl");
+    let file = scratch("pack").join("spans.lpk");
     log(&["pack", file.to_str().unwrap()], &jsonl(&w.lines)).await;
     w.packed = Some(file);
 }

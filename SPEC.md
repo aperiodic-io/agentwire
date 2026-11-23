@@ -1,9 +1,9 @@
-# AWD1: request bodies as deltas against the previous request
+# LPD1: request bodies as deltas against the previous request
 
 Version 1. Status: stable wire format for Logpak 0.x; changes need a new version byte.
 
 LLM APIs are called with the whole conversation in every request, so request *k+1* is request *k*
-plus a turn. AWD1 lets an HTTP client send it as an edit of a body the server already holds, and
+plus a turn. LPD1 lets an HTTP client send it as an edit of a body the server already holds, and
 lets the server rebuild the exact bytes before its handler sees them. It needs no session or
 connection state: a base is named by its SHA-256, and a client only uses a base the server
 confirmed it kept.
@@ -14,22 +14,22 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 | Header | Direction | Value | Meaning |
 |---|---|---|---|
-| `awd1-keep` | request | `?1` | Keep this request's body (after rebuilding, if it is a delta) as a base. |
-| `awd1-kept` | response | lowercase hex SHA-256, 64 characters | The server kept the request's body under this hash. |
-| `content-encoding: awd1` | request | | The body is a delta (§3). It MUST be the only content coding. |
-| `awd1-error` | response | a token (§4) | The server refused the delta. It did not pass the request on. |
+| `lpd1-keep` | request | `?1` | Keep this request's body (after rebuilding, if it is a delta) as a base. |
+| `lpd1-kept` | response | lowercase hex SHA-256, 64 characters | The server kept the request's body under this hash. |
+| `content-encoding: lpd1` | request | | The body is a delta (§3). It MUST be the only content coding. |
+| `lpd1-error` | response | a token (§4) | The server refused the delta. It did not pass the request on. |
 
 ## 2. Exchange
 
-1. A client sends a request in full with `awd1-keep: ?1`.
-2. A server that implements AWD1 keeps the body and answers with `awd1-kept: <sha256>`. A server
+1. A client sends a request in full with `lpd1-keep: ?1`.
+2. A server that implements LPD1 keeps the body and answers with `lpd1-kept: <sha256>`. A server
    that does not, ignores the header, and the client never sends it a delta. This is how support
    is discovered.
 3. For a later request, the client MAY send a delta against any body whose hash a response named
-   in `awd1-kept`. It SHOULD pick the one that shares the most bytes with the new body. It SHOULD
+   in `lpd1-kept`. It SHOULD pick the one that shares the most bytes with the new body. It SHOULD
    send the body in full when the delta would not be smaller.
 4. The server rebuilds the body and checks its SHA-256 (§3), then hands the handler the rebuilt
-   body. It sets `content-length` and removes `content-encoding: awd1` and `awd1-keep`. The handler
+   body. It sets `content-length` and removes `content-encoding: lpd1` and `lpd1-keep`. The handler
    cannot tell the request was a delta.
 5. If the server refuses a delta (§4), it MUST NOT have passed the request on. The client SHOULD
    send the same request again in full, and MUST NOT use that base again.
@@ -40,7 +40,7 @@ full-size request, never an error.
 ## 3. Delta body
 
 ```
-delta  = "AWD1" version base target prefix suffix target_len frame
+delta  = "LPD1" version base target prefix suffix target_len frame
 version    = %x01
 base       = 32 bytes, SHA-256 of the base body
 target     = 32 bytes, SHA-256 of the rebuilt body
@@ -65,7 +65,7 @@ that prefix plus the literal, up to 2^27 bytes.
 
 A receiver MUST reject:
 
-- a magic other than `AWD1`, or a version it does not implement (`unsupported-version`);
+- a magic other than `LPD1`, or a version it does not implement (`unsupported-version`);
 - a truncated header, a non-canonical or overlong varint, or `prefix + suffix > target_len`
   (`malformed`);
 - `target_len` over its size limit, or a delta body over it (`too-large`);
@@ -79,7 +79,7 @@ A receiver MUST bound the memory it allocates for a delta by its size limit, bef
 
 ## 4. Errors
 
-| `awd1-error` | Status | Cause |
+| `lpd1-error` | Status | Cause |
 |---|---|---|
 | `unknown-base` | 409 | The base was never kept, was dropped, or belongs to another scope. |
 | `too-large` | 413 | The body, rebuilt or as sent, exceeds the server's limit. |
@@ -95,43 +95,43 @@ A receiver MUST bound the memory it allocates for a delta by its size limit, bef
   the tenant that sent the body. Without scoping, a hit would confirm to anyone that someone else
   sent a given body.
 - **Integrity, not authenticity.** SHA-256 over the rebuilt body guarantees the server forwards
-  exactly what the client hashed. It says nothing about who sent it. Run AWD1 over TLS, behind the
+  exactly what the client hashed. It says nothing about who sent it. Run LPD1 over TLS, behind the
   same authentication as the API.
 - **Compression side channel.** A delta's size depends on how the new body differs from the base.
   An observer of encrypted traffic who can also inject content into a conversation (a fetched page,
   a tool result) learns more than from a plain request, as with any compression of secrets mixed
   with attacker-chosen data (CRIME, BREACH). Bases never cross scopes, which keeps one tenant's
-  content out of another's deltas. Where the residual risk matters, do not enable AWD1 for that
+  content out of another's deltas. Where the residual risk matters, do not enable LPD1 for that
   traffic.
 - **Memory.** A server bounds kept bases by a byte budget and a TTL. It also bounds each rebuild by
   its size limit, and the zstd window by 2^27.
 
 ## 6. Relation to other standards
 
-AWD1 is `Compression Dictionary Transport` (RFC 9842, `dcz`) turned around: the dictionary is the
+LPD1 is `Compression Dictionary Transport` (RFC 9842, `dcz`) turned around: the dictionary is the
 client's own previous request, not a response the server served. A provider that offers `dcz` for
-request bodies with the previous request as dictionary would make AWD1 unnecessary. The
+request bodies with the previous request as dictionary would make LPD1 unnecessary. The
 `prefix`/`suffix` copy saves a zstd pass over the unchanged context, which `dcz` would compress
 again on every request.
 
-## 7. AWL1: a log of bodies stored as deltas
+## 7. LPK1: a log of bodies stored as deltas
 
 A gateway's request log and a trace pipeline's spans re-send the whole prompt on every call, as the
-requests themselves do. AWL1 stores such a log as a file of AWD1 delta bodies (§3), each against
+requests themselves do. LPK1 stores such a log as a file of LPD1 delta bodies (§3), each against
 one of the records before it, so a record costs about its new bytes and every one is checked by
 SHA-256 when it is read.
 
 ```
-file    = "AWL1" version window record*
+file    = "LPK1" version window record*
 version = %x01
 window  = varint            ; how many of the latest records a record may name as its base
 record  = back meta_len meta delta_len delta
 back    = varint            ; records back to the base; 0: the base is the empty body
 meta    = meta_len bytes    ; stored as is (a time, an id, a method and path)
-delta   = delta_len bytes   ; an AWD1 body (§3) whose base is that record's body
+delta   = delta_len bytes   ; an LPD1 body (§3) whose base is that record's body
 ```
 
-Every record is an AWD1 delta. One stored whole is a delta against the empty body (`back = 0`).
+Every record is an LPD1 delta. One stored whole is a delta against the empty body (`back = 0`).
 
 A reader rebuilds record *i* from the record `back` before it, and so on down to one with `back = 0`.
 It MUST reject a file whose magic or version it does not know, and a `back` greater than *i* or
