@@ -33,6 +33,52 @@ anyway. Deltapack looks for the previous copy by record, whatever its size.
 At that ratio a terabyte of spans is under 10 GB. You can afford to keep every prompt in full,
 without sampling or truncating, and still pull any single request out in milliseconds.
 
+## What the files are for
+
+- **Replay a failure.** For requests recorded by `deltapack server --record-dir`, `deltapack log get`
+  writes one byte for byte, as the provider received it: post it again, or step through what the
+  agent saw.
+- **Find a trace.** `deltapack log show --trace <id>` writes each of its spans as a line of JSON, its
+  prompt and attributes decoded from OTLP protobuf or JSON.
+- **Build an eval or fine-tuning set.** `deltapack log show --since 7d ~/deltapack/*.dpk` into `jq`, DuckDB or pandas:
+  every prompt in full, not sampled or truncated.
+- **Answer an auditor.** Keep every request for as long as you must (`--keep-days`), or hand each
+  closed file to your archive (`--on-rotate`), at about a hundredth of the bytes.
+- **Know what it saves.** `deltapack log stats` gives the ratio on your own traffic.
+
+## Try it in a minute
+
+With `deltapack` and `jq` on your path, and port 4318 free, this posts three turns of one agent's trace as an OTLP exporter
+would, then reads them back:
+
+```bash
+rm -rf ./deltapack
+deltapack collect --record-dir ./deltapack > /dev/null 2>&1 &
+sleep 1
+system=$(printf 'You are a careful coding agent. %.0s' {1..200})
+history=""
+for turn in 1 2 3; do
+  history="$history step $turn."
+  curl -s -o /dev/null http://127.0.0.1:4318/v1/traces -H 'content-type: application/json' -d '{"resourceSpans":[{
+    "resource":{"attributes":[{"key":"service.name","value":{"stringValue":"demo-agent"}}]},
+    "scopeSpans":[{"spans":[{"traceId":"4bf92f3577b34da6a3ce929d0e0e4736","spanId":"000000000000000'$turn'",
+    "name":"chat","attributes":[{"key":"gen_ai.prompt","value":{"stringValue":"'"$system$history"'"}}]}]}]}]}'
+done
+deltapack log stats ./deltapack/*.dpk
+deltapack log show --trace 4bf92f3577b34da6a3ce929d0e0e4736 ./deltapack/*.dpk |
+  jq -c '{record, name, service: .resource["service.name"], ends: .attributes["gen_ai.prompt"][-24:]}'
+kill %1
+```
+
+```
+3 records, 20166 bytes in 760 on disk (26.5x)	./deltapack/1795474283580-31119-000000.dpk
+{"record":0,"name":"chat","service":"demo-agent","ends":"l coding agent.  step 1."}
+{"record":1,"name":"chat","service":"demo-agent","ends":" agent.  step 1. step 2."}
+{"record":2,"name":"chat","service":"demo-agent","ends":" step 1. step 2. step 3."}
+```
+
+Each turn re-sends the whole prompt; each record after the first stores only the turn it adds.
+
 ## Quick start: point your OpenTelemetry exporter at Deltapack
 
 Your agent, framework or gateway most likely exports OpenTelemetry already. Run a collector, point
@@ -59,12 +105,15 @@ export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf   # or grpc, with http://127.0.
 Run your agent as usual, then look at what arrived:
 
 ```bash
-deltapack log ls ~/deltapack/*.dpk          # one line per batch: index, base, bytes stored, meta
+deltapack log stats ~/deltapack/*.dpk       # per file: records, their bytes, bytes on disk, ratio
 ```
 
 ```bash
-deltapack log unpack ~/deltapack/*.dpk      # every batch back, byte for byte
+deltapack log show ~/deltapack/*.dpk        # one JSON line per span or log record
 ```
+
+`log ls` lists a file's records and `log unpack` writes them back byte for byte, one file at a
+time ([Reading it back](#reading-it-back)).
 
 It takes OTLP traces, logs and metrics, as protobuf or JSON, compressed or not (gzip, deflate,
 brotli, zstd, snappy). Nothing sits in the path of your model calls: unset the variable and
@@ -414,114 +463,11 @@ restarts a chain with a whole record before reading one would mean rebuilding 4,
 
 ## The same codec on the wire: DPD1
 
-The delta that shrinks a log also shrinks the request. An agent uploads its whole conversation on
-every call. With DPD1 the client sends each request as a delta against one the server already
-holds, and the server rebuilds the exact body before your handler, or the provider, sees it. It is
-plain HTTP: a pair of headers and a `content-encoding` ([SPEC.md](SPEC.md)).
-
-| A 6 MiB request that… | plain | zstd, per request¹ | **DPD1** |
-|---|---:|---:|---:|
-| adds one turn to the previous request | 6 MiB | ~1.6 MiB | **141 bytes** |
-| also edits the system prompt at the top | 6 MiB | ~1.6 MiB | **748 bytes** |
-
-¹ At the 3.8× that one zstd frame per request averaged on public agent trajectories, measured
-before the 0.1 release ([the research report](https://github.com/aperiodic-io/deltapack/blob/907d44e/docs/research/compression-research.md), kept in git history).
-
-This is for agents on slow or metered links, and for egress you pay for: on public agent traffic,
-1 TB a month of request uploads at $0.09/GB costs $90 plain, $23.56 with per-request zstd and $1.43
-with DPD1, by the same measurements.
-It does not change what the model sees. Token counts, your LLM bill and provider prompt caching are
-as before, because the provider receives the same bytes.
-
-Run `deltapack server` near the provider and `deltapack client` next to the tool. Neither needs
-code changes:
-
-```bash
-deltapack server --listen 0.0.0.0:8080 --upstream https://api.anthropic.com
-```
-
-```bash
-docker run -p 8080:8080 ghcr.io/aperiodic-io/deltapack server --upstream https://api.anthropic.com
-```
-
-```bash
-deltapack client --upstream https://deltapack.example.com
-```
-
-```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude
-```
-
-For OpenAI-style clients, point `OPENAI_BASE_URL` at the client and use
-`--upstream https://api.openai.com` on the server. Put `deltapack client` in front of an OTLP
-exporter and its batches cross the network to `collect` as deltas too. Add
-`--metrics 127.0.0.1:9464` to either side to see the bytes saved.
-
-```
-client                                    server
-  │  POST  (full body)  dpd1-keep: ?1       │
-  │ ──────────────────────────────────────▶ │  keeps the body
-  │ ◀────────────────────────────────────── │  dpd1-kept: <sha256>
-  │                                         │
-  │  POST  content-encoding: dpd1           │
-  │  (delta: base hash, target hash, edit)  │
-  │ ──────────────────────────────────────▶ │  rebuilds, checks SHA-256,
-  │                                         │  hands the original body on
-```
-
-- The rebuilt body must match the SHA-256 the client sent, or the request is refused and never
-  forwarded. The handler gets the original bytes, `content-length` and all, so request signing and
-  prompt caching are unaffected.
-- The worst case is one normal request. A client deltas only against a body the server confirmed
-  it kept (`dpd1-kept`). A server without DPD1 never confirms, so the client sends plain requests.
-  A server that lost a base (restart, eviction, another replica) answers `409`, and the client
-  resends that one request in full.
-- Bases are named by content hash, not by session or connection, so any request can be retried on
-  any connection.
-- Bases are scoped by the `authorization` / `x-api-key` header. A client cannot use, or learn of,
-  another tenant's base.
-
-| You control | Use |
-|---|---|
-| Both ends: your agent and your API, agents talking to each other, your inference server | The library: [`Client`](src/client.rs) on the sending side, [`Dpd1Layer`](src/server.rs) (a `tower` layer) on the receiving side. |
-| Only the client: you call Anthropic, OpenAI, … | `deltapack server` as a reverse proxy near the provider. It is the same layer in front of a forwarder. |
-| Neither: a CLI tool such as Claude Code or Codex | `deltapack client` on the tool's machine, talking to a `deltapack server`. |
-
-### The DPD1 library (Rust)
-
-```toml
-[dependencies]
-deltapack = "0.1"                                           # codec, client, server layer
-# deltapack = { version = "0.1", default-features = false } # codec and client only
-```
-
-**Server.** Wrap your handler. Here it is axum, but any `tower` stack works:
-
-```rust
-use std::{sync::Arc, time::Duration};
-use deltapack::{server::{Dpd1Layer, Config}, store::Store};
-
-let store = Arc::new(Store::new(1 << 30, Duration::from_secs(1800))); // 1 GiB of bases, 30 min idle TTL
-let app = axum::Router::new()
-    .route("/v1/messages", axum::routing::post(messages))
-    .layer(Dpd1Layer::new(store, Config::default()));
-```
-
-The handler receives each request as the client built it. Requests without DPD1 headers pass
-through untouched and unbuffered.
-
-**Client.** Wrap your HTTP call. One `Client` serves concurrent requests and conversations:
-
-```rust
-let client = deltapack::client::Client::new(4); // remembers 4 confirmed bases
-let request = client.prepare(body);
-let mut response = send(request.wire_body(), &request.headers()).await;
-if request.is_delta() && response.headers().contains_key(deltapack::ERROR) {
-    // the server no longer has the base; it did not forward the request
-    response = send(request.body(), &request.plain_headers()).await;
-}
-client.confirm(&request, response.headers().get(deltapack::KEPT).and_then(|v| v.to_str().ok()));
-```
+The delta that shrinks a log also shrinks the request: an agent that uploads its whole conversation
+on every call can send each request as a delta against the last one instead, and the server
+rebuilds the exact body before the provider sees it. A 6 MiB request that adds one turn crosses the
+network as 141 bytes. `deltapack client` and `deltapack server` do it with no code changes; the Rust
+library does it in your own stack. Everything about it is in [docs/dpd1.md](docs/dpd1.md).
 
 ## Proxy reference
 
@@ -582,45 +528,36 @@ deltas on.
 | `deltapack_record_failures_total` | Records that could not be written (disk full, I/O error). The request was still forwarded; the next record goes to a new file. |
 | `deltapack_rotate_command_failures_total` | `--on-rotate` commands that exited non-zero or could not start. The file stays in the directory, kept from retention, and gets the command again at the next start. |
 
-### Deploying
+## FAQ
 
-- **Place `deltapack server` near the provider** (same region). The saving is on the hop from the
-  client to it.
-- **Replicas:** bases live in each process's memory. Route a tenant's requests to the same replica
-  (consistent hashing on `authorization`). Otherwise a request may land where its base is not, and
-  costs one full resend.
-- **Restarts and deploys** drop the bases. Each conversation's next request is then sent in full.
-- **Memory:** `--store-bytes`, plus up to two bodies per request in flight while it is rebuilt.
-- **Shutdown:** on SIGTERM it stops accepting connections and lets requests in flight (including
-  streams) finish.
+**Can I redact prompts before they are stored?** Not in Deltapack: a record is the body as it was
+sent, which is what makes replay exact. Redact where the content is produced (most instrumentations
+have a content-capture switch and a hook), or keep the files where only those allowed to read the
+prompts can, as you would the requests themselves.
 
-## Performance
+**My backend compresses already. Why this?** A column store compresses a block at a time, and the
+previous copy of a prompt is usually in another block. In the end-to-end run above, Langfuse kept
+31.6 MiB in ClickHouse (ZSTD(3)), plus 356 MB of raw events in S3, for what Deltapack stored in
+3.26 MB. Keep the backend for
+search and dashboards, and Deltapack for the full bodies.
 
-`codec::encode` and `apply` on one core, measured while another workload was running, so read
-these as upper bounds:
+**One collector for several tenants?** Run one per tenant, each with its own `--record-dir`: a
+tenant's files can then be kept, shipped and deleted on their own. A record cannot be deleted from
+the middle of a file without rewriting the records that delta against it.
 
-| Context | Edit | Delta | Encode | Rebuild + SHA-256 check |
-|---:|---|---:|---:|---:|
-| 1 MiB | new turn | 139 B | 0.1 ms | 1.1 ms |
-| 6 MiB | new turn | 141 B | 1.0 ms | 12 ms |
-| 6 MiB | top edit + new turn | 748 B | 7.9 ms | 13 ms |
-| 32 MiB | top edit + new turn | 3.7 KB | 47 ms | 59 ms |
-
-Hashing the rebuilt body is most of the rebuild time.
-
-## Security
-
-DPD1 relies on TLS and on your API's authentication. Bases are per tenant, so a client can never
-use, or learn of, another tenant's base. Compressing secrets together with attacker-influenced
-content has a length side channel, as with any compression. See [SPEC.md §5](SPEC.md#5-scope-and-security)
-and [SECURITY.md](SECURITY.md).
+**What if the collector is down?** Exporters retry for a while, then drop the batch: neither
+Deltapack nor the backend behind `--forward` gets it. Where the backend must keep getting data,
+export to it directly and send a second exporter, or a Collector tee
+([docs/integrations.md](docs/integrations.md#opentelemetry-collector)), to `deltapack collect`. If
+the backend is down instead, each batch is stored before it is forwarded, and the exporter's
+retries are stored again.
 
 ## Status
 
 **0.1.** The wire format is version 1 and stable for 0.x. The Rust library, both proxies, `collect`
 and the Python bindings for DPK1 are complete and tested. Not built yet: Python bindings for the
 DPD1 client, bindings for TypeScript and Go, and a base store shared across server replicas (use
-sticky routing; see [Deploying](#deploying)).
+sticky routing; see [Deploying](docs/dpd1.md#deploying)).
 
 ## Development
 
