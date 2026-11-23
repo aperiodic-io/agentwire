@@ -463,12 +463,15 @@ async fn store(record: &Recorder, parts: &http::request::Parts, encoding: &str, 
     let ct = parts.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|v| v.replace(' ', ""));
     let mut meta = format!("{} {} {path} {} {encoding}", unix_ms(), parts.method, ct.as_deref().unwrap_or("-"));
     let signal = show::signal(path);
+    let encoding = encoding.to_owned();
     let record = record.clone();
     // a failed write is logged and counted where it happens; it never stops the request
     let append = move || {
         // an OTLP batch's trace ids, so `log show --trace` skips the batches of other traces
         if let Some(signal) = signal {
-            meta = format!("{meta} {}", show::trace_ids(signal, &body));
+            // a body still in a coding logpak cannot decode is not read: its ids are unknown
+            let ids = if encoding == "-" { show::trace_ids(signal, &body) } else { "?".into() };
+            meta = format!("{meta} {ids}");
         }
         lock(&record).append(meta.as_bytes(), body)
     };
@@ -561,8 +564,8 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
                 open_log(file, max_body)?.scan(|record, body| {
                     let meta = show::Meta::parse(&record.meta);
                     if filter.wants(&meta) {
-                        let rows = show::rows(body, meta.path.and_then(show::signal))
-                            .unwrap_or_else(|| vec![show::whole(body)]);
+                        let otlp = meta.decoded().then(|| show::rows(body, meta.path.and_then(show::signal)));
+                        let rows = otlp.flatten().unwrap_or_else(|| vec![show::whole(body)]);
                         for mut row in rows.into_iter().filter(|r| filter.keeps(r)) {
                             row["file"] = name.clone();
                             row["record"] = index.into();

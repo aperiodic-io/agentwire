@@ -27,33 +27,89 @@ const MAX_IDS: usize = 64;
 
 /// The meta field `collect` adds to an OTLP record: its trace ids comma-separated, in order of
 /// first appearance; `-` for none; `?` when the body is not OTLP or holds more than [`MAX_IDS`].
+/// It runs on every batch a collector takes, so it reads only the ids: linear in the body, at most
+/// [`MAX_IDS`] kept, and only 16-byte ids (32 hex digits), so the meta stays small.
 pub fn trace_ids(signal: Signal, body: &[u8]) -> String {
-    let Some(rows) = rows(body, Some(signal)) else { return "?".into() };
-    let mut ids: Vec<&str> = Vec::new();
-    for id in rows.iter().filter_map(|r| r["trace_id"].as_str()) {
-        if !ids.contains(&id) {
-            ids.push(id);
-        }
-    }
-    match ids.len() {
-        0 => "-".into(),
-        n if n > MAX_IDS => "?".into(),
-        _ => ids.join(","),
+    let mut ids = Vec::new();
+    let read = if body.first() == Some(&b'{') {
+        json_ids(body, &mut ids)
+    } else {
+        // the export's resources, their scopes, their spans or log records, and the id in each
+        let leaf = if signal == Signal::Traces { 1 } else { 9 };
+        proto_ids(body, &[1, 2, 2], leaf, &mut ids)
+    };
+    match (read, ids.is_empty()) {
+        (false, _) => "?".into(),
+        (true, true) => "-".into(),
+        (true, false) => ids.join(","),
     }
 }
 
-/// The spans or log records of an OTLP export, one JSON object each; `None` when `body` is not one.
-/// JSON is told by its first byte (a protobuf export never starts with `{`); protobuf needs the
-/// signal, which only the request path says.
-pub fn rows(body: &[u8], signal: Option<Signal>) -> Option<Vec<Value>> {
-    let export = if body.trim_ascii_start().first() == Some(&b'{') {
-        serde_json::from_slice(body).ok()?
-    } else {
-        let m = match signal? {
-            Signal::Traces => Msg::TraceExport,
-            Signal::Logs => Msg::LogsExport,
+/// Adds `id` once; false when it would be one more than [`MAX_IDS`].
+fn add(ids: &mut Vec<String>, id: String) -> bool {
+    if ids.contains(&id) {
+        return true;
+    }
+    ids.push(id);
+    ids.len() <= MAX_IDS
+}
+
+/// The 16-byte values of field `leaf` in the messages `path` leads to, fields of each step on the
+/// way; false when the body is not that, or holds too many.
+fn proto_ids(mut buf: &[u8], path: &[u64], leaf: u64, ids: &mut Vec<String>) -> bool {
+    while !buf.is_empty() {
+        let Some((n, wire)) = next_field(&mut buf) else { return false };
+        let read = match (path.split_first(), wire) {
+            (Some((&step, rest)), Wire::Bytes(b)) if n == step => proto_ids(b, rest, leaf, ids),
+            (None, Wire::Bytes(b)) if n == leaf => b.len() != 16 || add(ids, logpak::hex(b)),
+            (Some((&step, _)), _) if n == step => false,
+            (None, _) if n == leaf => false,
+            _ => true,
         };
-        decode(body, m, 0)?
+        if !read {
+            return false;
+        }
+    }
+    true
+}
+
+/// The ids after each `"traceId"` key of an OTLP/JSON body. A key's quotes are bare; inside a
+/// string they are escaped, so text that looks like a key is never read as one. A link's trace id
+/// is listed too: a batch listed under a trace it does not hold is only read in vain.
+fn json_ids(body: &[u8], ids: &mut Vec<String>) -> bool {
+    const KEY: &[u8] = b"\"traceId\"";
+    let mut at = 0;
+    while let Some(found) = body[at..].windows(KEY.len()).position(|w| w == KEY) {
+        at += found + KEY.len();
+        let rest = body[at..].trim_ascii_start();
+        let Some(rest) = rest.strip_prefix(b":") else { continue };
+        let Some(rest) = rest.trim_ascii_start().strip_prefix(b"\"") else { continue };
+        let id = rest.split(|&b| b == b'"').next().unwrap_or(rest);
+        if id.len() == 32 && id.iter().all(u8::is_ascii_hexdigit) && rest.get(32) == Some(&b'"') {
+            let id = String::from_utf8_lossy(id).to_ascii_lowercase();
+            if !add(ids, id) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The spans or log records of an OTLP export, one JSON object each; `None` when `body` is not one.
+/// Protobuf needs the signal, which only the request path says.
+pub fn rows(body: &[u8], signal: Option<Signal>) -> Option<Vec<Value>> {
+    // a protobuf export may start "\n{" (field 1, 123 bytes long): what does not parse as JSON is
+    // tried as protobuf
+    let json = (body.trim_ascii_start().first() == Some(&b'{')).then(|| serde_json::from_slice(body).ok());
+    let export = match json.flatten() {
+        Some(export) => export,
+        None => {
+            let m = match signal? {
+                Signal::Traces => Msg::TraceExport,
+                Signal::Logs => Msg::LogsExport,
+            };
+            decode(body, m, 0)?
+        }
     };
     flatten(&export)
 }
@@ -89,7 +145,6 @@ impl Filter {
             return false;
         }
         match (&self.trace, meta.traces) {
-            (Some(_), Some("-")) => false,
             (Some(t), Some(ids)) if ids != "?" => ids.split(',').any(|id| id == t),
             _ => true,
         }
@@ -106,6 +161,8 @@ impl Filter {
 pub struct Meta<'a> {
     pub time: Option<u64>,
     pub path: Option<&'a str>,
+    /// the content coding the body is still in: `-` for none
+    pub encoding: Option<&'a str>,
     pub traces: Option<&'a str>,
 }
 
@@ -113,7 +170,17 @@ impl<'a> Meta<'a> {
     pub fn parse(meta: &'a [u8]) -> Self {
         let Ok(meta) = std::str::from_utf8(meta) else { return Meta::default() };
         let fields: Vec<&str> = meta.split(' ').collect();
-        Meta { time: fields[0].parse().ok(), path: fields.get(2).copied(), traces: fields.get(5).copied() }
+        Meta {
+            time: fields[0].parse().ok(),
+            path: fields.get(2).copied(),
+            encoding: fields.get(4).copied(),
+            traces: fields.get(5).copied(),
+        }
+    }
+
+    /// Whether the body is stored decoded, so that it can be read as OTLP.
+    pub fn decoded(&self) -> bool {
+        self.encoding.is_none_or(|e| e == "-")
     }
 }
 
@@ -124,14 +191,10 @@ pub fn when(s: &str, now: u64) -> Result<u64, String> {
     if let Ok(ms) = s.parse() {
         return Ok(ms);
     }
-    let (n, unit) = s.split_at(s.len().saturating_sub(1));
-    let unit = match unit {
-        "s" => 1_000,
-        "m" => 60_000,
-        "h" => 3_600_000,
-        "d" => 86_400_000,
-        _ => return Err(bad()),
-    };
+    let (n, unit) = [("s", 1_000), ("m", 60_000), ("h", 3_600_000), ("d", 86_400_000)]
+        .into_iter()
+        .find_map(|(suffix, ms)| Some((s.strip_suffix(suffix)?, ms)))
+        .ok_or_else(bad)?;
     let n: u64 = n.parse().map_err(|_| bad())?;
     Ok(now.saturating_sub(n.saturating_mul(unit)))
 }
@@ -356,18 +419,8 @@ fn decode(mut buf: &[u8], m: Msg, depth: u32) -> Option<Value> {
     }
     let mut obj = Map::new();
     while !buf.is_empty() {
-        let key = varint(&mut buf)?;
-        let wire = match key & 7 {
-            0 => Wire::Varint(varint(&mut buf)?),
-            1 => Wire::Bytes(take(&mut buf, 8)?),
-            2 => {
-                let len = usize::try_from(varint(&mut buf)?).ok()?;
-                Wire::Bytes(take(&mut buf, len)?)
-            }
-            5 => Wire::Bytes(take(&mut buf, 4)?),
-            _ => return None,
-        };
-        let Some((name, kind, repeated)) = field(m, key >> 3) else { continue };
+        let (n, wire) = next_field(&mut buf)?;
+        let Some((name, kind, repeated)) = field(m, n) else { continue };
         let v = value(kind, wire, depth)?;
         if repeated {
             obj.entry(name).or_insert_with(|| Value::Array(Vec::new())).as_array_mut()?.push(v);
@@ -376,6 +429,23 @@ fn decode(mut buf: &[u8], m: Msg, depth: u32) -> Option<Value> {
         }
     }
     Some(Value::Object(obj))
+}
+
+/// The next field's number and payload; `None` when it is truncated or of a wire type OTLP does not
+/// use (groups).
+fn next_field<'a>(buf: &mut &'a [u8]) -> Option<(u64, Wire<'a>)> {
+    let key = varint(buf)?;
+    let wire = match key & 7 {
+        0 => Wire::Varint(varint(buf)?),
+        1 => Wire::Bytes(take(buf, 8)?),
+        2 => {
+            let len = usize::try_from(varint(buf)?).ok()?;
+            Wire::Bytes(take(buf, len)?)
+        }
+        5 => Wire::Bytes(take(buf, 4)?),
+        _ => return None,
+    };
+    Some((key >> 3, wire))
 }
 
 fn value(kind: Kind, wire: Wire, depth: u32) -> Option<Value> {
@@ -672,13 +742,91 @@ mod tests {
         let id = |i: usize| format!("{i:032x}");
         assert_eq!(trace_ids(Signal::Traces, &json_export([2, 1, 2])), format!("{},{}", id(2), id(1)));
         assert_eq!(trace_ids(Signal::Traces, &json_export([])), "-");
-        assert_eq!(
-            trace_ids(Signal::Traces, br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"a b"}]}]}]}"#),
-            "-"
-        );
         assert_eq!(trace_ids(Signal::Traces, b"\x0b"), "?");
         assert_eq!(trace_ids(Signal::Traces, &json_export(0..MAX_IDS)).split(',').count(), MAX_IDS);
         assert_eq!(trace_ids(Signal::Traces, &json_export(0..=MAX_IDS)), "?");
+    }
+
+    /// A span (or log record) whose trace id is `id`, in a protobuf export of `signal`.
+    fn proto_export(signal: Signal, ids: &[&[u8]]) -> Vec<u8> {
+        let leaf = if signal == Signal::Traces { 1 } else { 9 };
+        let items: Vec<u8> = ids.iter().flat_map(|id| pb(2, 2, &[pb(leaf, 2, id), pb(5, 2, b"x")].concat())).collect();
+        pb(1, 2, &[pb(1, 2, b""), pb(2, 2, &items)].concat())
+    }
+
+    #[test]
+    fn trace_ids_are_read_from_protobuf_without_decoding_the_rest() {
+        let (a, b) = ([0xaa; 16], [0xbb; 16]);
+        assert_eq!(
+            trace_ids(Signal::Traces, &proto_export(Signal::Traces, &[&a, &b, &a])),
+            format!("{},{}", "aa".repeat(16), "bb".repeat(16))
+        );
+        assert_eq!(trace_ids(Signal::Logs, &proto_export(Signal::Logs, &[&b])), "bb".repeat(16));
+        assert_eq!(trace_ids(Signal::Traces, &proto_export(Signal::Traces, &[])), "-");
+        assert_eq!(trace_ids(Signal::Traces, b""), "-");
+        // field 9 of a span is its attributes, not a trace id
+        assert_eq!(trace_ids(Signal::Traces, &proto_export(Signal::Logs, &[&a])), "-");
+        assert_eq!(trace_ids(Signal::Traces, &[0x0a, 0x05]), "?", "truncated");
+        assert_eq!(trace_ids(Signal::Traces, &pb(1, 0, &enc(1))), "?", "a varint where a message belongs");
+        assert_eq!(trace_ids(Signal::Traces, &pb(1, 2, &pb(2, 0, &enc(1)))), "?");
+        assert_eq!(trace_ids(Signal::Traces, &pb(1, 2, &pb(2, 2, &pb(2, 0, &enc(1))))), "?");
+        let span_with = |id: Vec<u8>| pb(1, 2, &pb(2, 2, &pb(2, 2, &id)));
+        assert_eq!(trace_ids(Signal::Traces, &span_with(pb(1, 0, &enc(1)))), "?", "a varint where the id belongs");
+        assert_eq!(trace_ids(Signal::Traces, &span_with(pb(7, 1, &[0; 8]))), "-", "other fields are skipped");
+    }
+
+    #[test]
+    fn only_16_byte_trace_ids_are_listed() {
+        assert_eq!(trace_ids(Signal::Traces, &proto_export(Signal::Traces, &[&[1; 8], &[2; 17], &[]])), "-");
+        let json = |id: &str| format!(r#"{{"resourceSpans":[{{"scopeSpans":[{{"spans":[{{"traceId":"{id}"}}]}}]}}]}}"#);
+        assert_eq!(trace_ids(Signal::Traces, json(&"a".repeat(31)).as_bytes()), "-");
+        assert_eq!(trace_ids(Signal::Traces, json(&"a".repeat(33)).as_bytes()), "-");
+        assert_eq!(trace_ids(Signal::Traces, json(&format!("{}g", "a".repeat(31))).as_bytes()), "-");
+        assert_eq!(trace_ids(Signal::Traces, json(&"A".repeat(32)).as_bytes()), "a".repeat(32));
+        assert_eq!(trace_ids(Signal::Traces, json("a b").as_bytes()), "-");
+        assert_eq!(trace_ids(Signal::Traces, json(&"a".repeat(30_000_000)).as_bytes()), "-");
+    }
+
+    #[test]
+    fn json_trace_ids_are_found_by_key_alone() {
+        let id = "c".repeat(32);
+        let spaced = format!(r#"{{"resourceLogs":[{{"scopeLogs":[{{"logRecords":[{{ "traceId" :  "{id}" }}]}}]}}]}}"#);
+        assert_eq!(trace_ids(Signal::Logs, spaced.as_bytes()), id);
+        // inside a string its quotes are escaped: not a key
+        let quoted =
+            format!(r#"{{"resourceSpans":[{{"scopeSpans":[{{"spans":[{{"name":"\"traceId\":\"{id}\""}}]}}]}}]}}"#);
+        assert_eq!(trace_ids(Signal::Traces, quoted.as_bytes()), "-");
+        for cut in [r#"{"traceId""#, r#"{"traceId":"#, r#"{"traceId":""#, r#"{"traceId":5}"#, r#"{"traceId""x"}"#] {
+            assert_eq!(trace_ids(Signal::Traces, cut.as_bytes()), "-", "{cut}");
+        }
+        assert_eq!(
+            trace_ids(Signal::Traces, format!(r#"{{"traceId":"{id}""#).as_bytes()),
+            id,
+            "an id is read wherever its key is"
+        );
+    }
+
+    #[test]
+    fn listing_trace_ids_stops_at_the_cap() {
+        // 200,000 distinct ids: compared each against every other, this takes minutes
+        let ids: Vec<[u8; 16]> = (0..200_000u128).map(u128::to_be_bytes).collect();
+        let refs: Vec<&[u8]> = ids.iter().map(|i| &i[..]).collect();
+        let started = std::time::Instant::now();
+        assert_eq!(trace_ids(Signal::Traces, &proto_export(Signal::Traces, &refs)), "?");
+        assert_eq!(trace_ids(Signal::Traces, &json_export(0..200_000)), "?");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_protobuf_export_whose_first_length_is_a_brace_is_still_protobuf() {
+        // ResourceSpans of exactly 123 bytes: the export starts 0a 7b, "\n{"
+        let ss = pb(2, 2, &pb(2, 2, &[pb(1, 2, &[0xab; 16]), pb(5, 2, b"chat")].concat()));
+        let rs = [ss.clone(), pb(3, 2, &vec![b's'; 121 - ss.len()])].concat();
+        let body = pb(1, 2, &rs);
+        assert_eq!(&body[..2], b"\n{");
+        let rows = rows(&body, Some(Signal::Traces)).unwrap();
+        assert_eq!(rows[0]["name"], "chat");
+        assert_eq!(trace_ids(Signal::Traces, &body), "ab".repeat(16));
     }
 
     #[test]
@@ -702,10 +850,17 @@ mod tests {
     #[test]
     fn meta_is_read_by_position() {
         let m = b"1700 POST /v1/traces application/json - aa,bb";
-        assert_eq!(Meta::parse(m), Meta { time: Some(1700), path: Some("/v1/traces"), traces: Some("aa,bb") });
+        let parsed = Meta::parse(m);
+        assert_eq!(
+            parsed,
+            Meta { time: Some(1700), path: Some("/v1/traces"), encoding: Some("-"), traces: Some("aa,bb") }
+        );
+        assert!(parsed.decoded());
+        assert!(!Meta::parse(b"1700 POST /v1/traces application/json lz4 ?").decoded(), "still lz4");
+        assert!(Meta::parse(b"").decoded(), "pack stores lines as given");
         assert_eq!(
             Meta::parse(b"1700 POST /v1/messages - -"),
-            Meta { time: Some(1700), path: Some("/v1/messages"), traces: None }
+            Meta { time: Some(1700), path: Some("/v1/messages"), encoding: Some("-"), traces: None }
         );
         assert_eq!(Meta::parse(b""), Meta::default(), "pack writes no meta");
         assert_eq!(Meta::parse(b"\xff"), Meta::default());
@@ -748,7 +903,7 @@ mod tests {
         assert_eq!(when("2h", now), Ok(now - 7_200_000));
         assert_eq!(when("7d", now), Ok(now - 604_800_000));
         assert_eq!(when("99999d", now), Ok(0), "before the epoch is the epoch");
-        for bad in ["", "h", "2w", "xh", "-2h", "2.5h"] {
+        for bad in ["", "h", "2w", "xh", "-2h", "2.5h", "2é", "é"] {
             assert!(when(bad, now).is_err(), "{bad:?}");
         }
     }

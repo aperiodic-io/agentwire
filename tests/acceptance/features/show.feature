@@ -9,6 +9,7 @@ Feature: A trace is found and read back as JSON lines
     When an exporter posts 6 gzip-compressed JSON batches of spans to "/v1/traces"
     Then each record's meta lists the trace ids of its batch
     And `logpak log show --trace` of trace 1 gives its 6 spans in order, each with its prompt
+    And `logpak log show --trace` in capitals finds the same spans
 
   Scenario: Protobuf exports over gRPC are decoded too
     Given a logpak collector recording to a directory
@@ -26,3 +27,9 @@ Feature: A trace is found and read back as JSON lines
     When an exporter posts 6 gzip-compressed JSON batches of spans to "/v1/traces"
     Then `logpak log show --since 1h` gives 18 spans
     And `logpak log show --until 1h` gives none
+
+  Scenario: A batch still in a coding logpak cannot decode is listed as unknown and shown whole
+    Given a logpak collector recording to a directory
+    When an exporter posts a batch of spans to "/v1/traces" in a coding logpak does not decode
+    Then its record's meta lists its trace ids as unknown
+    And `logpak log show` gives the record whole

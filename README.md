@@ -338,7 +338,8 @@ logpak log show --since 2h ~/logpak/*.lpk | jq -r 'select(.name == "chat") | .at
 duckdb -c "SELECT name, count(*) FROM read_json('spans.jsonl') GROUP BY name"   # after: logpak log show … > spans.jsonl
 ```
 
-`--trace` skips the batches whose meta does not list the trace. `--since` and `--until` take Unix
+`--trace` skips the batches whose meta does not list the trace. Trace ids are hex, as OTLP/JSON
+requires; the spans of an exporter that writes them in base64 are shown, but `--trace` cannot find them. `--since` and `--until` take Unix
 ms or a duration ago (`90s`, `15m`, `2h`, `7d`).
 
 ## What you can rely on

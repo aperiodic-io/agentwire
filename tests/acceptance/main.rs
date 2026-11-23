@@ -924,6 +924,8 @@ async fn show_trace(w: &mut Proxies, trace: usize, n: usize) {
     assert_eq!(rows.len(), n, "{rows:?}");
     for (turn, row) in (1..).zip(&rows) {
         assert_eq!(row["trace_id"], id.as_str());
+        assert_eq!(row["file"], recording(w).as_str());
+        assert!(row["received"].as_u64().unwrap() > 1_700_000_000_000, "{row}");
         let prompt = String::from_utf8(conversation(&format!("t{trace}"), turn).to_vec()).unwrap();
         assert_eq!(row["attributes"]["gen_ai.input.messages"], prompt.as_str(), "span {turn}");
         assert_eq!(row["record"], turn - 1);
@@ -1022,6 +1024,38 @@ async fn show_protobuf(w: &mut Proxies, n: usize) {
         assert_eq!(row["attributes"]["gen_ai.usage.input_tokens"], turn);
         assert_eq!((&row["resource"]["service.name"], &row["scope"]), (&"swe".into(), &"agent".into()));
     }
+}
+
+#[then("`logpak log show --trace` in capitals finds the same spans")]
+async fn show_trace_in_capitals(w: &mut Proxies) {
+    let lower = show(w, &["--trace", &format!("{:032x}", 1)]).await;
+    let upper = show(w, &["--trace", &format!("{:032X}", 1)]).await;
+    assert!(!lower.is_empty());
+    assert_eq!(upper, lower);
+}
+
+#[when(expr = "an exporter posts a batch of spans to {string} in a coding logpak does not decode")]
+async fn exporter_posts_lz4(w: &mut Proxies, path: String) {
+    let to = w.server.as_ref().unwrap().addr;
+    let body = batch(1);
+    w.post_batch(to, &path, body.clone(), &[("content-type", "application/json"), ("content-encoding", "lz4")]).await;
+    assert_eq!(w.posted.as_ref().unwrap().0, 200);
+    w.gzipped.push(body);
+}
+
+#[then("its record's meta lists its trace ids as unknown")]
+async fn meta_lists_unknown(w: &mut Proxies) {
+    let listed = String::from_utf8(log(&["ls", &recording(w)], b"").await).unwrap();
+    let fields: Vec<&str> = listed.lines().next().unwrap().split_whitespace().collect();
+    assert_eq!(fields[7..], ["lz4", "?"], "{listed}");
+}
+
+#[then("`logpak log show` gives the record whole")]
+async fn show_gives_whole(w: &mut Proxies) {
+    let rows = show(w, &[]).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let body: serde_json::Value = serde_json::from_slice(&w.gzipped[0]).unwrap();
+    assert_eq!(rows[0]["body"], body, "the record whole, not its spans");
 }
 
 #[tokio::main]

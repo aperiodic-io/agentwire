@@ -7,9 +7,9 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 - `logpak log show` writes records as JSON lines: one per span or log record of an OTLP export
   (JSON or protobuf), attributes as plain JSON, any other record whole; filtered by `--trace`,
-  `--since` and `--until`. `collect` adds the trace ids of each OTLP trace or log batch to its
-  record's meta, as a sixth field (`-`: none; `?`: not OTLP, or more than 64), so `--trace` skips
-  the batches of other traces. Files written before this change are read, their bodies decoded to
+  `--since` and `--until`. `collect` and `server --record-dir` add the trace ids of each OTLP trace
+  or log batch to its record's meta, as a sixth field (`-`: none; `?`: still encoded, not OTLP, or
+  more than 64), so `--trace` skips the batches of other traces. Files written before this change are read, their bodies decoded to
   find a trace.
 - Renamed from agentwire to **Logpak**. The crate, binary, Python module and Docker image are
   `logpak` (`ghcr.io/aperiodic-io/logpak`); environment variables are `LOGPAK_*` (were
