@@ -9,6 +9,12 @@ One tag releases everything: `vX.Y.Z` on a commit of `main` that passed CI.
 2. Move CHANGELOG.md's `[Unreleased]` entries under `## [X.Y.Z]`; the release notes are that section.
 3. Merge, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
+Before a tag, the same workflow runs as a dry run on every pull request that changes what a release
+builds (and by hand, from the Actions tab): each job builds what it would publish and checks it (the
+crate packaged, the image run, the binaries checksummed and run, each wheel installed and used, the
+sdist built from source, the npm package packed, the formula installed by Homebrew) and publishes
+nothing. A tag runs it for real.
+
 `.github/workflows/release.yml` then publishes:
 
 | What | Where | Set up once |
