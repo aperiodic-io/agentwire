@@ -1,6 +1,6 @@
 """deploy/openshell/: OpenShell's provider profiles and gateway settings for Deltapack.
 
-OpenShell itself needs Docker 28 and a systemd user service, so it is not run here. What is checked:
+OpenShell itself (a gateway with a Docker or Podman driver) is not run here. What is checked:
 - each profile has the shape of OpenShell's built-in one it copies (providers/anthropic.yaml in
   ai-openshell/openshell): the same credential, bound to `deltapack server` on the gateway host;
 - the gateway settings parse and name `deltapack collect`'s ports;
@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import tomllib
 import unittest
 import urllib.request
@@ -62,7 +63,7 @@ class Profiles(unittest.TestCase):
 
     def test_openai_carries_its_key_as_a_bearer_token_to_deltapack_only(self):
         cred = self.check(profile("deltapack-openai.yaml"), "deltapack-openai", "OPENAI_API_KEY", 8081)
-        self.assertEqual(cred["auth_style"], "bearer")
+        self.assertEqual((cred["auth_style"], cred["header_name"]), ("bearer", "authorization"))
 
     def test_the_gateway_relays_agent_traces_to_collect(self):
         with open(os.path.join(HERE, "gateway.toml"), "rb") as f:
@@ -70,7 +71,7 @@ class Profiles(unittest.TestCase):
         agent = gw["openshell"]["gateway"]["otlp"]["agent"]
         self.assertTrue(agent["enabled"])
         self.assertEqual(agent["protocol"], "http/protobuf")
-        self.assertTrue(agent["endpoint"].endswith(":4318"), "collect's OTLP/HTTP port")
+        self.assertEqual(agent["endpoint"], "http://127.0.0.1:4318", "collect's OTLP/HTTP port, on loopback")
 
 
 class Upstream(http.server.BaseHTTPRequestHandler):
@@ -78,7 +79,7 @@ class Upstream(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers["content-length"]))
-        Upstream.seen.append((self.path, self.headers.get("x-api-key"), body))
+        Upstream.seen.append((self.path, self.headers.get("x-api-key") or self.headers.get("authorization"), body))
         answer = b'{"type":"message","content":[{"type":"text","text":"hi"}]}'
         self.send_response(200)
         self.send_header("content-type", "application/json")
@@ -103,7 +104,11 @@ class RecordingProxy(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env={**os.environ, "NO_COLOR": "1"},
         )
         self.addr = None
+        deadline = time.monotonic() + 30
         while self.addr is None:
+            if time.monotonic() > deadline:
+                self.proc.kill()
+                raise RuntimeError("deltapack server did not start within 30 s")
             line = self.proc.stdout.readline()
             if not line:
                 raise RuntimeError("deltapack server exited")
@@ -120,25 +125,30 @@ class RecordingProxy(unittest.TestCase):
         self.upstream.server_close()
         shutil.rmtree(self.dir)
 
-    def test_the_key_openshell_injects_reaches_the_upstream_and_never_the_record(self):
-        body = json.dumps({"model": "claude", "messages": [{"role": "user", "content": "hello"}]}).encode()
+    def send(self, path, key_header):
+        body = json.dumps({"model": "m", "messages": [{"role": "user", "content": path}]}).encode()
         # what the sandbox's client sends after OpenShell put the real key in place of its placeholder
         request = urllib.request.Request(
-            f"http://{self.addr}/v1/messages", data=body,
-            headers={"content-type": "application/json", "x-api-key": "sk-ant-real", "anthropic-version": "2023-06-01"},
+            f"http://{self.addr}{path}", data=body, headers={"content-type": "application/json", **key_header},
         )
         with OPENER.open(request, timeout=30) as r:
             self.assertEqual(r.status, 200)
-        self.assertEqual(Upstream.seen[-1], ("/v1/messages", "sk-ant-real", body))
-        files = [os.path.join(self.dir, f) for f in os.listdir(self.dir) if f.endswith(".dpk")]
-        out = subprocess.run([BIN, "log", "unpack", *files], capture_output=True, check=True).stdout
-        self.assertEqual(out, body + b"\n", "the request body, as sent")
-        listed = subprocess.run([BIN, "log", "ls", *files], capture_output=True, check=True).stdout
-        for f in files:
-            with open(f, "rb") as raw:
-                data = raw.read()
-            self.assertNotIn(b"sk-ant-real", data, "no header in the file")
-        self.assertIn(b"/v1/messages", listed)
+        return body
+
+    def recorded(self):
+        files = sorted(os.path.join(self.dir, f) for f in os.listdir(self.dir) if f.endswith(".dpk"))
+        self.assertTrue(files, "a recording")
+        return subprocess.run([BIN, "log", "unpack", *files], capture_output=True, check=True).stdout
+
+    def test_the_key_openshell_injects_reaches_the_upstream_and_only_the_body_is_recorded(self):
+        anthropic = self.send("/v1/messages", {"x-api-key": "sk-ant-real", "anthropic-version": "2023-06-01"})
+        self.assertEqual(Upstream.seen[-1], ("/v1/messages", "sk-ant-real", anthropic))
+        openai = self.send("/v1/chat/completions", {"authorization": "Bearer sk-real"})
+        self.assertEqual(Upstream.seen[-1], ("/v1/chat/completions", "Bearer sk-real", openai))
+        # the bodies, as sent, and nothing else: no header is ever stored
+        out = self.recorded()
+        self.assertEqual(out, anthropic + b"\n" + openai + b"\n")
+        self.assertNotIn(b"sk-", out)
 
 
 if __name__ == "__main__":

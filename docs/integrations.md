@@ -856,30 +856,34 @@ OpenShell runs agents in sandboxes whose network egress is denied unless a polic
 injects API keys only at the endpoints a provider profile names. Its own OpenTelemetry (gateway,
 drivers, supervisors, OCSF policy events) carries **no prompts**. It can relay the **agent's** own
 OTLP export, which carries **messages** when the agent's SDK captures content. Run Deltapack on the
-gateway host, listening on an address the gateway and the sandboxes both reach (the Docker bridge,
-`172.17.0.1` by default): network policy never allows a sandbox to reach `127.0.0.1`.
+gateway host. With the Docker driver's default `supervisor_network_mode = "host"`, the supervisors
+share the host's network and `host.openshell.internal` is the host's loopback, so Deltapack listens on
+`127.0.0.1` and nothing off the host reaches it. In `bridge` mode, listen on the host gateway address
+(`host_gateway_ip`) instead and firewall the ports to the supervisors: keys then cross the bridge in
+plain HTTP.
 
 **A.** Turn on the agent trace relay in `~/.config/openshell/gateway.toml`
 ([deploy/openshell/gateway.toml](../deploy/openshell/gateway.toml)). The relay sets
 `OTEL_EXPORTER_OTLP_ENDPOINT` in each sandbox, so an agent with an OpenTelemetry SDK exports with no
-more configuration. Turn the agent's content capture on as its own section says (for example
+more configuration; the relay takes uncompressed OTLP/HTTP protobuf (it answers 415 to anything
+else), which is what it sets unless the agent overrides it. Turn the agent's content capture on as its own section says (for example
 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` with `--env` on `openshell sandbox create`).
 Relayed spans carry `openshell.sandbox.id`, so `log show --attr openshell.sandbox.id=<id>` finds one
 sandbox's.
 
 ```bash
-deltapack collect --record-dir ~/deltapack/openshell --listen 172.17.0.1:4318,172.17.0.1:4317
+deltapack collect --record-dir ~/deltapack/openshell --listen 127.0.0.1:4318,127.0.0.1:4317
 ```
 
 ```toml
 [openshell.gateway.otlp.agent]
 enabled  = true
-endpoint = "http://172.17.0.1:4318"
+endpoint = "http://127.0.0.1:4318"
 protocol = "http/protobuf"
 ```
 
 OpenShell's own traces and OCSF events go to `[openshell.gateway.otlp]` (OTLP/gRPC, `endpoint =
-"http://172.17.0.1:4317"`, and `[openshell.gateway.otlp.ocsf] enabled = true`): no prompts, but each
+"http://127.0.0.1:4317"`, and `[openshell.gateway.otlp.ocsf] enabled = true`): no prompts, but each
 call's policy decisions next to the agent's spans.
 
 **B.** For an agent that exports no content, record its model calls. The built-in `anthropic` and
@@ -890,7 +894,7 @@ does not get the key. So import a copy bound to `deltapack server` on the gatewa
 is never written to the record.
 
 ```bash
-deltapack server --listen 172.17.0.1:8080 --upstream https://api.anthropic.com --record-dir ~/deltapack/openshell-anthropic
+deltapack server --listen 127.0.0.1:8080 --upstream https://api.anthropic.com --record-dir ~/deltapack/openshell-anthropic
 ```
 
 ```bash
@@ -907,12 +911,12 @@ profile's `binaries`. For OpenAI-compatible clients, use `deltapack-openai.yaml`
 `Authorization: Bearer`) and `OPENAI_BASE_URL=http://host.openshell.internal:8081/v1`. A key sent
 anywhere the profile does not name is refused with 403 `credential_endpoint_mismatch`.
 
-Not run end to end: OpenShell needs Docker 28 and a systemd user service. CI checks that the
-profiles keep the built-in profiles' credential shape and that `deltapack server` set up this way
-forwards the key and records only the body
-([tests/integrations/test_openshell.py](../tests/integrations/test_openshell.py)). The listen
-address the gateway and sandboxes share is *(unverified)*: if `172.17.0.1` is not your bridge, use
-the address `host.openshell.internal` resolves to inside a sandbox.
+Attaching the provider adds its endpoint to the sandbox's network policy, so no other rule is
+needed. OpenShell is not run in CI. CI checks that the profiles keep the built-in profiles'
+credential shape and that `deltapack server` set up this way forwards the key (`x-api-key` and
+`Authorization: Bearer`) and records only the body
+([tests/integrations/test_openshell.py](../tests/integrations/test_openshell.py)). The whole path
+through a sandbox is *(unverified)*.
 
 Docs: [observability](https://docs.nvidia.com/openshell/latest/observability/overview),
 [inference](https://docs.nvidia.com/openshell/latest/how-it-works/inference),

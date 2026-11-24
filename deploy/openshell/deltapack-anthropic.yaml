@@ -22,7 +22,8 @@ credentials:
 discovery:
   credentials: [api_key]
 endpoints:
-  # `deltapack server --listen <bridge address>:8080 --upstream https://api.anthropic.com`
+  # host.openshell.internal is the gateway host's loopback in the default host network mode:
+  # `deltapack server --listen 127.0.0.1:8080 --upstream https://api.anthropic.com`
   - host: host.openshell.internal
     port: 8080
     protocol: rest
