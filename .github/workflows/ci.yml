@@ -287,7 +287,6 @@ jobs:
         include:
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
-          - { os: macos-14, target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
     env: { RUSTFLAGS: "" } # the release build, as release.yml makes it
     steps:
@@ -297,12 +296,14 @@ jobs:
       - run: scripts/binary.sh ${{ matrix.target }} test
       - run: tar xzf deltapack-test-${{ matrix.target }}.tar.gz && deltapack-test-${{ matrix.target }}/deltapack --version
 
-  # the Homebrew formula installs this commit (its head pointed at the checkout) and passes its test
+  # the Homebrew formula installs this commit (its head pointed at the checkout) and passes its test:
+  # on Linux, with the Homebrew the runner image carries (the organisation has no macOS runners)
   homebrew:
-    runs-on: macos-14
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           # a branch for brew's clone to check out: a pull request's checkout is a detached HEAD
           git checkout -B ci
           brew tap-new --no-git local/deltapack

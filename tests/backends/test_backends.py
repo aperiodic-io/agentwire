@@ -175,8 +175,9 @@ class Backends(unittest.TestCase):
         )
         for turn in range(1, TURNS + 1):
             self.assertEqual(post(f"http://{dp.addr}/v1/traces", export(turn)), 200)
-        eventually(lambda: self._phoenix_traces() == TRACES, "Phoenix holding every trace", seconds=120)
-        self.assertEqual(self._phoenix_spans(), TRACES * TURNS)
+        # Phoenix stores a batch's spans after its traces: wait for every span, then every trace
+        eventually(lambda: self._phoenix_spans() == TRACES * TURNS, "Phoenix holding every span", seconds=120)
+        self.assertEqual(self._phoenix_traces(), TRACES)
         self.assertEqual(show(os.path.join(self.dir, "rec")), sent(), "deltapack holds every span")
 
     def _up(self, url, get=False):

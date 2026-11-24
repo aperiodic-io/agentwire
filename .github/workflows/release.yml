@@ -1,7 +1,7 @@
 name: release
 # A tag `vX.Y.Z` on main publishes that version: the crate to crates.io, the image to
 # ghcr.io/aperiodic-io/deltapack:X.Y.Z (and :latest), a GitHub release with its CHANGELOG entry, a
-# binary for each platform (scripts/binary.sh; ci.yml's `binaries` job builds the same) and a
+# Linux binary for each platform (scripts/binary.sh; ci.yml's `binaries` job builds the same) and a
 # Homebrew formula; the Python wheels (`deltapack`, `deltapack-cli`) to PyPI, the TypeScript reader
 # to npm, and the Go modules' tags (go/vX.Y.Z, go/otelcol/deltapackexporter/vX.Y.Z).
 # The tag's commit has passed ci.yml on main; this checks only that the tag and the versions agree
@@ -59,7 +59,6 @@ jobs:
         include:
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
-          - { os: macos-14, target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
     permissions: { contents: write }
     steps:
@@ -91,7 +90,6 @@ jobs:
         include:
           - { os: ubuntu-24.04, target: x86_64 }
           - { os: ubuntu-24.04-arm, target: aarch64 }
-          - { os: macos-14, target: aarch64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
