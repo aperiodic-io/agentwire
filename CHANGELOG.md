@@ -5,6 +5,10 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- NVIDIA OpenShell (docs/integrations.md, `deploy/openshell/`): the agent trace relay to `collect`,
+  and provider profiles that bind an agent's Anthropic or OpenAI key to `deltapack server` on the
+  gateway host, so its model calls are recorded with the key injected by OpenShell, never stored.
+
 ## [0.1.0]
 
 First release.
