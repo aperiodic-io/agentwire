@@ -5,6 +5,10 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- Releases publish every package from one tag (RELEASING.md): the Python wheels `deltapack` and
+  `deltapack-cli` to PyPI, the TypeScript reader to npm, the Go modules' tags, a macOS (arm64)
+  binary beside the Linux ones, and a Homebrew formula (`Formula/deltapack.rb`, tested in CI on
+  macOS). `scripts/versions.sh` holds every package to the crate's version.
 - Go (`go/`): DPK1 read (sealed files with their key) and written, and an OpenTelemetry Collector
   exporter (`go/otelcol/deltapackexporter`) that stores traces and logs as `collect` does, trace ids
   in the meta. TypeScript (`ts/`): DPK1 read in Node 22.19+, no dependencies. Both are tested

@@ -1,8 +1,11 @@
 name: release
 # A tag `vX.Y.Z` on main publishes that version: the crate to crates.io, the image to
-# ghcr.io/aperiodic-io/deltapack:X.Y.Z (and :latest), and a GitHub release with its CHANGELOG entry
-# and a binary for each platform (scripts/binary.sh; ci.yml's `binaries` job builds the same).
-# The tag's commit has passed ci.yml on main; this checks only that the tag and the version agree.
+# ghcr.io/aperiodic-io/deltapack:X.Y.Z (and :latest), a GitHub release with its CHANGELOG entry, a
+# binary for each platform (scripts/binary.sh; ci.yml's `binaries` job builds the same) and a
+# Homebrew formula; the Python wheels (`deltapack`, `deltapack-cli`) to PyPI, the TypeScript reader
+# to npm, and the Go modules' tags (go/vX.Y.Z, go/otelcol/deltapackexporter/vX.Y.Z).
+# The tag's commit has passed ci.yml on main; this checks only that the tag and the versions agree
+# (scripts/versions.sh). RELEASING.md lists what each registry needs set up once.
 on:
   push:
     tags: ["v*"]
@@ -14,9 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: |
-          v=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME is not the crate's version v$v"; exit 1; }
+      - run: scripts/versions.sh "$GITHUB_REF_NAME"
       - run: cargo publish --locked
         env: { CARGO_REGISTRY_TOKEN: "${{ secrets.CARGO_REGISTRY_TOKEN }}" }
 
@@ -58,6 +59,7 @@ jobs:
         include:
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: macos-14, target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
     permissions: { contents: write }
     steps:
@@ -65,3 +67,82 @@ jobs:
       - run: scripts/binary.sh ${{ matrix.target }} "$GITHUB_REF_NAME"
       - run: gh release upload --clobber "$GITHUB_REF_NAME" deltapack-*.tar.gz deltapack-*.tar.gz.sha256
         env: { GH_TOKEN: "${{ github.token }}" }
+
+  # the formula for this release (Formula/deltapack.rb with the tag's source and its sha256),
+  # attached to the release; RELEASING.md says how it reaches the tap
+  homebrew:
+    needs: [github-release]
+    runs-on: ubuntu-24.04
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: |
+          url="https://github.com/aperiodic-io/deltapack/archive/refs/tags/$GITHUB_REF_NAME.tar.gz"
+          sha=$(curl -fsSL "$url" | shasum -a 256 | cut -d' ' -f1)
+          sed "s#^  license \"Apache-2.0\"#  url \"$url\"\n  sha256 \"$sha\"\n  license \"Apache-2.0\"#" Formula/deltapack.rb > deltapack.rb
+          grep -q "sha256 \"$sha\"" deltapack.rb
+          gh release upload --clobber "$GITHUB_REF_NAME" deltapack.rb
+        env: { GH_TOKEN: "${{ github.token }}" }
+
+  # the Python wheels: the library (abi3, one per platform) and the CLI, and the library's sdist
+  wheels:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64 }
+          - { os: ubuntu-24.04-arm, target: aarch64 }
+          - { os: macos-14, target: aarch64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with: { working-directory: python, target: "${{ matrix.target }}", manylinux: auto, args: --release --out ../dist }
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with: { working-directory: python/cli, target: "${{ matrix.target }}", manylinux: auto, args: --release --out ../../dist }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: "wheels-${{ matrix.os }}-${{ matrix.target }}", path: dist }
+
+  sdist:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with: { working-directory: python, command: sdist, args: --out ../dist }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: wheels-sdist, path: dist }
+
+  # PyPI by trusted publishing: no token, the PyPI projects trust this workflow (RELEASING.md)
+  pypi:
+    needs: [crate, wheels, sdist]
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions: { id-token: write }
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { pattern: wheels-*, merge-multiple: true, path: dist }
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  npm:
+    needs: [crate]
+    runs-on: ubuntu-24.04
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: "22.19", registry-url: "https://registry.npmjs.org" }
+      - run: npm ci && npm run build && npm publish --provenance --access public
+        working-directory: ts
+        env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}" }
+
+  # Go modules are published by their tags: the proxy fetches them from this repository
+  go:
+    needs: [crate]
+    runs-on: ubuntu-24.04
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: |
+          v="$GITHUB_REF_NAME"
+          git tag "go/$v" "$GITHUB_SHA"
+          git tag "go/otelcol/deltapackexporter/$v" "$GITHUB_SHA"
+          git push origin "go/$v" "go/otelcol/deltapackexporter/$v"
