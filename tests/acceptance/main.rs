@@ -1367,7 +1367,7 @@ async fn estimate(w: &mut Proxies, usd: f64, records: u64) {
     let packed = std::fs::metadata(w.packed.as_ref().unwrap()).unwrap().len();
     let gb = |b: u64| b as f64 / 1e9 * usd;
     let expected = format!(
-        "{records} records, {body} bytes, packed in {packed} ({:.1}x); at ${usd:.2} per GB: ${:.6} as is, ${:.6} packed\n",
+        "{records} records, {body} bytes, packed in {packed} ({:.1}x); at ${usd} per GB: ${:.6} as is, ${:.6} packed\n",
         body as f64 / packed as f64,
         gb(body),
         gb(packed)

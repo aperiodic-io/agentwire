@@ -397,7 +397,8 @@ requires; the spans of an exporter that writes them in base64 are shown, but `--
 them. `--since` and `--until` take Unix ms or a duration ago (`90s`, `15m`, `2h`, `7d`).
 
 `--attr KEY=VALUE` keeps the spans and log records whose attribute, or resource attribute, has that
-value: a session, a model, a user (repeat it to need all of them).
+value: a session, a model, a user (repeat it to need all of them). Numbers match by value (`1` and
+`1.0` alike); arrays and objects only as their exact JSON.
 
 ```bash
 deltapack log show --attr gen_ai.request.model=gpt-4o --attr session.id=s-42 ~/deltapack/*.dpk

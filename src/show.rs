@@ -164,6 +164,8 @@ impl Filter {
             [&row["attributes"][k], &row["resource"][k]].iter().any(|v| match v {
                 Value::String(s) => s == want,
                 Value::Null => false,
+                // 1 from OTLP/JSON and 1.0 from protobuf are the same double
+                Value::Number(n) => want.parse::<f64>().is_ok_and(|w| n.as_f64() == Some(w)),
                 v => v.to_string() == *want,
             })
         };
@@ -961,7 +963,11 @@ mod tests {
         };
         assert!(with(&[]).keeps(&row));
         assert!(with(&[("model", "m1")]).keeps(&row));
-        assert!(with(&[("tokens", "3")]).keeps(&row), "a number by its digits");
+        assert!(with(&[("tokens", "3")]).keeps(&row), "a number by its value");
+        assert!(with(&[("tokens", "3.0")]).keeps(&row));
+        assert!(!with(&[("tokens", "x")]).keeps(&row));
+        let double = json!({"attributes": {"temperature": 1.0}});
+        assert!(with(&[("temperature", "1")]).keeps(&double), "a protobuf double as JSON writes it");
         assert!(with(&[("ok", "true")]).keeps(&row));
         assert!(with(&[("service.name", "swe")]).keeps(&row), "a resource attribute");
         assert!(with(&[("model", "m1"), ("service.name", "swe")]).keeps(&row), "all of them");

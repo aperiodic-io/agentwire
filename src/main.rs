@@ -766,7 +766,7 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
             }
         }
         LogCmd::Estimate { window, usd_per_gb } => {
-            let mut w = log::Writer::new(Vec::new(), window)?;
+            let mut w = log::Writer::new(Counted(0), window)?;
             let (mut records, mut body) = (0u64, 0u64);
             for line in io::stdin().lock().split(b'\n') {
                 let line = line?;
@@ -774,11 +774,11 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
                 w.append(b"", Bytes::from(line))?;
             }
             w.flush()?;
-            let packed = w.into_inner().len() as u64;
+            let packed = w.into_inner().0;
             write!(out, "{records} records, {body} bytes, packed in {packed} ({:.1}x)", body as f64 / packed as f64)?;
             if let Some(usd) = usd_per_gb {
                 let cost = |b: u64| b as f64 / 1e9 * usd;
-                write!(out, "; at ${usd:.2} per GB: ${:.6} as is, ${:.6} packed", cost(body), cost(packed))?;
+                write!(out, "; at ${usd} per GB: ${:.6} as is, ${:.6} packed", cost(body), cost(packed))?;
             }
             writeln!(out)?;
         }
@@ -858,6 +858,20 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
 fn stats_line(name: &str, records: u64, body: u64, disk: u64) -> String {
     // the name last, after a tab: it may hold spaces
     format!("{records} records, {body} bytes in {disk} on disk ({:.1}x)\t{name}", body as f64 / disk.max(1) as f64)
+}
+
+/// Counts what is written to it, and keeps none of it.
+struct Counted(u64);
+
+impl Write for Counted {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn open_log(path: &std::path::Path, max_body: usize) -> io::Result<log::Reader<File>> {

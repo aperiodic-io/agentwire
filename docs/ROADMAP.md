@@ -19,7 +19,7 @@ everything and decodes OTLP protobuf themselves. The files are a cheap backup, n
 | 4 | **Prebuilt binaries** | Linux (x86_64, aarch64) binaries on every GitHub release; macOS (arm64) once the organisation has macOS runners (the job never got one) | Today the choice is `cargo install deltapack --features proxy` or the ghcr.io image: a host without Docker or a Rust toolchain has neither |
 | 5 | **README** | What the files are for (replay, eval sets, audit, cost), a demo that ends in a readable conversation, a FAQ (redaction, why not zstd in the backend, tenants), DPD1 moved to its own page | The README goes from "how to store" straight to the format |
 
-## Phase 2: everything phase 1 left
+## Phase 2
 
 | # | Step | What it adds |
 |---|---|---|
@@ -30,7 +30,10 @@ everything and decodes OTLP protobuf themselves. The files are a cheap backup, n
 | E | **WebSocket** | `server` proxies and records WebSocket traffic: realtime and voice APIs |
 | F | **Bindings and the Collector** | Spans decoded in Python (and so pandas); Parquet through DuckDB; TypeScript and Go readers; an OpenTelemetry Collector exporter; the CLI in the Python wheel |
 
-Phase 1 left these for later; phase 2 takes them on:
+Phase 1 left these for later. Phase 2 takes on all but two: an index of attributes (`--attr` filters
+without one; add it when files are too large to decode on each query) and built-in object-store
+clients (`--on-rotate` with the provider's CLI does the job; add them when an operator cannot run a
+CLI beside the collector).
 
 | Item | Why not now | Add when |
 |---|---|---|

@@ -27,4 +27,4 @@ Feature: Every request is stored as a delta, and read back byte for byte
   Scenario: `deltapack log estimate` says what packing would save, without writing a file
     Given 3 traces of 8 spans, each span carrying the whole prompt, as JSON lines
     When they are packed with `deltapack log pack`
-    Then `deltapack log estimate --usd-per-gb 0.10` on the same lines reports their 24 records, their bytes, the packed file's size and the cost of each
+    Then `deltapack log estimate --usd-per-gb 0.023` on the same lines reports their 24 records, their bytes, the packed file's size and the cost of each
