@@ -550,16 +550,18 @@ impl Recorders {
                 Some(r)
             }
             None => {
-                // forgotten, so it holds no place under the cap; remembered, to be tried again later
-                let mut open = lock_open(&self.open);
-                if open.get(&tenant).is_some_and(|s| Arc::ptr_eq(s, &slot)) {
+                // only the request that tried the start forgets its slot and remembers when, both
+                // under the map's lock: no request sees the tenant in neither (and starts it again
+                // at once), and none that waited on the slot marks a tenant started since as failed
+                if tried {
+                    let mut open = lock_open(&self.open);
+                    let mut failed = lock_failed(&self.failed);
+                    failed.retain(|_, at| at.elapsed() < self.retry_after);
+                    if failed.len() < MAX_FAILED {
+                        failed.insert(tenant.clone(), std::time::Instant::now());
+                    }
+                    // still this slot: only a failed start's own request removes one
                     open.remove(&tenant);
-                }
-                drop(open);
-                let mut failed = lock_failed(&self.failed);
-                failed.retain(|_, at| at.elapsed() < self.retry_after);
-                if failed.len() < MAX_FAILED {
-                    failed.entry(tenant).or_insert_with(std::time::Instant::now);
                 }
                 unrecorded()
             }
