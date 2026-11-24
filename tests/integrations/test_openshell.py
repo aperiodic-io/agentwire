@@ -1,6 +1,6 @@
 """deploy/openshell/: OpenShell's provider profiles and gateway settings for Deltapack.
 
-OpenShell itself (a gateway with a Docker or Podman driver) is not run here. What is checked:
+OpenShell itself runs in openshell_e2e.sh (CI's openshell job). What is checked:
 - each profile has the shape of OpenShell's built-in one it copies (providers/anthropic.yaml in
   ai-openshell/openshell): the same credential, bound to `deltapack server` on the gateway host;
 - the gateway settings parse and name `deltapack collect`'s ports;
@@ -68,6 +68,7 @@ class Profiles(unittest.TestCase):
     def test_the_gateway_relays_agent_traces_to_collect(self):
         with open(os.path.join(HERE, "gateway.toml"), "rb") as f:
             gw = tomllib.load(f)
+        self.assertEqual(gw["openshell"]["version"], 2, "the gateway refuses a file without it")
         agent = gw["openshell"]["gateway"]["otlp"]["agent"]
         self.assertTrue(agent["enabled"])
         self.assertEqual(agent["protocol"], "http/protobuf")

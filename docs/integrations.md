@@ -876,6 +876,9 @@ deltapack collect --record-dir ~/deltapack/openshell --listen 127.0.0.1:4318,127
 ```
 
 ```toml
+[openshell]
+version = 2
+
 [openshell.gateway.otlp.agent]
 enabled  = true
 endpoint = "http://127.0.0.1:4318"
@@ -912,11 +915,17 @@ profile's `binaries`. For OpenAI-compatible clients, use `deltapack-openai.yaml`
 anywhere the profile does not name is refused with 403 `credential_endpoint_mismatch`.
 
 Attaching the provider adds its endpoint to the sandbox's network policy, so no other rule is
-needed. OpenShell is not run in CI. CI checks that the profiles keep the built-in profiles'
-credential shape and that `deltapack server` set up this way forwards the key (`x-api-key` and
-`Authorization: Bearer`) and records only the body
-([tests/integrations/test_openshell.py](../tests/integrations/test_openshell.py)). The whole path
-through a sandbox is *(unverified)*.
+needed. `gateway.toml` is schema version 2: the gateway refuses a file without `[openshell]
+version = 2`.
+
+CI runs both routes against OpenShell 0.1.10 (its release binaries, the Docker driver, an
+`alpine` sandbox; [tests/integrations/openshell_e2e.sh](../tests/integrations/openshell_e2e.sh)):
+the sandbox holds only a placeholder key, the upstream receives the real one through `deltapack
+server`, the record holds the body and no key, and an agent span posted to the relay's endpoint
+arrives in `collect` with `openshell.sandbox.id` and `openshell.telemetry.source=agent` on its
+resource. [tests/integrations/test_openshell.py](../tests/integrations/test_openshell.py) also
+checks the profiles keep the built-in profiles' credential shape and both key placements
+(`x-api-key`, `Authorization: Bearer`).
 
 Docs: [observability](https://docs.nvidia.com/openshell/latest/observability/overview),
 [inference](https://docs.nvidia.com/openshell/latest/how-it-works/inference),

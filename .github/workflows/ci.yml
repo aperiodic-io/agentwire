@@ -87,6 +87,18 @@ jobs:
           "$RUNNER_TEMP/v/bin/python" -m unittest tests/integrations/test_openshell.py -v
         env: { DELTAPACK_BIN: target/debug/deltapack }
 
+  # deploy/openshell/ against a real NVIDIA OpenShell (release binaries, Docker driver): both routes
+  openshell:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
+      - run: cargo build --locked --features proxy
+      - run: tests/integrations/openshell_e2e.sh
+        env: { DELTAPACK_BIN: target/debug/deltapack }
+
   # deploy/: the compose demo runs (spans reach Phoenix and are stored), and the Kubernetes
   # manifest runs on a kind cluster (spans are stored on its volume)
   deploy:
