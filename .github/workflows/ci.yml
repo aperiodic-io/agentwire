@@ -22,6 +22,7 @@ jobs:
       # saved from main only: a pull request restores main's instead of evicting it with its own
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
+      - run: scripts/versions.sh
       - run: cargo fmt --all --check
       # the library alone (what most users build) and everything (the proxies and their tests)
       - run: cargo clippy --all-targets --no-default-features -- -D warnings
@@ -294,6 +295,24 @@ jobs:
         with: { key: "${{ matrix.target }}", save-if: "${{ github.ref == 'refs/heads/main' }}" }
       - run: scripts/binary.sh ${{ matrix.target }} test
       - run: tar xzf deltapack-test-${{ matrix.target }}.tar.gz && deltapack-test-${{ matrix.target }}/deltapack --version
+
+  # the Homebrew formula, as a release renders it (release.yml's `homebrew` job: a url and its
+  # sha256), installs this commit's source and passes its test: on Linux, with the Homebrew the
+  # runner image carries (the organisation has no macOS runners)
+  homebrew:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          src="$RUNNER_TEMP/deltapack-0.0.0.tar.gz"
+          git archive --format=tar.gz --prefix=deltapack-0.0.0/ -o "$src" HEAD
+          sha=$(sha256sum "$src" | cut -d' ' -f1)
+          brew tap-new --no-git local/deltapack
+          sed "s#^  license \"Apache-2.0\"#  url \"file://$src\"\n  sha256 \"$sha\"\n  license \"Apache-2.0\"#" \
+            Formula/deltapack.rb > "$(brew --repository local/deltapack)/Formula/deltapack.rb"
+          brew install --build-from-source local/deltapack/deltapack
+          brew test local/deltapack/deltapack
 
   # the release image builds, and its binary runs
   image:

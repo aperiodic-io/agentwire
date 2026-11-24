@@ -3,7 +3,7 @@ module github.com/aperiodic-io/deltapack/go/otelcol/deltapackexporter
 go 1.26.0
 
 require (
-	github.com/aperiodic-io/deltapack/go v0.0.0
+	github.com/aperiodic-io/deltapack/go v0.1.0
 	go.opentelemetry.io/collector/component v1.72.0
 	go.opentelemetry.io/collector/component/componenttest v0.166.0
 	go.opentelemetry.io/collector/exporter v1.72.0
