@@ -332,7 +332,7 @@ impl Key {
         }
         let mut key = [0; 32];
         for (k, pair) in key.iter_mut().zip(s.chunks(2)) {
-            *k = digit(pair[0]).zip(digit(pair[1])).map(|(h, l)| h << 4 | l).ok_or_else(bad)?;
+            *k = digit(pair[0]).zip(digit(pair[1])).map(|(h, l)| h * 16 + l).ok_or_else(bad)?;
         }
         Ok(Key(key))
     }

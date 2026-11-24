@@ -460,6 +460,8 @@ struct Recorders {
     /// requests that named a tenant whose recording could not be started, or one past the cap
     /// with --key-dir
     unrecorded: Arc<AtomicU64>,
+    /// how long a failed start waits for another try ([`RETRY_START`])
+    retry_after: Duration,
 }
 
 /// A tenant's recording, started once by its first request; a start that failed, and when.
@@ -488,6 +490,7 @@ impl Recorders {
             key,
             open: Default::default(),
             unrecorded: Default::default(),
+            retry_after: RETRY_START,
         };
         if r.tenants.tenant_header.is_none() {
             // one recording: started now, so that a directory it cannot use stops the process
@@ -507,7 +510,7 @@ impl Recorders {
         };
         let (tenant, slot) = {
             let mut open = lock_open(&self.open);
-            let retry = |s: &Slot| matches!(s.get(), Some(Err(at)) if at.elapsed() >= RETRY_START);
+            let retry = |s: &Slot| matches!(s.get(), Some(Err(at)) if at.elapsed() >= self.retry_after);
             let tenant = match open.get(&tenant) {
                 Some(s) if !retry(s) => {
                     let s = s.clone();
@@ -1755,6 +1758,52 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("x-tenant", http::HeaderValue::from_bytes(b"\xff").unwrap());
         assert_eq!(tenant_dir(h.get_all("x-tenant")), "_invalid");
+    }
+
+    fn tenant_recorders(dir: &std::path::Path, max: usize, keys: &[&str]) -> Recorders {
+        let key_dir = dir.join("keys");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        for k in keys {
+            std::fs::write(key_dir.join(format!("{k}.key")), "11".repeat(32)).unwrap();
+        }
+        let tenants = Tenants { tenant_header: Some(HeaderName::from_static("x-tenant")), max_tenants: max };
+        let keys = Keys { key_file: None, key_dir: Some(key_dir) };
+        Recorders::start(dir.join("rec"), 4, 1 << 30, Retention::default(), tenants, keys).unwrap()
+    }
+
+    fn as_tenant(t: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-tenant", t.parse().unwrap());
+        h
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tenant_that_could_not_start_is_tried_again_only_after_the_delay() {
+        let dir = std::env::temp_dir().join(format!("deltapack-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = tenant_recorders(&dir, 8, &["acme"]);
+        let acme = r.of(&as_tenant("acme")).expect("acme has a key");
+        assert!(Arc::ptr_eq(&acme, &r.of(&as_tenant("acme")).unwrap()), "started once");
+        assert!(r.of(&as_tenant("globex")).is_none(), "no key");
+        std::fs::write(dir.join("keys/globex.key"), "22".repeat(32)).unwrap();
+        assert!(r.of(&as_tenant("globex")).is_none(), "within the delay: not tried again");
+        assert_eq!(r.unrecorded.load(Ordering::Relaxed), 2);
+        r.retry_after = Duration::ZERO;
+        assert!(r.of(&as_tenant("globex")).is_some(), "past it: tried again, and started");
+        assert!(Arc::ptr_eq(&acme, &r.of(&as_tenant("acme")).unwrap()), "a started tenant is never restarted");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn past_the_cap_a_tenant_with_keys_of_its_own_is_not_sealed_with_others() {
+        let dir = std::env::temp_dir().join(format!("deltapack-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let r = tenant_recorders(&dir, 1, &["acme", "globex", "_other"]);
+        assert!(r.of(&as_tenant("acme")).is_some());
+        assert!(r.of(&as_tenant("globex")).is_none(), "past the cap, even with `_other.key` there");
+        assert!(!dir.join("rec/_other").exists());
+        assert_eq!(r.unrecorded.load(Ordering::Relaxed), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
