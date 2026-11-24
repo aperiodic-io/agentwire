@@ -6,8 +6,20 @@ One tag releases everything: `vX.Y.Z` on a commit of `main` that passed CI.
    (both wheels take theirs from Cargo), `ts/package.json`, and the exporter's requirement of the Go
    module (`go/otelcol/deltapackexporter/go.mod`: `github.com/aperiodic-io/deltapack/go vX.Y.Z`).
    `scripts/versions.sh` checks they agree; CI runs it on every pull request.
-2. Move CHANGELOG.md's `[Unreleased]` entries under `## [X.Y.Z]`; the release notes are that section.
+2. Move CHANGELOG.md's `[Unreleased]` entries under `## [X.Y.Z]`; the release notes are that section,
+   and a release with none, or an empty one, stops before publishing. (0.1.0 was never tagged: its
+   section says only "First release.", so the first tag takes the `[Unreleased]` entries into it,
+   or is 0.2.0.)
 3. Merge, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+Before a tag, the same workflow runs as a dry run on every pull request that changes what a release
+builds (and by hand, from the Actions tab, on any ref: by hand it never publishes): each job builds
+what it would publish and checks it (the
+crate packaged, the image run, the binaries checksummed and run, each wheel installed and used, the
+sdist built from source, the npm package packed, the formula installed by Homebrew) and publishes
+nothing. A tag runs it for real, and publishes only once every package has built and passed its
+check, so a failed build leaves nothing half released. `:latest` moves only for a release, not a
+pre-release (`vX.Y.Z-rc.1`).
 
 `.github/workflows/release.yml` then publishes:
 
