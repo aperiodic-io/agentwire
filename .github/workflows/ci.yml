@@ -134,6 +134,10 @@ jobs:
       - run: cargo build --features proxy
       - run: python -m unittest discover -s python/tests -v
         env: { DELTAPACK_BIN: target/debug/deltapack }
+      # the CLI's own wheel: built (into the same target), installed, run
+      - run: maturin build -o dist-cli
+        working-directory: python/cli
+      - run: pip install python/cli/dist-cli/*.whl && deltapack --version && deltapack log --help
 
   mutants-plan:
     if: github.event_name == 'pull_request' && !github.event.pull_request.draft

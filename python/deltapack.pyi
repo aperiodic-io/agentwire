@@ -2,7 +2,7 @@
 
 from collections.abc import Iterator
 from os import PathLike
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 _Bytes = Union[bytes, bytearray]
 _Path = Union[str, PathLike[str]]
@@ -37,6 +37,15 @@ class Reader:
     def records(self) -> list[tuple[bytes, int, int]]:
         """(meta, back, stored) per record: back is how far back its base is (0: stored whole)."""
     def __iter__(self) -> "Records": ...
+    def spans(
+        self,
+        trace: Optional[str] = None,
+        attrs: Optional[dict[str, str]] = None,
+        since: Optional[int] = None,
+        until: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """The spans and log records of the file's OTLP records, one dict each, as `deltapack log
+        show` writes them: ready for `pandas.DataFrame`."""
 
 class Records(Iterator[tuple[bytes, bytes]]):
     """(meta, body) for every record, in order, each rebuilt once."""

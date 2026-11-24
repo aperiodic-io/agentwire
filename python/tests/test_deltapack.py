@@ -33,6 +33,42 @@ class AwlTest(unittest.TestCase):
                 self.assertEqual(w.append(body, meta), i)
         return os.path.getsize(self.path)
 
+    def test_spans_are_decoded_from_the_otlp_records_and_filtered(self):
+        def export(trace, turn):
+            span = {
+                "traceId": f"{trace:032x}",
+                "spanId": f"{turn:016x}",
+                "name": "chat",
+                "attributes": [
+                    {"key": "gen_ai.prompt", "value": {"stringValue": request("a", turn).decode()}},
+                    {"key": "turn", "value": {"intValue": str(turn)}},
+                ],
+            }
+            resource = {"attributes": [{"key": "service.name", "value": {"stringValue": "swe"}}]}
+            return json.dumps({"resourceSpans": [{"resource": resource, "scopeSpans": [{"spans": [span]}]}]}).encode()
+
+        records = [
+            (f"{1000 + t} POST /v1/traces application/json - {t % 2 + 1:032x}".encode(), export(t % 2 + 1, t))
+            for t in range(6)
+        ]
+        records.insert(2, (b"1002 POST /v1/messages application/json -", request("b", 1)))
+        self.write(records)
+        spans = deltapack.Reader(self.path).spans()
+        self.assertEqual(len(spans), 6, "the OTLP records' spans; the other record is not one")
+        self.assertEqual([s["span_id"] for s in spans], [f"{t:016x}" for t in range(6)])
+        first = spans[0]
+        self.assertEqual(first["trace_id"], f"{1:032x}")
+        self.assertEqual(first["resource"]["service.name"], "swe")
+        self.assertEqual(first["attributes"]["gen_ai.prompt"], request("a", 0).decode(), "the prompt whole")
+        self.assertEqual((first["record"], first["received"]), (0, 1000))
+        self.assertEqual(spans[2]["record"], 3, "records are counted as stored")
+        one = deltapack.Reader(self.path).spans(trace=f"{2:032X}")
+        self.assertEqual([s["span_id"] for s in one], [f"{t:016x}" for t in (1, 3, 5)], "in capitals too")
+        kept = deltapack.Reader(self.path).spans(attrs={"turn": "4", "service.name": "swe"})
+        self.assertEqual([s["span_id"] for s in kept], [f"{4:016x}"])
+        self.assertEqual(deltapack.Reader(self.path).spans(since=1004), spans[4:])
+        self.assertEqual(deltapack.Reader(self.path).spans(until=1001), spans[:2])
+
     def test_records_read_back_by_index_and_in_order(self):
         records = [(f"{c}{t}".encode(), request(c, t)) for t in range(1, 9) for c in "abc"]
         self.write(records, window=4)

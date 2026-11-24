@@ -14,7 +14,8 @@ name = "deltapack"
 crate-type = ["cdylib"]
 
 [dependencies]
-dpk = { package = "deltapack", path = "..", default-features = false, features = ["encrypt"] }
+dpk = { package = "deltapack", path = "..", default-features = false, features = ["encrypt", "show"] }
+serde_json = "1"
 bytes = "1"
 # one wheel for CPython 3.9 and later
 pyo3 = { version = "0.30", features = ["extension-module", "abi3-py39"] }

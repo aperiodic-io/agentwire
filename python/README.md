@@ -21,9 +21,23 @@ for meta, body in r:         # every record in order, each rebuilt once
     ...
 ```
 
+`Reader.spans()` decodes the file's OTLP records (JSON or protobuf, as `deltapack collect` stores
+them) into one dict per span or log record, attributes as plain values, as `deltapack log show`
+writes them; `trace=`, `attrs={...}`, `since=` and `until=` (Unix ms) filter them. Records that are
+not OTLP are left out.
+
+```python
+import pandas as pd
+
+spans = pd.DataFrame(deltapack.Reader("1763650000000-4242-000000.dpk").spans(attrs={"gen_ai.request.model": "gpt-5"}))
+spans[["trace_id", "name", "received"]]
+spans.to_parquet("spans.parquet")             # or DuckDB: SELECT * FROM spans
+```
+
 `window` is how many of the latest records a new one may delta against: about one per trace or
 conversation interleaved in the log. A body that does not rebuild what it names raises
 `ValueError`, never returns wrong bytes. `append` and reads release the GIL.
 
 Build from source with [maturin](https://www.maturin.rs): `pip install ./python`, or
-`maturin build --release -m python/Cargo.toml`.
+`maturin build --release -m python/Cargo.toml`. The `deltapack` command (`collect`, `server`, `log`)
+is a wheel of its own: `pip install ./python/cli`.
