@@ -1,0 +1,18 @@
+# Additions to OpenShell's ~/.config/openshell/gateway.toml (docs.nvidia.com/openshell,
+# "Observability"): agents' own OpenTelemetry traces, relayed by the sandbox supervisors, to
+# `deltapack collect`. The relay sets OTEL_EXPORTER_OTLP_ENDPOINT in each sandbox, so an agent with an
+# OpenTelemetry SDK (and content capture on) exports its prompts with no more configuration.
+# With the Docker driver's default `supervisor_network_mode = "host"`, the supervisors share the
+# host's network: `deltapack collect --listen 127.0.0.1:4318,127.0.0.1:4317`. In "bridge" mode, use
+# the host gateway address instead (`host_gateway_ip`), and firewall the ports to the supervisors.
+[openshell.gateway.otlp.agent]
+enabled  = true
+endpoint = "http://127.0.0.1:4318"
+protocol = "http/protobuf"
+
+# Optional: OpenShell's own traces (gateway, drivers, supervisors) and its OCSF policy events, over
+# OTLP/gRPC. They hold no prompts, but put each model call's policy decisions beside the agent's spans.
+# [openshell.gateway.otlp]
+# endpoint = "http://127.0.0.1:4317"
+# [openshell.gateway.otlp.ocsf]
+# enabled = true

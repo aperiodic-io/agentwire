@@ -1,0 +1,41 @@
+# An OpenShell provider profile: the built-in `anthropic` profile (providers/anthropic.yaml in
+# ai-openshell/openshell), bound to `deltapack server` on the gateway host instead of
+# api.anthropic.com. OpenShell injects the real ANTHROPIC_API_KEY only in requests to this endpoint;
+# deltapack records each request body and forwards it, key included, to --upstream. Headers are never
+# written to the record. See docs/integrations.md, "NVIDIA OpenShell".
+#
+#   openshell profile lint -f deltapack-anthropic.yaml
+#   openshell profile import -f deltapack-anthropic.yaml
+#   openshell provider create --name anthropic-recorded --type deltapack-anthropic --from-existing
+id: deltapack-anthropic
+display_name: Anthropic, recorded by Deltapack
+description: Anthropic API through deltapack server on the gateway host
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Anthropic API key
+    env_vars: [ANTHROPIC_API_KEY]
+    required: true
+    auth_style: header
+    header_name: x-api-key
+discovery:
+  credentials: [api_key]
+endpoints:
+  # host.openshell.internal is the gateway host's loopback in the default host network mode:
+  # `deltapack server --listen 127.0.0.1:8080 --upstream https://api.anthropic.com`
+  - host: host.openshell.internal
+    port: 8080
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+# the programs in the sandbox that call the API: add your agent's
+binaries:
+  - /usr/bin/curl
+  - /usr/local/bin/curl
+  - /usr/bin/python3
+  - /usr/local/bin/python
+  - /usr/bin/node
+  - /usr/local/bin/node
+  - /sandbox/.uv/python/**
+  - /sandbox/.venv/**

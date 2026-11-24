@@ -45,6 +45,7 @@ once, by hand (the README's "Measured end to end"). The rest have not been run e
   Aider, Continue, SWE-agent, mini-swe-agent, Crush, Pi, Zed
 - [Personal and autonomous agents](#personal-and-autonomous-agents): OpenClaw, Hermes Agent, nanobot,
   Open Interpreter, Letta, Agent Zero, OpenManus, AutoGPT
+- [Agent runtimes](#agent-runtimes): NVIDIA OpenShell
 - [Agent workflow platforms](#agent-workflow-platforms): n8n, Dify, Langflow, Flowise, Open WebUI,
   LibreChat, AnythingLLM, Activepieces, Rivet
 - [SDKs and agent frameworks](#sdks-and-agent-frameworks): OpenTelemetry GenAI, OpenLLMetry,
@@ -69,6 +70,7 @@ once, by hand (the README's "Measured end to end"). The rest have not been run e
 | Claude Code, Claude Agent SDK | full request | A |
 | Gemini CLI, Qwen Code, GitHub Copilot CLI, VS Code Copilot, Goose | messages | A |
 | OpenClaw, Hermes Agent (through NeMo Relay) | messages, once content capture is on | A |
+| NVIDIA OpenShell (agent runtime) | the agent's own spans, relayed; policy events | A for agents that export OTel, B for the rest |
 | Dify, Langflow and Flowise (through their Phoenix integration), n8n (Agents feature) | messages | A |
 | OTel GenAI, OpenLLMetry and OpenInference instrumentors; Langfuse, LangSmith, Logfire, Pydantic AI, LangChain, LlamaIndex, OpenAI Agents SDK (Python), Vercel AI SDK, Mastra, CrewAI, Microsoft Agent Framework, Semantic Kernel, Spring AI, Strands, Google ADK, smolagents, Haystack, DSPy, Agno | messages, once content capture is on | A |
 | LiteLLM, Kong, APISIX, Bifrost, Envoy AI Gateway, Traefik Hub, agentgateway, OpenRouter, Cloudflare | messages or payload logs | A |
@@ -845,6 +847,82 @@ The platform runs in Docker, so see [In Docker?](#personal-and-autonomous-agents
 Docs: [.env.default](https://github.com/Significant-Gravitas/AutoGPT/blob/master/autogpt_platform/backend/.env.default).
 
 ---
+
+## Agent runtimes
+
+### NVIDIA OpenShell
+
+OpenShell runs agents in sandboxes whose network egress is denied unless a policy allows it, and
+injects API keys only at the endpoints a provider profile names. Its own OpenTelemetry (gateway,
+drivers, supervisors, OCSF policy events) carries **no prompts**. It can relay the **agent's** own
+OTLP export, which carries **messages** when the agent's SDK captures content. Run Deltapack on the
+gateway host. With the Docker driver's default `supervisor_network_mode = "host"`, the supervisors
+share the host's network and `host.openshell.internal` is the host's loopback, so Deltapack listens on
+`127.0.0.1` and nothing off the host reaches it. In `bridge` mode, listen on the host gateway address
+(`host_gateway_ip`) instead and firewall the ports to the supervisors: keys then cross the bridge in
+plain HTTP.
+
+**A.** Turn on the agent trace relay in `~/.config/openshell/gateway.toml`
+([deploy/openshell/gateway.toml](../deploy/openshell/gateway.toml)). The relay sets
+`OTEL_EXPORTER_OTLP_ENDPOINT` in each sandbox, so an agent with an OpenTelemetry SDK exports with no
+more configuration; the relay takes uncompressed OTLP/HTTP protobuf (it answers 415 to anything
+else), which is what it sets unless the agent overrides it. Turn the agent's content capture on as its own section says (for example
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` with `--env` on `openshell sandbox create`).
+Relayed spans carry `openshell.sandbox.id`, so `log show --attr openshell.sandbox.id=<id>` finds one
+sandbox's.
+
+```bash
+deltapack collect --record-dir ~/deltapack/openshell --listen 127.0.0.1:4318,127.0.0.1:4317
+```
+
+```toml
+[openshell.gateway.otlp.agent]
+enabled  = true
+endpoint = "http://127.0.0.1:4318"
+protocol = "http/protobuf"
+```
+
+OpenShell's own traces and OCSF events go to `[openshell.gateway.otlp]` (OTLP/gRPC, `endpoint =
+"http://127.0.0.1:4317"`, and `[openshell.gateway.otlp.ocsf] enabled = true`): no prompts, but each
+call's policy decisions next to the agent's spans.
+
+**B.** For an agent that exports no content, record its model calls. The built-in `anthropic` and
+`openai` profiles bind their keys to the vendors' hosts, and a client pointed at another base URL
+does not get the key. So import a copy bound to `deltapack server` on the gateway host
+([deploy/openshell/](../deploy/openshell/)): OpenShell puts the real key in requests to it, and
+`deltapack server` records the body and forwards the request, key included, to the vendor. The key
+is never written to the record.
+
+```bash
+deltapack server --listen 127.0.0.1:8080 --upstream https://api.anthropic.com --record-dir ~/deltapack/openshell-anthropic
+```
+
+```bash
+openshell profile lint -f deploy/openshell/deltapack-anthropic.yaml
+openshell profile import -f deploy/openshell/deltapack-anthropic.yaml
+openshell provider create --name anthropic-recorded --type deltapack-anthropic --from-existing
+openshell sandbox create --name agent --from <image> --provider anthropic-recorded \
+  --env ANTHROPIC_BASE_URL=http://host.openshell.internal:8080 -- <agent command>
+```
+
+The profile's endpoint is `host.openshell.internal:8080` over `rest`, which is what lets OpenShell
+see the request and place the key, so do not set `tls: skip`. Add your agent's program to the
+profile's `binaries`. For OpenAI-compatible clients, use `deltapack-openai.yaml` (port 8081,
+`Authorization: Bearer`) and `OPENAI_BASE_URL=http://host.openshell.internal:8081/v1`. A key sent
+anywhere the profile does not name is refused with 403 `credential_endpoint_mismatch`.
+
+Attaching the provider adds its endpoint to the sandbox's network policy, so no other rule is
+needed. OpenShell is not run in CI. CI checks that the profiles keep the built-in profiles'
+credential shape and that `deltapack server` set up this way forwards the key (`x-api-key` and
+`Authorization: Bearer`) and records only the body
+([tests/integrations/test_openshell.py](../tests/integrations/test_openshell.py)). The whole path
+through a sandbox is *(unverified)*.
+
+Docs: [observability](https://docs.nvidia.com/openshell/latest/observability/overview),
+[inference](https://docs.nvidia.com/openshell/latest/how-it-works/inference),
+[provider profiles](https://docs.nvidia.com/openshell/latest/how-it-works/providers/profiles),
+[network rules](https://docs.nvidia.com/openshell/latest/how-it-works/policies/network-rules),
+[the built-in profiles](https://github.com/ai-openshell/openshell/tree/main/providers).
 
 ## Agent workflow platforms
 

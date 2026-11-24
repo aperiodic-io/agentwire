@@ -1,0 +1,39 @@
+# An OpenShell provider profile for OpenAI-compatible clients, bound to `deltapack server` on the
+# gateway host: OpenShell injects the real OPENAI_API_KEY (as `Authorization: Bearer`) only in
+# requests to this endpoint, and deltapack records each request body and forwards it to --upstream.
+# See docs/integrations.md, "NVIDIA OpenShell".
+#
+#   openshell profile lint -f deltapack-openai.yaml
+#   openshell profile import -f deltapack-openai.yaml
+#   openshell provider create --name openai-recorded --type deltapack-openai --from-existing
+id: deltapack-openai
+display_name: OpenAI, recorded by Deltapack
+description: OpenAI API through deltapack server on the gateway host
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: OpenAI API key
+    env_vars: [OPENAI_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+discovery:
+  credentials: [api_key]
+endpoints:
+  # host.openshell.internal is the gateway host's loopback in the default host network mode:
+  # `deltapack server --listen 127.0.0.1:8081 --upstream https://api.openai.com`
+  - host: host.openshell.internal
+    port: 8081
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries:
+  - /usr/bin/curl
+  - /usr/local/bin/curl
+  - /usr/bin/python3
+  - /usr/local/bin/python
+  - /usr/bin/node
+  - /usr/local/bin/node
+  - /sandbox/.uv/python/**
+  - /sandbox/.venv/**

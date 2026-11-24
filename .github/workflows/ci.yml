@@ -81,6 +81,11 @@ jobs:
       - run: cargo build --locked --features proxy
       - run: python3 -m unittest tests/backends/test_backends.py -v
         env: { DELTAPACK_BIN: target/debug/deltapack }
+      # deploy/openshell/: OpenShell's profiles and gateway settings, and the proxy as they use it
+      - run: |
+          python3 -m venv "$RUNNER_TEMP/v" && "$RUNNER_TEMP/v/bin/pip" install -q pyyaml==6.0.2
+          "$RUNNER_TEMP/v/bin/python" -m unittest tests/integrations/test_openshell.py -v
+        env: { DELTAPACK_BIN: target/debug/deltapack }
 
   # deploy/: the compose demo runs (spans reach Phoenix and are stored), and the Kubernetes
   # manifest runs on a kind cluster (spans are stored on its volume)
