@@ -22,8 +22,8 @@ pub fn signal(path: &str) -> Option<Signal> {
     }
 }
 
-/// More distinct trace ids than this in one batch are listed as `?`: read the body to know.
-const MAX_IDS: usize = 64;
+/// More distinct trace ids than this in one batch are listed as `?` (SPEC.md §7): read the body to know.
+pub const MAX_IDS: usize = 64;
 
 /// The meta field `collect` adds to an OTLP record: its trace ids comma-separated, in order of
 /// first appearance; `-` for none; `?` when the body is not OTLP or holds more than [`MAX_IDS`].
