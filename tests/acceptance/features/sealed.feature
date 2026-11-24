@@ -28,8 +28,8 @@ Feature: Records sealed at rest
     Then `deltapack log unpack` without the key fails, saying the file is sealed
     And `deltapack log unpack` with the key gives back the same lines
 
-  Scenario: A file not sealed, read with a key, is read without it and said so
+  Scenario: A file not sealed, read with a key, is refused: it could have replaced a sealed one
     Given a key in a file
     And 3 traces of 8 spans, each span carrying the whole prompt, as JSON lines
     When they are packed with `deltapack log pack`
-    Then `deltapack log unpack` with the key gives back the same lines, saying the file is not sealed
+    Then `deltapack log unpack` with the key fails, saying the file is not sealed

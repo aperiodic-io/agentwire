@@ -1661,18 +1661,12 @@ async fn unpack_without_key(w: &mut Proxies) {
     assert!(err.contains("sealed"), "{err}");
 }
 
-#[then("`deltapack log unpack` with the key gives back the same lines, saying the file is not sealed")]
+#[then("`deltapack log unpack` with the key fails, saying the file is not sealed")]
 async fn unpack_plain_with_key(w: &mut Proxies) {
     let key = w.key.clone().unwrap();
     let file = w.packed.as_ref().unwrap().to_str().unwrap().to_owned();
-    let out = Command::new(env!("CARGO_BIN_EXE_deltapack"))
-        .args(["log", "--key-file", key.to_str().unwrap(), "unpack", &file])
-        .output()
-        .await
-        .unwrap();
-    assert!(out.status.success());
-    assert!(out.stdout == jsonl(&w.lines));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not sealed"), "{}", String::from_utf8_lossy(&out.stderr));
+    let err = log_fails(&["--key-file", key.to_str().unwrap(), "unpack", &file]).await;
+    assert!(err.contains("not sealed") && err.contains(&file), "{err}");
 }
 
 #[then("`deltapack log unpack` with the key gives back the same lines")]

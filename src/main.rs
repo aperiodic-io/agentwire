@@ -460,12 +460,17 @@ struct Recorders {
     /// requests that named a tenant whose recording could not be started, or one past the cap
     /// with --key-dir
     unrecorded: Arc<AtomicU64>,
-    /// how long a failed start waits for another try ([`RETRY_START`])
+    /// tenants whose start failed, and when: tried again after `retry_after` ([`RETRY_START`]); they
+    /// hold no place under --max-tenants
+    failed: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     retry_after: Duration,
 }
 
-/// A tenant's recording, started once by its first request; a start that failed, and when.
-type Slot = Arc<std::sync::OnceLock<Result<Recorder, std::time::Instant>>>;
+/// A tenant's recording, started once by its first request (`None`: its start failed).
+type Slot = Arc<std::sync::OnceLock<Option<Recorder>>>;
+
+/// Failed starts remembered at once, at most: past it, a failed tenant is tried again sooner.
+const MAX_FAILED: usize = 4096;
 
 /// A tenant whose recording could not be started is tried again after this long.
 const RETRY_START: Duration = Duration::from_secs(30);
@@ -490,12 +495,13 @@ impl Recorders {
             key,
             open: Default::default(),
             unrecorded: Default::default(),
+            failed: Default::default(),
             retry_after: RETRY_START,
         };
         if r.tenants.tenant_header.is_none() {
             // one recording: started now, so that a directory it cannot use stops the process
             let one = Recording::start(r.root.clone(), window, rotate_bytes, r.retention.clone(), r.key.clone())?;
-            lock_open(&r.open).insert(String::new(), Arc::new(Ok(one).into()));
+            lock_open(&r.open).insert(String::new(), Arc::new(Some(one).into()));
         }
         Ok(r)
     }
@@ -508,55 +514,69 @@ impl Recorders {
             None => String::new(),
             Some(name) => tenant_dir(headers.get_all(name)),
         };
+        let unrecorded = || {
+            self.unrecorded.fetch_add(1, Ordering::Relaxed);
+            None
+        };
         let (tenant, slot) = {
             let mut open = lock_open(&self.open);
-            let retry = |s: &Slot| matches!(s.get(), Some(Err(at)) if at.elapsed() >= self.retry_after);
-            let tenant = match open.get(&tenant) {
-                Some(s) if !retry(s) => {
-                    let s = s.clone();
-                    drop(open);
-                    return self.started(&tenant, s);
-                }
-                Some(_) => tenant,
+            let tenant = match open.contains_key(&tenant) {
+                true => tenant,
                 // past the cap: a tenant with a key of its own is not sealed with another's
-                None if open.len() >= self.tenants.max_tenants && self.key_dir.is_some() => {
-                    self.unrecorded.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                }
-                None if open.len() >= self.tenants.max_tenants => "_other".to_owned(),
-                None => tenant,
+                false if open.len() >= self.tenants.max_tenants && self.key_dir.is_some() => return unrecorded(),
+                false if open.len() >= self.tenants.max_tenants => "_other".to_owned(),
+                false => tenant,
             };
-            match open.get(&tenant) {
-                Some(s) if !retry(s) => (tenant, s.clone()),
-                _ => {
-                    let slot = Slot::default();
-                    open.insert(tenant.clone(), slot.clone());
-                    (tenant, slot)
-                }
+            if lock_failed(&self.failed).get(&tenant).is_some_and(|at| at.elapsed() < self.retry_after) {
+                return unrecorded();
             }
+            let slot = open.entry(tenant.clone()).or_default().clone();
+            (tenant, slot)
         };
-        self.started(&tenant, slot)
+        // the start holds no lock but its slot's: other tenants' requests go on meanwhile
+        let mut tried = false;
+        let started = tokio::task::block_in_place(|| {
+            slot.get_or_init(|| {
+                tried = true;
+                self.start_tenant(&tenant)
+            })
+            .clone()
+        });
+        match started {
+            Some(r) => {
+                if tried {
+                    lock_failed(&self.failed).remove(&tenant);
+                }
+                Some(r)
+            }
+            None => {
+                // forgotten, so it holds no place under the cap; remembered, to be tried again later
+                let mut open = lock_open(&self.open);
+                if open.get(&tenant).is_some_and(|s| Arc::ptr_eq(s, &slot)) {
+                    open.remove(&tenant);
+                }
+                drop(open);
+                let mut failed = lock_failed(&self.failed);
+                failed.retain(|_, at| at.elapsed() < self.retry_after);
+                if failed.len() < MAX_FAILED {
+                    failed.entry(tenant).or_insert_with(std::time::Instant::now);
+                }
+                unrecorded()
+            }
+        }
     }
 
-    /// The slot's recording, started now if it is not yet.
-    fn started(&self, tenant: &str, slot: Slot) -> Option<Recorder> {
-        let start = || {
-            // a tenant's own key (--key-dir), or the one for all
-            let key = match &self.key_dir {
-                Some(dir) => read_key(&dir.join(format!("{tenant}.key"))).map(Some),
-                None => Ok(self.key.clone()),
-            };
-            let dir = self.root.join(tenant);
-            key.and_then(|key| Recording::start(dir, self.window, self.rotate_bytes, self.retention.clone(), key))
-                .map_err(|e| {
-                    tracing::error!(tenant, error = %e, "cannot record for this tenant; trying again in 30 s");
-                    std::time::Instant::now()
-                })
+    /// A tenant's recording, started: with its own key (--key-dir), or the one for all.
+    fn start_tenant(&self, tenant: &str) -> Option<Recorder> {
+        let key = match &self.key_dir {
+            Some(dir) => read_key(&dir.join(format!("{tenant}.key"))).map(Some),
+            None => Ok(self.key.clone()),
         };
-        match slot.get_or_init(|| tokio::task::block_in_place(start)) {
-            Ok(r) => Some(r.clone()),
-            Err(_) => {
-                self.unrecorded.fetch_add(1, Ordering::Relaxed);
+        let dir = self.root.join(tenant);
+        match key.and_then(|key| Recording::start(dir, self.window, self.rotate_bytes, self.retention.clone(), key)) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::error!(tenant, error = %e, "cannot record for this tenant; trying again in 30 s");
                 None
             }
         }
@@ -567,7 +587,7 @@ impl Recorders {
         let mut sum = [0; 5];
         // the recordings, taken out of the map so that routing waits for none of them
         let started: Vec<Recorder> =
-            lock_open(&self.open).values().filter_map(|s| s.get().and_then(|r| r.as_ref().ok()).cloned()).collect();
+            lock_open(&self.open).values().filter_map(|s| s.get().cloned().flatten()).collect();
         for r in &started {
             for (s, n) in sum.iter_mut().zip(lock(r).counters()) {
                 *s += n;
@@ -584,15 +604,21 @@ impl Recorders {
     }
 }
 
+fn lock_failed(
+    m: &Mutex<std::collections::HashMap<String, std::time::Instant>>,
+) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, std::time::Instant>> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 fn lock_open(
     m: &Mutex<std::collections::HashMap<String, Slot>>,
 ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Slot>> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// A tenant's directory name, from its header: lowercase (so a case-insensitive file system cannot
-/// merge two), and kept only if it cannot name another place or a reserved name (letters, digits,
-/// `.`, `_`, `-`; up to 64; not starting with `.` or `_`). `_none` without the header, `_invalid`
+/// A tenant's directory name, from its header, kept only if it cannot name another place, a
+/// reserved name, or (on a case-insensitive file system) another tenant's: lowercase letters,
+/// digits, `.`, `_`, `-`; up to 64; not starting with `.` or `_`. `_none` without the header, `_invalid`
 /// otherwise, and when it is given more than once (a gateway that appends instead of replacing it).
 fn tenant_dir(values: http::header::GetAll<'_, http::HeaderValue>) -> String {
     let mut it = values.iter();
@@ -601,10 +627,10 @@ fn tenant_dir(values: http::header::GetAll<'_, http::HeaderValue>) -> String {
         (Some(v), None) => v,
         (Some(_), Some(_)) => return "_invalid".into(),
     };
-    let ok = |b: &u8| b.is_ascii_alphanumeric() || b"._-".contains(b);
+    let ok = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(b);
     match v.as_bytes() {
         t if !t.is_empty() && t.len() <= 64 && !b"._".contains(&t[0]) && t.iter().all(ok) => {
-            String::from_utf8_lossy(t).to_ascii_lowercase()
+            String::from_utf8_lossy(t).into_owned()
         }
         _ => "_invalid".into(),
     }
@@ -1137,11 +1163,9 @@ impl Write for Counted {
 
 fn open_log(path: &std::path::Path, max_body: usize, key: Option<&log::Key>) -> io::Result<log::Reader<File>> {
     let mut r = log::Reader::open(File::open(path)?, max_body)?;
-    match key {
-        // a key, and a file that is not sealed: read, and said, since it could have replaced a sealed one
-        Some(_) if !r.is_sealed() => eprintln!("{}: not sealed; read without the key", path.display()),
-        Some(key) => r = r.with_key(key)?,
-        None => {}
+    // given a key, a file that is not sealed is refused: it could have replaced a sealed one
+    if let Some(key) = key {
+        r = r.with_key(key).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
     }
     if r.truncated {
         eprintln!("{}: the file ends inside a record; reading the records before it", path.display());
@@ -1748,7 +1772,7 @@ mod tests {
         for ok in ["acme", "a.b_c", "x2-y", "x".repeat(64).as_str()] {
             assert_eq!(dir(&[ok]), ok);
         }
-        assert_eq!(dir(&["Acme-2"]), "acme-2", "lowercase: one directory on any file system");
+        assert_eq!(dir(&["Acme"]), "_invalid", "upper case: two tenants, one directory, on some file systems");
         for bad in
             ["", ".", "..", "../x", "a/b", ".hidden", "_none", "_other", "_x", "a b", "a\\b", "x".repeat(65).as_str()]
         {
@@ -1790,7 +1814,39 @@ mod tests {
         assert_eq!(r.unrecorded.load(Ordering::Relaxed), 2);
         r.retry_after = Duration::ZERO;
         assert!(r.of(&as_tenant("globex")).is_some(), "past it: tried again, and started");
+        assert!(lock_failed(&r.failed).is_empty(), "a started tenant is not remembered as failed");
         assert!(Arc::ptr_eq(&acme, &r.of(&as_tenant("acme")).unwrap()), "a started tenant is never restarted");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_starts_are_remembered_for_the_delay_and_no_more_than_so_many() {
+        let dir = std::env::temp_dir().join(format!("deltapack-failed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = tenant_recorders(&dir, 8, &[]);
+        let failed = |r: &Recorders| {
+            let mut v: Vec<String> = lock_failed(&r.failed).keys().cloned().collect();
+            v.sort();
+            v
+        };
+        r.of(&as_tenant("a"));
+        r.of(&as_tenant("b"));
+        assert_eq!(failed(&r), ["a", "b"], "within the delay: both remembered");
+        r.retry_after = Duration::ZERO;
+        r.of(&as_tenant("c"));
+        assert_eq!(failed(&r), ["c"], "past it: forgotten when another fails");
+        r.retry_after = RETRY_START;
+        let fill = |r: &Recorders, n: usize| {
+            let mut f = lock_failed(&r.failed);
+            f.clear();
+            f.extend((0..n).map(|i| (format!("t{i}"), std::time::Instant::now())));
+        };
+        fill(&r, MAX_FAILED - 1);
+        r.of(&as_tenant("d"));
+        assert!(lock_failed(&r.failed).contains_key("d"), "under the most: remembered");
+        fill(&r, MAX_FAILED);
+        r.of(&as_tenant("e"));
+        assert!(!lock_failed(&r.failed).contains_key("e"), "at the most: not remembered");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1799,10 +1855,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("deltapack-cap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let r = tenant_recorders(&dir, 1, &["acme", "globex", "_other"]);
-        assert!(r.of(&as_tenant("acme")).is_some());
+        assert!(r.of(&as_tenant("nokey")).is_none(), "no key: failed");
+        assert!(r.of(&as_tenant("acme")).is_some(), "a failed tenant holds no place under the cap");
         assert!(r.of(&as_tenant("globex")).is_none(), "past the cap, even with `_other.key` there");
         assert!(!dir.join("rec/_other").exists());
-        assert_eq!(r.unrecorded.load(Ordering::Relaxed), 1);
+        assert_eq!(r.unrecorded.load(Ordering::Relaxed), 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
