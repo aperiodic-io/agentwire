@@ -8,8 +8,11 @@ use serde_json::Value;
 use crate::show::{self, Signal, Wire};
 
 /// The parts of `body`, an OTLP export of `signal`, each at most `max` bytes where a span allows;
-/// `None` when it is not one (it is forwarded as it came).
+/// `None` when it fits as it is or is not one (it is forwarded as it came).
 pub fn split(body: &[u8], signal: Signal, max: usize) -> Option<Vec<Vec<u8>>> {
+    if body.len() <= max {
+        return None;
+    }
     // as `show::rows` tells them: OTLP/JSON may start with whitespace
     if body.trim_ascii_start().first() == Some(&b'{') {
         let export: Value = serde_json::from_slice(body).ok()?;
@@ -197,9 +200,11 @@ mod tests {
     }
 
     #[test]
-    fn an_export_under_the_limit_is_one_part() {
+    fn an_export_that_fits_is_not_split() {
         let body = export(2, 2, 2, 10);
-        assert_eq!(split(&body, Signal::Traces, body.len()).unwrap(), vec![body.clone()]);
+        assert_eq!(split(&body, Signal::Traces, body.len()), None, "exactly the limit");
+        assert_eq!(split(&body, Signal::Traces, body.len() + 1), None);
+        assert!(split(&body, Signal::Traces, body.len() - 1).unwrap().len() > 1, "one byte over");
     }
 
     #[test]
@@ -308,7 +313,6 @@ mod tests {
 
     #[test]
     fn an_export_without_resources_is_one_part() {
-        assert_eq!(split(b"", Signal::Traces, 10).unwrap(), vec![Vec::<u8>::new()]);
         assert_eq!(split(&pb(5, 0, &[1]), Signal::Traces, 1).unwrap(), vec![pb(5, 0, &[1])]);
     }
 
@@ -349,7 +353,7 @@ mod tests {
         let padded = [&b" \n"[..], &serde_json::to_vec(&json_export(3, 3, 50)).unwrap()].concat();
         assert!(split(&padded, Signal::Traces, 500).unwrap().len() > 1, "JSON after whitespace");
         let small = serde_json::to_vec(&json_export(1, 1, 1)).unwrap();
-        assert_eq!(split(&small, Signal::Traces, small.len()).unwrap(), vec![small]);
+        assert_eq!(split(&small, Signal::Traces, small.len()), None);
     }
 
     #[test]

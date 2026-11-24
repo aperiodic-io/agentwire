@@ -350,11 +350,7 @@ async fn main() -> Result<(), BoxError> {
                 Some(dir) => Some(Recorders::start(dir, record_window, rotate_bytes, retention, tenants, keys)?),
                 None => None,
             };
-            match (&record, reads.read_listen) {
-                (Some(r), Some(_)) => serve_reads(&reads, r.clone(), max_body).await?,
-                (None, Some(_)) => return Err("--read-listen needs --record-dir".into()),
-                _ => {}
-            }
+            start_reads(&reads, record.as_ref(), max_body).await?;
             let store = Store::new(store_bytes, Duration::from_secs(ttl_seconds));
             let scope_headers =
                 scope_headers.iter().map(|h| HeaderName::try_from(h.as_str())).collect::<Result<_, _>>()?;
@@ -377,9 +373,7 @@ async fn main() -> Result<(), BoxError> {
             reads,
         } => {
             let record = Some(Recorders::start(record_dir, record_window, rotate_bytes, retention, tenants, keys)?);
-            if reads.read_listen.is_some() {
-                serve_reads(&reads, record.clone().expect("collect records"), max_body).await?;
-            }
+            start_reads(&reads, record.as_ref(), max_body).await?;
             let forward = Forward {
                 http,
                 upstream: forward.map(Arc::new),
@@ -998,9 +992,7 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
             };
             let pieces = match (split, show::signal(parts.uri.path())) {
                 // a body still in a coding deltapack cannot decode is forwarded as it came
-                (Some(max), Some(signal)) if stored.len() > max && encoding == "-" => {
-                    split::split(&stored, signal, max)
-                }
+                (Some(max), Some(signal)) if encoding == "-" => split::split(&stored, signal, max),
                 _ => None,
             };
             if let Some(record) = &record {
@@ -1031,7 +1023,7 @@ mod websocket {
     const PING: Duration = Duration::from_secs(30);
     const IDLE: Duration = Duration::from_secs(75);
     /// Longer than any session: a timer that does not fire.
-    const NEVER: Duration = Duration::from_secs(365 * 86_400);
+    const NEVER: Duration = Duration::from_secs(1 << 30);
 
     /// A WebSocket handshake (RFC 6455 §4.1): a GET asking to upgrade to `websocket`.
     pub(super) fn is_upgrade<B>(request: &Request<B>) -> bool {
@@ -1271,7 +1263,7 @@ async fn export(
         parts.headers.remove(name);
     }
     let pieces = match (split, show::signal(otlp_path)) {
-        (Some(max), Some(signal)) if message.len() > max => split::split(&message, signal, max),
+        (Some(max), Some(signal)) => split::split(&message, signal, max),
         _ => None,
     };
     let response = match pieces {
@@ -1757,14 +1749,15 @@ fn reads_allowed(addr: SocketAddr, token: Option<&str>) -> Result<(), String> {
 }
 
 /// Whether `authorization` is `Bearer <token>` (the scheme in any case, RFC 9110 §11.1), compared
-/// by digest: in time that depends neither on where they differ nor on the token's length.
+/// by digest: what a comparison's time could tell is where two digests differ, which says nothing
+/// of the token, nor of its length.
 fn authorized(authorization: Option<&http::HeaderValue>, token: Option<&str>) -> bool {
     use sha2::{Digest, Sha256};
     let Some(token) = token else { return true };
     let given = authorization.map_or(&b""[..], |v| v.as_bytes());
     let (scheme, given) = given.split_at(given.len().min(7));
     let (given, want) = (Sha256::digest(given), Sha256::digest(token.as_bytes()));
-    scheme.eq_ignore_ascii_case(b"bearer ") & (given.iter().zip(&want).fold(0, |d, (a, b)| d | (a ^ b)) == 0)
+    scheme.eq_ignore_ascii_case(b"bearer ") & (given == want)
 }
 
 /// Reads at once, at most: one more is answered 503 rather than scanning files beside the others.
@@ -1835,6 +1828,15 @@ fn read_trace(record: &Recorders, path: &str, query: &str, max_body: usize) -> (
             (StatusCode::PAYLOAD_TOO_LARGE, why.into_bytes())
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}\n").into_bytes()),
+    }
+}
+
+/// The read API, when --read-listen asks for it: it reads what is recorded, so it needs a recording.
+async fn start_reads(reads: &Reads, record: Option<&Recorders>, max_body: usize) -> Result<(), BoxError> {
+    match (record, reads.read_listen) {
+        (Some(r), Some(_)) => serve_reads(reads, r.clone(), max_body).await,
+        (None, Some(_)) => Err("--read-listen needs --record-dir".into()),
+        (_, None) => Ok(()),
     }
 }
 
@@ -2309,6 +2311,72 @@ mod tests {
         assert!(reads_allowed(at("[::1]:4319"), None).is_ok());
         assert!(reads_allowed(at("0.0.0.0:4319"), None).is_err());
         assert!(reads_allowed(at("10.0.0.5:4319"), Some("t")).is_ok());
+    }
+
+    fn plain_recorders(dir: &std::path::Path) -> Recorders {
+        let tenants = Tenants { tenant_header: None, max_tenants: 1 };
+        Recorders::start(
+            dir.to_owned(),
+            4,
+            1 << 30,
+            Retention::default(),
+            tenants,
+            Keys { key_file: None, key_dir: None },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_answers_by_trace_time_size_and_damage() {
+        let dir = std::env::temp_dir().join(format!("deltapack-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let r = plain_recorders(&dir);
+        let id = format!("{:032x}", 7);
+        let body =
+            format!(r#"{{"resourceSpans":[{{"scopeSpans":[{{"spans":[{{"traceId":"{id}","name":"chat"}}]}}]}}]}}"#);
+        let body_len = body.len();
+        // received in 1970: before any --since
+        lock(&r.of(&HeaderMap::new()).unwrap())
+            .append(format!("1000 POST /v1/traces application/json - {id}").as_bytes(), body.into())
+            .unwrap();
+        let read = |path: &str, query: &str, max: usize| read_trace(&r, path, query, max);
+        let (status, rows) = read(&format!("/v1/traces/{id}"), "", 1 << 20);
+        assert_eq!((status, rows.iter().filter(|&&b| b == b'\n').count()), (StatusCode::OK, 1));
+        assert_eq!(
+            read(&format!("/v1/traces/{id}"), "since=1h", 1 << 20).0,
+            StatusCode::NOT_FOUND,
+            "before the time asked"
+        );
+        assert_eq!(read(&format!("/v1/traces/{id}"), "since=soon", 1 << 20).0, StatusCode::BAD_REQUEST);
+        // a record within the limit whose row (its file's name, its times) is past it
+        let (status, why) = read(&format!("/v1/traces/{id}"), "", body_len + 1);
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "past --max-body: {}", String::from_utf8_lossy(&why));
+        for bad in ["/v1/traces/zz", &format!("/v1/traces/{}", "z".repeat(32)), &format!("/v1/traces/{id}0"), "/other"]
+        {
+            let (status, why) = read(bad, "", 1 << 20);
+            assert_eq!(status, StatusCode::NOT_FOUND, "{bad}");
+            assert!(why.starts_with(b"GET /v1/traces/"), "{bad}: says what it takes");
+        }
+        // a file that does not read: an error, not too large
+        let file = dpk_files(&dir).unwrap()[0].0.clone();
+        drop(r);
+        let mut bytes = std::fs::read(&file).unwrap();
+        let n = bytes.len();
+        bytes[n - 3] ^= 0xff;
+        std::fs::write(&file, bytes).unwrap();
+        let r = plain_recorders(&dir.join("again"));
+        let (status, _) = read_trace(&Recorders { root: dir.clone(), ..r }, &format!("/v1/traces/{id}"), "", 1 << 20);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reads_need_a_recording() {
+        let reads = Reads { read_listen: Some("127.0.0.1:0".parse().unwrap()), read_token_file: None };
+        let refused = start_reads(&reads, None, 1).await.unwrap_err();
+        assert!(refused.to_string().contains("--record-dir"), "{refused}");
+        let none = Reads { read_listen: None, read_token_file: None };
+        start_reads(&none, None, 1).await.unwrap();
     }
 
     #[test]

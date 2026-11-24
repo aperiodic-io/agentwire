@@ -15,3 +15,15 @@ Feature: Exports too large for a backend are forwarded in parts
     And a deltapack collector in front of it, recording to a directory, splitting what it forwards at 70000 bytes
     When a gRPC exporter sends 4 protobuf trace exports of 2 traces each
     Then the upstream received 8 protobuf parts at "/v1/traces", each of at most 70000 bytes
+
+  Scenario: An export in a coding deltapack does not decode is forwarded as it came, unsplit
+    Given an upstream API
+    And a deltapack collector in front of it, recording to a directory, splitting what it forwards at 1000 bytes
+    When an exporter posts a batch of spans to "/v1/traces" in a coding deltapack does not decode
+    Then the upstream received the batch unchanged, still lz4-encoded
+
+  Scenario: An export of exactly the limit is forwarded as it came
+    Given an upstream API
+    And a deltapack collector in front of it, recording to a directory, splitting what it forwards at the size of a batch decoded
+    When an exporter posts 1 gzip-compressed JSON batches of spans to "/v1/traces"
+    Then the upstream received the batch unchanged, still gzip-encoded

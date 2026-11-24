@@ -1693,6 +1693,24 @@ async fn a_splitting_collector(w: &mut Proxies, max: usize) {
     w.start_collector(&["--forward-max-body", &max.to_string()]).await;
 }
 
+#[given(
+    "a deltapack collector in front of it, recording to a directory, splitting what it forwards at the size of a batch decoded"
+)]
+async fn a_collector_splitting_at_a_batch(w: &mut Proxies) {
+    let max = batch(1).len();
+    w.start_collector(&["--forward-max-body", &max.to_string()]).await;
+}
+
+#[then(expr = "the upstream received the batch unchanged, still {word}-encoded")]
+async fn upstream_received_unsplit(w: &mut Proxies, coding: String) {
+    let recorded = w.recorded();
+    assert_eq!(recorded.len(), 1, "one request, not parts");
+    assert_eq!(recorded[0].0["content-encoding"], coding.as_str());
+    if coding == "lz4" {
+        assert!(recorded[0].1 == w.gzipped[0], "as it came");
+    }
+}
+
 /// (traceId, spanId) of every span of an OTLP/JSON export, in order.
 fn json_spans(body: &[u8]) -> Vec<(String, String)> {
     let v: serde_json::Value = serde_json::from_slice(body).unwrap();
