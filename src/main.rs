@@ -90,6 +90,8 @@ enum Mode {
         tenants: Tenants,
         #[command(flatten)]
         keys: Keys,
+        #[command(flatten)]
+        reads: Reads,
     },
     /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
     /// DPK1, decoded (gzip, deflate, br, zstd, snappy); forward each request as received when given a backend. Also accepts
@@ -129,6 +131,8 @@ enum Mode {
         tenants: Tenants,
         #[command(flatten)]
         keys: Keys,
+        #[command(flatten)]
+        reads: Reads,
     },
     /// Accept plain requests from a local tool and send them to a `deltapack server` as deltas.
     Client {
@@ -202,6 +206,19 @@ struct Keys {
     /// key is not recorded.
     #[arg(long, env = "DELTAPACK_KEY_DIR", requires = "tenant_header")]
     key_dir: Option<PathBuf>,
+}
+
+/// The read API: a trace's spans over HTTP, for a backend to link a span to its full prompt.
+#[derive(clap::Args, Clone, Default)]
+struct Reads {
+    /// Serve GET /v1/traces/{trace id} here: the trace's spans and log records as JSON lines, as
+    /// `log show --trace` writes them (`?since=2h`; `?tenant=` with --tenant-header). Off a loopback
+    /// address it needs --read-token-file: it serves prompts.
+    #[arg(long, env = "DELTAPACK_READ_LISTEN")]
+    read_listen: Option<SocketAddr>,
+    /// A file holding the bearer token a reader must send (`Authorization: Bearer …`).
+    #[arg(long, env = "DELTAPACK_READ_TOKEN_FILE", requires = "read_listen")]
+    read_token_file: Option<PathBuf>,
 }
 
 /// Whether a key file's mode lets anyone but its owner read it.
@@ -327,11 +344,17 @@ async fn main() -> Result<(), BoxError> {
             retention,
             tenants,
             keys,
+            reads,
         } => {
             let record = match record_dir {
                 Some(dir) => Some(Recorders::start(dir, record_window, rotate_bytes, retention, tenants, keys)?),
                 None => None,
             };
+            match (&record, reads.read_listen) {
+                (Some(r), Some(_)) => serve_reads(&reads, r.clone(), max_body).await?,
+                (None, Some(_)) => return Err("--read-listen needs --record-dir".into()),
+                _ => {}
+            }
             let store = Store::new(store_bytes, Duration::from_secs(ttl_seconds));
             let scope_headers =
                 scope_headers.iter().map(|h| HeaderName::try_from(h.as_str())).collect::<Result<_, _>>()?;
@@ -351,8 +374,12 @@ async fn main() -> Result<(), BoxError> {
             retention,
             tenants,
             keys,
+            reads,
         } => {
             let record = Some(Recorders::start(record_dir, record_window, rotate_bytes, retention, tenants, keys)?);
+            if reads.read_listen.is_some() {
+                serve_reads(&reads, record.clone().expect("collect records"), max_body).await?;
+            }
             let forward = Forward {
                 http,
                 upstream: forward.map(Arc::new),
@@ -1110,28 +1137,7 @@ fn run_log(cmd: LogCmd, key: Option<&log::Key>) -> Result<(), BoxError> {
                 until: until.map(|s| show::when(&s, now)).transpose()?,
                 attrs,
             };
-            for file in &files {
-                let name = serde_json::Value::from(file.display().to_string());
-                let mut index = 0;
-                // ponytail: every record is rebuilt to reach the ones wanted; `get` per indexed match
-                // when files outgrow a scan
-                open_log(file, max_body, key)?.scan(|record, body| {
-                    let meta = show::Meta::parse(&record.meta);
-                    if filter.wants(&meta) {
-                        let otlp = meta.decoded().then(|| show::rows(body, meta.path.and_then(show::signal)));
-                        let rows = otlp.flatten().unwrap_or_else(|| vec![show::whole(body)]);
-                        for mut row in rows.into_iter().filter(|r| filter.keeps(r)) {
-                            row["file"] = name.clone();
-                            row["record"] = index.into();
-                            row["received"] = meta.time.into();
-                            serde_json::to_writer(&mut out, &row)?;
-                            out.write_all(b"\n")?;
-                        }
-                    }
-                    index += 1;
-                    Ok(())
-                })?;
-            }
+            show_files(&files, &filter, max_body, key, &mut out)?;
         }
         LogCmd::Stats { files, max_body } => {
             let (mut total, mut unread) = ((0, 0, 0), 0);
@@ -1177,6 +1183,42 @@ fn run_log(cmd: LogCmd, key: Option<&log::Key>) -> Result<(), BoxError> {
 fn stats_line(name: &str, records: u64, body: u64, disk: u64) -> String {
     // the name last, after a tab: it may hold spaces
     format!("{records} records, {body} bytes in {disk} on disk ({:.1}x)\t{name}", body as f64 / disk.max(1) as f64)
+}
+
+/// The rows of `files` that `filter` keeps, one JSON line each, with their file, record and time
+/// received; how many.
+fn show_files(
+    files: &[PathBuf],
+    filter: &show::Filter,
+    max_body: usize,
+    key: Option<&log::Key>,
+    out: &mut impl Write,
+) -> io::Result<u64> {
+    let mut shown = 0;
+    for file in files {
+        let name = serde_json::Value::from(file.display().to_string());
+        let mut index = 0;
+        // ponytail: every record is rebuilt to reach the ones wanted; `get` per indexed match
+        // when files outgrow a scan
+        open_log(file, max_body, key)?.scan(|record, body| {
+            let meta = show::Meta::parse(&record.meta);
+            if filter.wants(&meta) {
+                let otlp = meta.decoded().then(|| show::rows(body, meta.path.and_then(show::signal)));
+                let rows = otlp.flatten().unwrap_or_else(|| vec![show::whole(body)]);
+                for mut row in rows.into_iter().filter(|r| filter.keeps(r)) {
+                    row["file"] = name.clone();
+                    row["record"] = index.into();
+                    row["received"] = meta.time.into();
+                    serde_json::to_writer(&mut *out, &row)?;
+                    out.write_all(b"\n")?;
+                    shown += 1;
+                }
+            }
+            index += 1;
+            Ok(())
+        })?;
+    }
+    Ok(shown)
 }
 
 /// Counts what is written to it, and keeps none of it.
@@ -1504,6 +1546,104 @@ fn server_metrics(stats: &Stats, store: &Store) -> String {
 }
 
 /// A plain-text Prometheus endpoint on its own address, so it never shadows an upstream path.
+/// The read API's address is refused off a loopback address without a token: it serves prompts.
+fn reads_allowed(addr: SocketAddr, token: Option<&str>) -> Result<(), String> {
+    match (addr.ip().is_loopback(), token) {
+        (false, None) => Err(format!("--read-listen {addr} serves prompts beyond this host: give --read-token-file")),
+        _ => Ok(()),
+    }
+}
+
+/// Whether `authorization` carries the token, compared in time that does not depend on where they
+/// differ.
+fn authorized(authorization: Option<&http::HeaderValue>, token: Option<&str>) -> bool {
+    let Some(token) = token else { return true };
+    let given = authorization.map_or(&b""[..], |v| v.as_bytes());
+    let want = [b"Bearer ", token.as_bytes()].concat();
+    given.len() == want.len() && given.iter().zip(&want).fold(0, |d, (a, b)| d | (a ^ b)) == 0
+}
+
+/// One read: the status and the JSON lines of a trace's rows.
+fn read_trace(record: &Recorders, path: &str, query: &str, max_body: usize) -> (StatusCode, Vec<u8>) {
+    let Some(id) =
+        path.strip_prefix("/v1/traces/").filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+    else {
+        return (StatusCode::NOT_FOUND, b"GET /v1/traces/{32 hex digits}\n".to_vec());
+    };
+    let param = |name: &str| query.split('&').find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='));
+    let since = match param("since").map(|s| show::when(s, unix_ms() as u64)).transpose() {
+        Ok(since) => since,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("{e}\n").into_bytes()),
+    };
+    let (dir, key) = match (&record.tenants.tenant_header, param("tenant")) {
+        (None, _) => (record.root.clone(), record.key.clone()),
+        (Some(_), None) => return (StatusCode::BAD_REQUEST, b"give ?tenant=\n".to_vec()),
+        (Some(_), Some(t)) => {
+            let mut h = HeaderMap::new();
+            if let Ok(v) = http::HeaderValue::from_str(t) {
+                h.insert(header::HOST, v); // any name: tenant_dir reads the values given
+            }
+            let tenant = tenant_dir(h.get_all(header::HOST));
+            let key = match &record.key_dir {
+                Some(d) => match read_key(&d.join(format!("{tenant}.key"))) {
+                    Ok(k) => Some(k),
+                    Err(_) => return (StatusCode::NOT_FOUND, Vec::new()),
+                },
+                None => record.key.clone(),
+            };
+            (record.root.join(tenant), key)
+        }
+    };
+    let files: Vec<PathBuf> = dpk_files(&dir).map(|f| f.into_iter().map(|f| f.0).collect()).unwrap_or_default();
+    let filter = show::Filter { trace: Some(id.to_ascii_lowercase()), since, ..show::Filter::default() };
+    let mut out = Vec::new();
+    match show_files(&files, &filter, max_body, key.as_ref(), &mut out) {
+        Ok(0) => (StatusCode::NOT_FOUND, out),
+        Ok(_) => (StatusCode::OK, out),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}\n").into_bytes()),
+    }
+}
+
+/// The read API (`--read-listen`): runs beside the collector until the process ends.
+async fn serve_reads(reads: &Reads, record: Recorders, max_body: usize) -> Result<(), BoxError> {
+    let addr = reads.read_listen.expect("called with --read-listen");
+    let token = reads.read_token_file.as_deref().map(std::fs::read_to_string).transpose()?;
+    let token: Option<Arc<str>> = token.map(|t| t.trim().into()).filter(|t: &Arc<str>| !t.is_empty());
+    reads_allowed(addr, token.as_deref())?;
+    let listener = TcpListener::bind(addr).await?;
+    tracing::info!(addr = %listener.local_addr()?, "reads");
+    tokio::spawn(async move {
+        let builder = auto::Builder::new(TokioExecutor::new());
+        while let Ok((stream, _)) = listener.accept().await {
+            let (record, token) = (record.clone(), token.clone());
+            let service = hyper::service::service_fn(move |r: Request<Incoming>| {
+                let (record, token) = (record.clone(), token.clone());
+                async move {
+                    let (status, body) = if !authorized(r.headers().get(header::AUTHORIZATION), token.as_deref()) {
+                        (StatusCode::UNAUTHORIZED, Vec::new())
+                    } else if r.method() != http::Method::GET {
+                        (StatusCode::METHOD_NOT_ALLOWED, Vec::new())
+                    } else {
+                        let (path, query) = (r.uri().path().to_owned(), r.uri().query().unwrap_or("").to_owned());
+                        let read = move || read_trace(&record, &path, &query, max_body);
+                        tokio::task::spawn_blocking(read)
+                            .await
+                            .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, Vec::new()))
+                    };
+                    let mut response = Response::new(Full::new(Bytes::from(body)));
+                    *response.status_mut() = status;
+                    response
+                        .headers_mut()
+                        .insert(header::CONTENT_TYPE, http::HeaderValue::from_static("application/x-ndjson"));
+                    Ok::<_, Infallible>(response)
+                }
+            });
+            tokio::spawn(builder.serve_connection(TokioIo::new(stream), service).into_owned());
+        }
+    });
+    Ok(())
+}
+
 async fn serve_metrics<F>(addr: SocketAddr, render: F) -> Result<(), BoxError>
 where
     F: Fn() -> String + Clone + Send + Sync + 'static,
@@ -1922,6 +2062,26 @@ mod tests {
         assert!(key_too_open(0o100640));
         assert!(key_too_open(0o100604));
         assert!(key_too_open(0o100644));
+    }
+
+    #[test]
+    fn reads_off_loopback_need_a_token() {
+        let at = |a: &str| a.parse::<SocketAddr>().unwrap();
+        assert!(reads_allowed(at("127.0.0.1:4319"), None).is_ok());
+        assert!(reads_allowed(at("[::1]:4319"), None).is_ok());
+        assert!(reads_allowed(at("0.0.0.0:4319"), None).is_err());
+        assert!(reads_allowed(at("10.0.0.5:4319"), Some("t")).is_ok());
+    }
+
+    #[test]
+    fn a_read_carries_the_token_or_is_refused() {
+        let v = |s: &str| http::HeaderValue::from_str(s).unwrap();
+        assert!(authorized(None, None), "no token set: anyone on the address");
+        assert!(authorized(Some(&v("Bearer s3cret")), Some("s3cret")));
+        for bad in ["Bearer s3cre", "Bearer s3cret2", "bearer s3cret", "s3cret", "Bearer S3cret", ""] {
+            assert!(!authorized(Some(&v(bad)), Some("s3cret")), "{bad:?}");
+        }
+        assert!(!authorized(None, Some("s3cret")));
     }
 
     #[test]

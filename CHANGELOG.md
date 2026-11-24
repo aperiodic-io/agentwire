@@ -5,6 +5,10 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- `--read-listen ADDR` (`collect`, `server --record-dir`) serves `GET /v1/traces/{trace id}`: the
+  trace's spans and log records as JSON lines, as `log show --trace` writes them (`?since=`,
+  `?tenant=`; sealed files read with the collector's key), so a backend can link a span to its
+  full prompt. `--read-token-file` sets a bearer token; off a loopback address one is required.
 - `collect --forward-max-body N` splits an OTLP export (JSON or protobuf, HTTP or gRPC) larger than
   N decoded bytes into exports that fit before forwarding it, by resource, then scope, then span,
   each part with its resource and scope; parts go decoded, and the first answer that is not a

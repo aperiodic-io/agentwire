@@ -67,6 +67,8 @@ struct Proc {
     _child: Child,
     addr: SocketAddr,
     metrics: Option<SocketAddr>,
+    /// --read-listen's address, when it serves reads
+    reads: Option<SocketAddr>,
 }
 
 /// A conversation's request after `turns` turns: a 57 KB system prompt of its own that does not
@@ -170,19 +172,21 @@ async fn spawn(args: &[&str]) -> Proc {
         .spawn()
         .unwrap();
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-    let (mut addr, mut metrics) = (None, None);
+    let (mut addr, mut metrics, mut reads) = (None, None, None);
     while addr.is_none() {
         let line = tokio::time::timeout(Duration::from_secs(30), lines.next_line()).await.unwrap().unwrap().unwrap();
         let logged = || line.split("addr=").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
         if line.contains(" metrics ") {
             metrics = Some(logged());
+        } else if line.contains(" reads ") {
+            reads = Some(logged());
         } else if line.contains(" listening ") {
             addr = Some(logged());
         }
     }
     // keep draining its log, or it blocks once the pipe is full
     tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
-    Proc { _child: child, addr: addr.unwrap(), metrics }
+    Proc { _child: child, addr: addr.unwrap(), metrics, reads }
 }
 
 impl Proxies {
@@ -1723,6 +1727,99 @@ async fn upstream_received_proto_parts(w: &mut Proxies, n: usize, path: String, 
     let total: usize = recorded.iter().map(|(_, b)| b.len()).sum();
     let sent: usize = w.grpc.iter().map(|g| g.0.len()).sum();
     assert!(total >= sent, "every span arrived: {total} bytes of {sent}");
+}
+
+#[given("a deltapack collector recording to a directory, serving reads")]
+async fn a_reading_collector(w: &mut Proxies) {
+    w.start_collector(&["--read-listen", "127.0.0.1:0"]).await;
+}
+
+#[given("a deltapack collector recording to a directory, serving reads to holders of a token")]
+async fn a_token_reading_collector(w: &mut Proxies) {
+    let token = scratch("token").join("t");
+    std::fs::write(&token, "s3cret\n").unwrap();
+    w.start_collector(&["--read-listen", "127.0.0.1:0", "--read-token-file", token.to_str().unwrap()]).await;
+}
+
+#[given(expr = "a deltapack collector recording to a directory, a directory per tenant by {string}, serving reads")]
+async fn a_tenant_reading_collector(w: &mut Proxies, header: String) {
+    w.start_collector(&["--tenant-header", &header, "--read-listen", "127.0.0.1:0"]).await;
+}
+
+impl Proxies {
+    async fn read(&self, path: &str, token: Option<&str>) -> (u16, Vec<serde_json::Value>) {
+        let addr = self.server.as_ref().unwrap().reads.expect("serving reads");
+        let mut r = self.http.get(format!("http://{addr}{path}"));
+        if let Some(t) = token {
+            r = r.header("authorization", format!("Bearer {t}"));
+        }
+        let r = r.send().await.unwrap();
+        let status = r.status().as_u16();
+        let text = r.text().await.unwrap();
+        let rows =
+            if status == 200 { text.lines().map(|l| serde_json::from_str(l).unwrap()).collect() } else { Vec::new() };
+        (status, rows)
+    }
+
+    fn check_trace(&self, rows: &[serde_json::Value], trace: usize, n: usize) {
+        assert_eq!(rows.len(), n, "{rows:?}");
+        for (turn, row) in (1..).zip(rows) {
+            assert_eq!(row["trace_id"], format!("{trace:032x}"));
+            let prompt = String::from_utf8(conversation(&format!("t{trace}"), turn).to_vec()).unwrap();
+            assert_eq!(row["attributes"]["gen_ai.input.messages"], prompt.as_str(), "span {turn}");
+        }
+    }
+}
+
+#[then(expr = r"GET \/v1\/traces\/ of trace {int} answers {int} with its {int} spans in order, each with its prompt")]
+async fn get_trace(w: &mut Proxies, trace: usize, status: u16, n: usize) {
+    let (got, rows) = w.read(&format!("/v1/traces/{trace:032x}"), None).await;
+    assert_eq!(got, status);
+    w.check_trace(&rows, trace, n);
+}
+
+#[then(expr = r"GET \/v1\/traces\/ of a trace never sent answers {int}")]
+async fn get_unknown_trace(w: &mut Proxies, status: u16) {
+    assert_eq!(w.read(&format!("/v1/traces/{:032x}", 999), None).await.0, status);
+}
+
+#[then(expr = r"GET \/v1\/traces\/not-an-id answers {int}")]
+async fn get_bad_id(w: &mut Proxies, status: u16) {
+    assert_eq!(w.read("/v1/traces/not-an-id", None).await.0, status);
+}
+
+#[then(expr = r"GET \/v1\/traces\/ of trace {int} without the token answers {int}")]
+async fn get_without_token(w: &mut Proxies, trace: usize, status: u16) {
+    assert_eq!(w.read(&format!("/v1/traces/{trace:032x}"), None).await.0, status);
+    assert_eq!(w.read(&format!("/v1/traces/{trace:032x}"), Some("wrong")).await.0, status);
+}
+
+#[then(
+    expr = r"GET \/v1\/traces\/ of trace {int} with the token answers {int} with its {int} spans in order, each with its prompt"
+)]
+async fn get_with_token(w: &mut Proxies, trace: usize, status: u16, n: usize) {
+    let (got, rows) = w.read(&format!("/v1/traces/{trace:032x}"), Some("s3cret")).await;
+    assert_eq!(got, status);
+    w.check_trace(&rows, trace, n);
+}
+
+#[then(expr = r"GET \/v1\/traces\/ of trace {int} without a tenant answers {int}")]
+async fn get_without_tenant(w: &mut Proxies, trace: usize, status: u16) {
+    assert_eq!(w.read(&format!("/v1/traces/{trace:032x}"), None).await.0, status);
+}
+
+#[then(expr = r"GET \/v1\/traces\/ of trace {int} for tenant {string} answers {int} with acme's {int} spans of it")]
+async fn get_for_tenant(w: &mut Proxies, trace: usize, tenant: String, status: u16, n: usize) {
+    let (got, rows) = w.read(&format!("/v1/traces/{trace:032x}?tenant={tenant}"), None).await;
+    assert_eq!(got, status);
+    assert_eq!(rows.len(), n);
+    let acme: Vec<_> =
+        w.sent_by("acme").iter().flat_map(|b| json_spans(b)).filter(|s| s.0 == format!("{trace:032x}")).collect();
+    let got: Vec<_> = rows
+        .iter()
+        .map(|r| (r["trace_id"].as_str().unwrap().to_owned(), r["span_id"].as_str().unwrap().to_owned()))
+        .collect();
+    assert_eq!(got, acme);
 }
 
 #[tokio::main]
