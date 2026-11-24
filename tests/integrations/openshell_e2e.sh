@@ -17,12 +17,23 @@ export HOME="$work/home" NO_COLOR=1 OPENSHELL_TELEMETRY_ENABLED=false
 mkdir -p "$HOME/.config/openshell" "$HOME/.local/state/openshell/gateway"
 export OPENSHELL_LOCAL_TLS_DIR="$HOME/.local/state/openshell/tls"
 pids=()
+logs() { for l in "$work"/*.log; do [ -e "$l" ] && { echo "== $l" >&2; tail -20 "$l" >&2; }; done; }
 cleanup() {
+  status=$?
+  # any failure, a failed command as much as a failed check, shows the services' logs
+  [ "$status" -ne 0 ] && logs
   [ -n "${OS:-}" ] && "$OS/openshell" sandbox delete e2e > /dev/null 2>&1 || true
   for p in "${pids[@]}"; do kill "$p" 2> /dev/null || true; done
 }
 trap cleanup EXIT
-fail() { echo "FAIL: $*" >&2; for l in "$work"/*.log; do echo "== $l" >&2; tail -20 "$l" >&2; done; exit 1; }
+fail() { echo "FAIL: $*" >&2; exit 1; }
+# a condition, retried every half second for so many seconds
+until_true() { local n=$(( $1 * 2 )); shift; for _ in $(seq "$n"); do "$@" && return 0; sleep 0.5; done; return 1; }
+# outputs are held in variables and matched there: `cmd | grep -q` under pipefail can fail on SIGPIPE
+connected() { local out; out=$("$OS/openshell" status 2>&1) || return 1; grep -Eq 'Status:[[:space:]]+Connected$' <<< "$out"; }
+ready() { local out; out=$("$OS/openshell" sandbox list 2>&1) || return 1; grep -Eq '^e2e[[:space:]].*[[:space:]]Ready$' <<< "$out"; }
+listening() { grep -q " listening " "$1" 2> /dev/null; }
+port_open() { (echo > "/dev/tcp/127.0.0.1/$1") 2> /dev/null; }
 
 # OpenShell's release, verified
 cd "$work"
@@ -40,9 +51,9 @@ cp "$here/deploy/openshell/gateway.toml" "$HOME/.config/openshell/gateway.toml"
 "$OS/openshell-gateway" generate-certs --output-dir "$OPENSHELL_LOCAL_TLS_DIR" --server-san host.openshell.internal
 (cd "$HOME/.local/state/openshell/gateway" && exec "$OS/openshell-gateway" --config "$HOME/.config/openshell/gateway.toml") > gateway.log 2>&1 &
 pids+=($!)
+until_true 120 port_open 17670 || fail "the gateway did not listen on 17670"
 "$OS/openshell" gateway add --local --name local https://127.0.0.1:17670 > /dev/null
-for _ in $(seq 60); do "$OS/openshell" status 2>&1 | grep -q Connected && break; sleep 1; done
-"$OS/openshell" status | grep -q Connected || fail "the gateway did not come up"
+until_true 60 connected || fail "the CLI did not connect to the gateway"
 grep -q "agent_endpoint=http://127.0.0.1:4318" gateway.log || fail "the gateway did not take the agent relay"
 
 # an "Anthropic" upstream that writes down what it receives, and deltapack in front of it
@@ -64,21 +75,25 @@ pids+=($!)
 pids+=($!)
 "$dp" collect --record-dir traces --listen 127.0.0.1:4318 > collect.log 2>&1 &
 pids+=($!)
-for _ in $(seq 30); do grep -q listening server.log && grep -q listening collect.log && break; sleep 0.5; done
+until_true 30 listening server.log || fail "deltapack server did not start (port 8080 taken?)"
+until_true 30 listening collect.log || fail "deltapack collect did not start (port 4318 taken?)"
+until_true 30 port_open 9099 || fail "the upstream did not start"
 
 # the profile as shipped, plus busybox: the only client the alpine image has
 sed 's#^  - /usr/bin/curl$#  - /bin/busybox\n  - /usr/bin/curl#' "$here/deploy/openshell/deltapack-anthropic.yaml" > profile.yaml
 grep -q /bin/busybox profile.yaml
+"$OS/openshell" profile lint -f "$here/deploy/openshell/deltapack-anthropic.yaml"
 "$OS/openshell" profile lint -f profile.yaml
 "$OS/openshell" profile lint -f "$here/deploy/openshell/deltapack-openai.yaml"
 "$OS/openshell" profile import -f profile.yaml
 ANTHROPIC_API_KEY=sk-ant-openshell-e2e "$OS/openshell" provider create --name recorded --type deltapack-anthropic --from-existing
 
-docker image inspect alpine:3.20 > /dev/null 2>&1 || docker pull -q alpine:3.20
-"$OS/openshell" sandbox create --name e2e --from alpine:3.20 --detach --provider recorded \
+IMAGE=alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+docker image inspect "$IMAGE" > /dev/null 2>&1 || until_true 30 docker pull -q "$IMAGE" || fail "docker pull $IMAGE"
+"$OS/openshell" sandbox create --name e2e --from "$IMAGE" --detach --provider recorded \
   --env ANTHROPIC_BASE_URL=http://host.openshell.internal:8080
-for _ in $(seq 60); do "$OS/openshell" sandbox list 2>&1 | grep -q "e2e .*Ready" && break; sleep 2; done
-"$OS/openshell" sandbox list | grep -q "e2e .*Ready" || fail "the sandbox did not become ready"
+# a cold runner pulls OpenShell's supervisor image too
+until_true 240 ready || fail "the sandbox did not become ready"
 run() { "$OS/openshell" sandbox exec e2e --no-tty -- sh -c "$1"; }
 
 # B: the model call
@@ -92,9 +107,12 @@ import json, sys
 seen = [json.loads(l) for l in open("seen.jsonl")]
 assert seen == [{"key": "sk-ant-openshell-e2e", "body": sys.argv[1]}], seen
 EOF
+until_true 10 ls rec/*.dpk > /dev/null 2>&1 || fail "no recording"
 recorded=$("$dp" log unpack rec/*.dpk)
 [ "$recorded" = "$body" ] || fail "the record is not the body: $recorded"
-if "$dp" log unpack rec/*.dpk | grep -q sk-ant; then fail "the key was recorded"; fi
+# the meta too (`log show` writes it out with each record), and the file's bytes
+everything=$("$dp" log show rec/*.dpk; "$dp" log ls rec/*.dpk; cat rec/*.dpk | tr -c '[:print:]' ' ')
+if grep -q sk-ant <<< "$everything"; then fail "the key was recorded"; fi
 
 # A: an agent's span, through the relay
 span=$(python3 - << 'EOF'
@@ -112,13 +130,17 @@ EOF
 )
 run "echo $span | base64 -d > /tmp/span.pb && wget -q -O /dev/null --header 'content-type: application/x-protobuf' \
   --post-file /tmp/span.pb \"\$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces\"" || fail "the relay refused the export"
-for _ in $(seq 20); do [ -n "$(ls traces/*.dpk 2> /dev/null)" ] && "$dp" log show traces/*.dpk 2> /dev/null | grep -q "hello from the agent" && break; sleep 0.5; done
-"$dp" log show --trace 0af7651916cd43dd8448eb211c80319c traces/*.dpk > shown.jsonl
-python3 - << 'EOF' || fail "collect did not hold the agent's span as relayed"
-import json
+shown() { local out; out=$("$dp" log show --trace 0af7651916cd43dd8448eb211c80319c traces/*.dpk 2> /dev/null) || return 1; [ -n "$out" ] && printf '%s\n' "$out" > shown.jsonl; }
+until_true 20 shown || fail "the agent's span did not reach collect"
+sandbox_id=$(docker ps --filter "label=openshell.ai/sandbox-name=e2e" --format '{{.Label "openshell.ai/sandbox-id"}}' | head -1)
+echo "sandbox id from Docker: ${sandbox_id:-none}"
+python3 - "$sandbox_id" << 'EOF' || fail "collect did not hold the agent's span as relayed"
+import json, sys
 (row,) = [json.loads(l) for l in open("shown.jsonl")]
 assert "hello from the agent" in row["attributes"]["gen_ai.input.messages"], row
 assert row["resource"]["openshell.telemetry.source"] == "agent", row
-assert row["resource"]["openshell.sandbox.id"], row
+want = sys.argv[1]
+got = row["resource"]["openshell.sandbox.id"]
+assert want and got == want, ("the relay's sandbox id is not the sandbox's", got, want)
 EOF
 echo "ok: OpenShell $VERSION, routes A and B"
