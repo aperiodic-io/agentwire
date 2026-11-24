@@ -1630,6 +1630,18 @@ async fn acme_reads_with_its_key(w: &mut Proxies) {
     assert!(log_fails(&wrong).await.contains("another key"));
 }
 
+#[then(expr = "a batch as tenant {string} is refused with {int}, so that its exporter retries")]
+async fn tenant_refused(w: &mut Proxies, tenant: String, status: u16) {
+    let to = w.server.as_ref().unwrap().addr;
+    w.post_batch(to, "/v1/traces", batch(1), &[("content-type", "application/json"), ("x-tenant", &tenant)]).await;
+    assert_eq!(w.posted.as_ref().unwrap().0, status);
+}
+
+#[then(expr = "the collector reports {int} request(s) it could not record")]
+async fn unrecorded(w: &mut Proxies, n: u64) {
+    assert_eq!(w.metric(&w.server, "deltapack_unrecorded_total").await, n);
+}
+
 #[then(expr = "nothing was recorded for {string}")]
 async fn nothing_for(w: &mut Proxies, tenant: String) {
     assert!(!w.record_dir.as_ref().unwrap().join(&tenant).exists());

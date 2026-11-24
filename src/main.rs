@@ -198,8 +198,17 @@ struct Keys {
     key_dir: Option<PathBuf>,
 }
 
-/// A key file: 64 hex digits.
+/// Whether a key file's mode lets anyone but its owner read it.
+fn key_too_open(mode: u32) -> bool {
+    mode & 0o077 != 0
+}
+
+/// A key file: 64 hex digits. One others can read is used, and warned of.
 fn read_key(path: &std::path::Path) -> io::Result<log::Key> {
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::metadata(path).is_ok_and(|m| key_too_open(m.permissions().mode())) {
+        eprintln!("warning: {} can be read by others than its owner: chmod 600 it", path.display());
+    }
     let text =
         std::fs::read_to_string(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
     log::Key::from_hex(&text).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
@@ -447,8 +456,17 @@ struct Recorders {
     key_dir: Option<PathBuf>,
     key: Option<log::Key>,
     /// by tenant ("" without --tenant-header)
-    open: Arc<Mutex<std::collections::HashMap<String, Recorder>>>,
+    open: Arc<Mutex<std::collections::HashMap<String, Slot>>>,
+    /// requests that named a tenant whose recording could not be started, or one past the cap
+    /// with --key-dir
+    unrecorded: Arc<AtomicU64>,
 }
+
+/// A tenant's recording, started once by its first request; a start that failed, and when.
+type Slot = Arc<std::sync::OnceLock<Result<Recorder, std::time::Instant>>>;
+
+/// A tenant whose recording could not be started is tried again after this long.
+const RETRY_START: Duration = Duration::from_secs(30);
 
 impl Recorders {
     fn start(
@@ -469,38 +487,73 @@ impl Recorders {
             key_dir: keys.key_dir,
             key,
             open: Default::default(),
+            unrecorded: Default::default(),
         };
         if r.tenants.tenant_header.is_none() {
             // one recording: started now, so that a directory it cannot use stops the process
             let one = Recording::start(r.root.clone(), window, rotate_bytes, r.retention.clone(), r.key.clone())?;
-            lock_open(&r.open).insert(String::new(), one);
+            lock_open(&r.open).insert(String::new(), Arc::new(Ok(one).into()));
         }
         Ok(r)
     }
 
-    /// The recording for a request; none when its tenant's cannot be started (logged).
+    /// The recording for a request; none when its tenant's cannot be started (logged once, counted,
+    /// tried again after [`RETRY_START`]), or the tenant is past the cap with --key-dir. A tenant's
+    /// start holds no lock but its own: other tenants' requests go on meanwhile.
     fn of(&self, headers: &HeaderMap) -> Option<Recorder> {
-        let Some(name) = &self.tenants.tenant_header else { return lock_open(&self.open).get("").cloned() };
-        let mut open = lock_open(&self.open);
-        let mut tenant = tenant_dir(headers.get(name));
-        if !open.contains_key(&tenant) && open.len() >= self.tenants.max_tenants {
-            tenant = "_other".into();
-        }
-        if let Some(r) = open.get(&tenant) {
-            return Some(r.clone());
-        }
-        // a tenant's own key (--key-dir), or the one for all
-        let key = match &self.key_dir {
-            Some(dir) => read_key(&dir.join(format!("{tenant}.key"))).map(Some),
-            None => Ok(self.key.clone()),
+        let tenant = match &self.tenants.tenant_header {
+            None => String::new(),
+            Some(name) => tenant_dir(headers.get_all(name)),
         };
-        let started = key.and_then(|key| {
-            Recording::start(self.root.join(&tenant), self.window, self.rotate_bytes, self.retention.clone(), key)
-        });
-        match started {
-            Ok(r) => Some(open.entry(tenant).or_insert(r).clone()),
-            Err(e) => {
-                tracing::error!(tenant, error = %e, "cannot record for this tenant; forwarding unrecorded");
+        let (tenant, slot) = {
+            let mut open = lock_open(&self.open);
+            let retry = |s: &Slot| matches!(s.get(), Some(Err(at)) if at.elapsed() >= RETRY_START);
+            let tenant = match open.get(&tenant) {
+                Some(s) if !retry(s) => {
+                    let s = s.clone();
+                    drop(open);
+                    return self.started(&tenant, s);
+                }
+                Some(_) => tenant,
+                // past the cap: a tenant with a key of its own is not sealed with another's
+                None if open.len() >= self.tenants.max_tenants && self.key_dir.is_some() => {
+                    self.unrecorded.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+                None if open.len() >= self.tenants.max_tenants => "_other".to_owned(),
+                None => tenant,
+            };
+            match open.get(&tenant) {
+                Some(s) if !retry(s) => (tenant, s.clone()),
+                _ => {
+                    let slot = Slot::default();
+                    open.insert(tenant.clone(), slot.clone());
+                    (tenant, slot)
+                }
+            }
+        };
+        self.started(&tenant, slot)
+    }
+
+    /// The slot's recording, started now if it is not yet.
+    fn started(&self, tenant: &str, slot: Slot) -> Option<Recorder> {
+        let start = || {
+            // a tenant's own key (--key-dir), or the one for all
+            let key = match &self.key_dir {
+                Some(dir) => read_key(&dir.join(format!("{tenant}.key"))).map(Some),
+                None => Ok(self.key.clone()),
+            };
+            let dir = self.root.join(tenant);
+            key.and_then(|key| Recording::start(dir, self.window, self.rotate_bytes, self.retention.clone(), key))
+                .map_err(|e| {
+                    tracing::error!(tenant, error = %e, "cannot record for this tenant; trying again in 30 s");
+                    std::time::Instant::now()
+                })
+        };
+        match slot.get_or_init(|| tokio::task::block_in_place(start)) {
+            Ok(r) => Some(r.clone()),
+            Err(_) => {
+                self.unrecorded.fetch_add(1, Ordering::Relaxed);
                 None
             }
         }
@@ -509,7 +562,10 @@ impl Recorders {
     /// Every recording's counters, summed.
     fn metrics(&self) -> String {
         let mut sum = [0; 5];
-        for r in lock_open(&self.open).values() {
+        // the recordings, taken out of the map so that routing waits for none of them
+        let started: Vec<Recorder> =
+            lock_open(&self.open).values().filter_map(|s| s.get().and_then(|r| r.as_ref().ok()).cloned()).collect();
+        for r in &started {
             for (s, n) in sum.iter_mut().zip(lock(r).counters()) {
                 *s += n;
             }
@@ -519,24 +575,34 @@ impl Recorders {
         names
             .iter()
             .zip(sum)
+            .chain(std::iter::once((&"unrecorded", self.unrecorded.load(Ordering::Relaxed))))
             .map(|(name, n)| format!("# TYPE deltapack_{name}_total counter\ndeltapack_{name}_total {n}\n"))
             .collect()
     }
 }
 
 fn lock_open(
-    m: &Mutex<std::collections::HashMap<String, Recorder>>,
-) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Recorder>> {
+    m: &Mutex<std::collections::HashMap<String, Slot>>,
+) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Slot>> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// A tenant's directory name, from its header: kept only if it cannot name another place (letters,
-/// digits, `.`, `_`, `-`; up to 64; not starting with `.`).
-fn tenant_dir(v: Option<&http::HeaderValue>) -> String {
-    let Some(v) = v else { return "_none".into() };
+/// A tenant's directory name, from its header: lowercase (so a case-insensitive file system cannot
+/// merge two), and kept only if it cannot name another place or a reserved name (letters, digits,
+/// `.`, `_`, `-`; up to 64; not starting with `.` or `_`). `_none` without the header, `_invalid`
+/// otherwise, and when it is given more than once (a gateway that appends instead of replacing it).
+fn tenant_dir(values: http::header::GetAll<'_, http::HeaderValue>) -> String {
+    let mut it = values.iter();
+    let v = match (it.next(), it.next()) {
+        (None, _) => return "_none".into(),
+        (Some(v), None) => v,
+        (Some(_), Some(_)) => return "_invalid".into(),
+    };
     let ok = |b: &u8| b.is_ascii_alphanumeric() || b"._-".contains(b);
     match v.as_bytes() {
-        t if !t.is_empty() && t.len() <= 64 && t[0] != b'.' && t.iter().all(ok) => String::from_utf8_lossy(t).into(),
+        t if !t.is_empty() && t.len() <= 64 && !b"._".contains(&t[0]) && t.iter().all(ok) => {
+            String::from_utf8_lossy(t).to_ascii_lowercase()
+        }
         _ => "_invalid".into(),
     }
 }
@@ -823,6 +889,14 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
         let grpc = self.grpc && grpc::is_grpc(request.headers());
         Box::pin(async move {
             let (parts, body) = request.into_parts();
+            // a tenant that cannot be recorded, and nothing to forward to: refused, so the exporter
+            // retries, rather than acknowledged and lost
+            if let (Some(None), None) = (&record, &upstream) {
+                return Ok(match grpc {
+                    true => grpc::error(grpc::Code::Unavailable, "cannot record for this tenant"),
+                    false => status(StatusCode::SERVICE_UNAVAILABLE),
+                });
+            }
             if let (true, Some(record)) = (grpc, &record) {
                 return Ok(export(&http, upstream.as_deref(), record.as_ref(), parts, body, max_body).await);
             }
@@ -1060,8 +1134,11 @@ impl Write for Counted {
 
 fn open_log(path: &std::path::Path, max_body: usize, key: Option<&log::Key>) -> io::Result<log::Reader<File>> {
     let mut r = log::Reader::open(File::open(path)?, max_body)?;
-    if let Some(key) = key {
-        r = r.with_key(key)?;
+    match key {
+        // a key, and a file that is not sealed: read, and said, since it could have replaced a sealed one
+        Some(_) if !r.is_sealed() => eprintln!("{}: not sealed; read without the key", path.display()),
+        Some(key) => r = r.with_key(key)?,
+        None => {}
     }
     if r.truncated {
         eprintln!("{}: the file ends inside a record; reading the records before it", path.display());
@@ -1657,16 +1734,36 @@ mod tests {
 
     #[test]
     fn a_tenant_names_a_directory_inside_the_record_directory_only() {
-        let dir = |v: &str| tenant_dir(Some(&http::HeaderValue::from_str(v).unwrap()));
-        assert_eq!(tenant_dir(None), "_none");
-        for ok in ["acme", "Acme-2", "a.b_c", "x".repeat(64).as_str()] {
-            assert_eq!(dir(ok), ok);
+        let dir = |vs: &[&str]| {
+            let mut h = HeaderMap::new();
+            for v in vs {
+                h.append("x-tenant", http::HeaderValue::from_bytes(v.as_bytes()).unwrap());
+            }
+            tenant_dir(h.get_all("x-tenant"))
+        };
+        assert_eq!(dir(&[]), "_none");
+        for ok in ["acme", "a.b_c", "x2-y", "x".repeat(64).as_str()] {
+            assert_eq!(dir(&[ok]), ok);
         }
-        for bad in ["", ".", "..", "../x", "a/b", ".hidden", "a b", "a\\b", "x".repeat(65).as_str(), "é"] {
-            assert_eq!(dir(bad), "_invalid", "{bad:?}");
+        assert_eq!(dir(&["Acme-2"]), "acme-2", "lowercase: one directory on any file system");
+        for bad in
+            ["", ".", "..", "../x", "a/b", ".hidden", "_none", "_other", "_x", "a b", "a\\b", "x".repeat(65).as_str()]
+        {
+            assert_eq!(dir(&[bad]), "_invalid", "{bad:?}");
         }
-        let bytes = http::HeaderValue::from_bytes(b"\xff").unwrap();
-        assert_eq!(tenant_dir(Some(&bytes)), "_invalid");
+        assert_eq!(dir(&["acme", "globex"]), "_invalid", "given twice");
+        let mut h = HeaderMap::new();
+        h.insert("x-tenant", http::HeaderValue::from_bytes(b"\xff").unwrap());
+        assert_eq!(tenant_dir(h.get_all("x-tenant")), "_invalid");
+    }
+
+    #[test]
+    fn a_key_file_others_can_read_is_warned_of() {
+        assert!(!key_too_open(0o100600));
+        assert!(!key_too_open(0o100400));
+        assert!(key_too_open(0o100640));
+        assert!(key_too_open(0o100604));
+        assert!(key_too_open(0o100644));
     }
 
     #[test]

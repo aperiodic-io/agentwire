@@ -15,9 +15,11 @@ Feature: Records sealed at rest
   Scenario: Each tenant's records are sealed with its own key, and a tenant without one is not recorded
     Given a directory of keys holding one for tenant "acme"
     And a deltapack collector recording to a directory, a directory per tenant by "x-tenant", each sealed with its key
-    When an exporter posts 3 batches as tenant "acme", 1 as tenant "globex" and 0 as no tenant
+    When an exporter posts 3 batches as tenant "acme", 0 as tenant "globex" and 0 as no tenant
     Then acme's batches read back with acme's key only
+    And a batch as tenant "globex" is refused with 503, so that its exporter retries
     And nothing was recorded for "globex"
+    And the collector reports 1 request it could not record
 
   Scenario: Lines packed with a key read back with the key only
     Given a key in a file

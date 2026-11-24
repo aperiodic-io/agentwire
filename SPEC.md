@@ -177,5 +177,9 @@ nonce `u64le(i) || 0x00000000` and the associated data `u64le(i) || u64le(back) 
 moved to another place, given another base or another meta does not open. `delta` is what a
 version-1 record holds. A reader MUST check `key_id` against its key, and MUST reject a record that
 does not open. `meta` is not sealed: a sealed file is indexed and listed without its key, and its
-trace ids (above) are readable. A sealed record's delta is against its base's body as a version-1
+trace ids (above) are readable, as is each record's size (`delta_len`). Nothing commits to how
+many records a file holds: records cut from its end are not detected (a file cut by a crash is
+read up to its last whole record, as any DPK1 file is); a record cut from elsewhere breaks every
+record after it. A reader given a key MUST refuse a file that is not sealed, since one written
+without the key could have replaced a sealed one. A sealed record's delta is against its base's body as a version-1
 record's is, so sealing costs 16 bytes a record and keeps the ratio.

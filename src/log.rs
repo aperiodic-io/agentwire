@@ -204,16 +204,15 @@ impl<R: Read + Seek> Reader<R> {
         self.sealed.is_some()
     }
 
-    /// Gives a sealed file its key; refused when the key is not the one it was sealed with. A file
-    /// that is not sealed is read as it is.
+    /// Gives a sealed file its key; refused when the key is not the one it was sealed with, and
+    /// when the file is not sealed (one written without a key could have replaced a sealed one).
     #[cfg(feature = "encrypt")]
     pub fn with_key(mut self, key: &Key) -> io::Result<Self> {
-        if let Some((salt, id)) = self.sealed {
-            if id != key.id() {
-                return Err(invalid("the file was sealed with another key"));
-            }
-            self.opener = Some(seal::Sealer::new(key, &salt));
+        let (salt, id) = self.sealed.ok_or_else(|| invalid("the file is not sealed"))?;
+        if id != key.id() {
+            return Err(invalid("the file was sealed with another key"));
         }
+        self.opener = Some(seal::Sealer::new(key, &salt));
         Ok(self)
     }
 
@@ -261,7 +260,12 @@ impl<R: Read + Seek> Reader<R> {
         let mut delta = vec![0; stored as usize];
         self.src.read_exact(&mut delta)?;
         if self.sealed.is_some() {
-            delta = self.unseal(i, delta)?;
+            #[cfg(feature = "encrypt")]
+            {
+                delta = self.unseal(i, delta)?;
+            }
+            #[cfg(not(feature = "encrypt"))]
+            return Err(sealed_needs_the_encrypt_feature());
         }
         let (header, frame) = codec::parse(&delta, self.max_body).map_err(invalid)?;
         if header.base != codec::hash(base) {
@@ -280,11 +284,11 @@ impl<R: Read + Seek> Reader<R> {
         let r = &self.records[i];
         opener.open(i as u64, r.back, &r.meta, &sealed)
     }
+}
 
-    #[cfg(not(feature = "encrypt"))]
-    fn unseal(&self, _: usize, _: Vec<u8>) -> io::Result<Vec<u8>> {
-        Err(invalid("the file is sealed: this build reads no sealed files"))
-    }
+#[cfg(not(feature = "encrypt"))]
+fn sealed_needs_the_encrypt_feature() -> io::Error {
+    invalid("the file is sealed: this build reads no sealed files")
 }
 
 /// The file header: its magic and version, then the window; for a sealed file, its salt and key id.
@@ -391,7 +395,7 @@ mod seal {
         }
     }
 
-    fn nonce(index: u64) -> Nonce {
+    pub(super) fn nonce(index: u64) -> Nonce {
         let mut n = [0; 12];
         n[..8].copy_from_slice(&index.to_le_bytes());
         n.into()
@@ -679,12 +683,35 @@ mod tests {
         }
 
         #[test]
-        fn a_file_not_sealed_reads_as_it_is_with_a_key() {
+        fn a_key_is_refused_for_a_file_not_sealed() {
             let mut w = Writer::new(Vec::new(), 4).unwrap();
             w.append(b"m", Bytes::from_static(b"plain")).unwrap();
-            let mut r = Reader::open(Cursor::new(w.into_inner()), 1 << 20).unwrap().with_key(&key(1)).unwrap();
+            let r = Reader::open(Cursor::new(w.into_inner()), 1 << 20).unwrap();
             assert!(!r.is_sealed());
-            assert_eq!(r.get(0).unwrap(), b"plain");
+            assert!(r.with_key(&key(1)).unwrap_err().to_string().contains("not sealed"));
+        }
+
+        #[test]
+        fn each_record_has_a_nonce_of_its_own() {
+            // the same delta and meta at two indexes: never the same keystream
+            let sealer = seal::Sealer::new(&key(1), &[7; 16]);
+            let (a, b) = (sealer.seal(0, 0, b"m", b"same").unwrap(), sealer.seal(1, 0, b"m", b"same").unwrap());
+            assert_ne!(a[..4], b[..4], "the ciphertexts differ, not only the tags");
+            assert_eq!(seal::nonce(0).as_slice(), [0; 12]);
+            assert_eq!(
+                seal::nonce(0x0102).as_slice(),
+                [2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "u64le(index), then 4 zero bytes"
+            );
+        }
+
+        #[test]
+        fn a_sealed_reader_shows_no_key_in_its_debug() {
+            let file = sealed_file(&key(0xab), &RECORDS);
+            let r = Reader::open(Cursor::new(file), 1 << 20).unwrap().with_key(&key(0xab)).unwrap();
+            let shown = format!("{r:?}");
+            assert!(shown.contains("Sealer"), "{shown}");
+            assert!(!shown.contains("171, 171") && !shown.contains("abab"), "no key bytes: {shown}");
         }
 
         #[test]

@@ -10,6 +10,8 @@ cap_lints = true
 # every test, the acceptance scenarios (the binary) included
 additional_cargo_args = ["--all-features"]
 exclude_re = [
+  # Only a build without the `encrypt` feature compiles it, and mutants run with --all-features.
+  "sealed_needs_the_encrypt_feature",
   # The Kani proofs (`#[cfg(kani)] mod proofs`): only Kani's build compiles them, so a mutant of one
   # builds the same test binary and no test can catch it. The kani job checks them.
   "( in | replace )(\\w+::)*proofs::",
