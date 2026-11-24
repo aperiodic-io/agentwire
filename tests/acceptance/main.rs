@@ -1405,6 +1405,134 @@ async fn ls_files(w: &mut Proxies) {
     }
 }
 
+#[given(expr = "a deltapack collector recording to a directory, a directory per tenant by {string}")]
+async fn a_tenant_collector(w: &mut Proxies, header: String) {
+    w.start_collector(&["--tenant-header", &header]).await;
+}
+
+#[given(
+    expr = "a deltapack collector recording to a directory, a directory per tenant by {string}, for at most {int} tenants"
+)]
+async fn a_capped_tenant_collector(w: &mut Proxies, header: String, max: usize) {
+    w.start_collector(&["--tenant-header", &header, "--max-tenants", &max.to_string()]).await;
+}
+
+impl Proxies {
+    /// Posts batch `turn` as `tenant` (none: no header), and remembers what went where.
+    async fn post_as(&mut self, tenant: Option<&str>, turn: usize) {
+        let body = batch(turn);
+        let to = self.server.as_ref().unwrap().addr;
+        let mut headers = vec![("content-type", "application/json")];
+        if let Some(t) = tenant {
+            headers.push(("x-tenant", t));
+        }
+        self.post_batch(to, "/v1/traces", body.clone(), &headers).await;
+        assert_eq!(self.posted.as_ref().unwrap().0, 200);
+        self.sent.push(Sent { body, response: Bytes::new(), first_of_conversation: false, relayed: 0 });
+        self.lines.push(Bytes::from(tenant.unwrap_or("").to_owned())); // who sent each, by index
+    }
+
+    /// The batches stored in `name` under the record directory, in order.
+    async fn stored_in(&self, name: &str) -> Vec<Bytes> {
+        let dir = self.record_dir.as_ref().unwrap().join(name);
+        bodies_of(&files_in(&dir).into_iter().map(|f| f.0).collect::<Vec<_>>()).await
+    }
+
+    fn sent_by(&self, tenant: &str) -> Vec<Bytes> {
+        self.sent
+            .iter()
+            .zip(&self.lines)
+            .filter(|(_, t)| &t[..] == tenant.as_bytes())
+            .map(|(s, _)| s.body.clone())
+            .collect()
+    }
+}
+
+#[when(expr = "an exporter posts {int} batches as tenant {string}, {int} as tenant {string} and {int} as no tenant")]
+async fn post_tenants(w: &mut Proxies, a: usize, ta: String, b: usize, tb: String, none: usize) {
+    let mut turn = 0;
+    for (n, t) in [(a, Some(ta.as_str())), (b, Some(tb.as_str())), (none, None)] {
+        for _ in 0..n {
+            turn += 1;
+            w.post_as(t, turn).await;
+        }
+    }
+}
+
+#[then(expr = "the directory {string} holds acme's {int} batches in order")]
+async fn holds_acme(w: &mut Proxies, dir: String, n: usize) {
+    let sent = w.sent_by("acme");
+    assert_eq!(sent.len(), n);
+    assert_eq!(w.stored_in(&dir).await, sent);
+}
+
+#[then(expr = "the directory {string} holds globex's {int} batches in order")]
+async fn holds_globex(w: &mut Proxies, dir: String, n: usize) {
+    let sent = w.sent_by("globex");
+    assert_eq!(sent.len(), n);
+    assert_eq!(w.stored_in(&dir).await, sent);
+}
+
+#[then(expr = "the directory {string} holds the batch that named no tenant")]
+async fn holds_none(w: &mut Proxies, dir: String) {
+    assert_eq!(w.stored_in(&dir).await, w.sent_by(""));
+}
+
+#[then(expr = "the collector reports {int} records stored")]
+async fn reports_records(w: &mut Proxies, n: u64) {
+    assert_eq!(w.metric(&w.server, "deltapack_recorded_total").await, n);
+}
+
+#[when(
+    expr = "an exporter posts a batch as each of the tenants {string}, {string}, {string}, {string} and {int} letters"
+)]
+async fn post_bad_tenants(w: &mut Proxies, a: String, b: String, c: String, d: String, long: usize) {
+    let long = "x".repeat(long);
+    for (turn, t) in [a.as_str(), &b, &c, &d, &long].into_iter().enumerate() {
+        w.post_as(Some(t), turn + 1).await;
+    }
+}
+
+#[then(expr = "the directory {string} holds those {int} batches in order")]
+async fn holds_all(w: &mut Proxies, dir: String, n: usize) {
+    let stored = w.stored_in(&dir).await;
+    assert_eq!(stored.len(), n);
+    assert!(stored.iter().eq(w.sent.iter().map(|s| &s.body)));
+}
+
+#[then(expr = "the record directory holds only the directory {string}")]
+async fn holds_only(w: &mut Proxies, dir: String) {
+    let names: Vec<String> = std::fs::read_dir(w.record_dir.as_ref().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, [dir]);
+    let parent = w.record_dir.as_ref().unwrap().parent().unwrap();
+    assert!(!parent.join("evil").exists() && !parent.join("_invalid").exists(), "nothing outside it");
+}
+
+#[when(expr = "an exporter posts a batch as each of the tenants {string}, {string} and {string}")]
+async fn post_three_tenants(w: &mut Proxies, a: String, b: String, c: String) {
+    for (turn, t) in [a, b, c].iter().enumerate() {
+        w.post_as(Some(t), turn + 1).await;
+    }
+}
+
+#[then(expr = "the record directory holds the directories {string}, {string} and {string}")]
+async fn holds_three(w: &mut Proxies, a: String, b: String, c: String) {
+    let mut names: Vec<String> = std::fs::read_dir(w.record_dir.as_ref().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, [a, b, c]);
+}
+
+#[then(expr = "the directory {string} holds tenant c's batch")]
+async fn holds_c(w: &mut Proxies, dir: String) {
+    assert_eq!(w.stored_in(&dir).await, w.sent_by("c"));
+}
+
 #[tokio::main]
 async fn main() {
     Proxies::cucumber().fail_on_skipped().run_and_exit("tests/acceptance/features").await;

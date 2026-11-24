@@ -5,6 +5,10 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- `collect` and `server --record-dir` take `--tenant-header NAME`: each request is recorded in the
+  directory of the tenant the header names (sanitised; `_none`, `_invalid`), each with its own
+  files, lock, retention and `--on-rotate`, so a tenant is deleted on its own. `--max-tenants`
+  (256) caps the directories; any more share `_other`. Metrics sum every tenant's.
 - `log show --attr KEY=VALUE` keeps the spans and log records with that attribute or resource
   attribute (repeat for all of them). `log estimate` reads lines on stdin and says what `pack` would
   store, and with `--usd-per-gb` what each would cost. `log ls` and `log unpack` take many files.

@@ -503,6 +503,8 @@ library does it in your own stack. Everything about it is in [docs/dpd1.md](docs
 | `--keep-bytes` | `DELTAPACK_KEEP_BYTES` | off | Delete the oldest closed files while the directory holds more than this. |
 | `--keep-days` | `DELTAPACK_KEEP_DAYS` | off | Delete closed files last written more than this many days ago (checked at start, at each new file, and hourly). |
 | `--on-rotate` | `DELTAPACK_ON_ROTATE` | off | Run this with `sh -c` once a file is closed, its path as `$1`: `'aws s3 mv "$1" s3://bucket/deltapack/'`. It should move or delete the file. One runs at a time, in order; wrap a slow one in `timeout`. Retention keeps a file until its command succeeds; files left from an earlier run, or whose command failed, get it again at start. |
+| `--tenant-header` | `DELTAPACK_TENANT_HEADER` | off | Record each request in the directory of the tenant this header names (`acme/` in the record directory; `_none` when absent, `_invalid` for a name with anything but letters, digits, `.`, `_`, `-`), each with its own files, lock, retention and `--on-rotate`. Set it at a gateway that authenticates the tenant. |
+| `--max-tenants` | `DELTAPACK_MAX_TENANTS` | 256 | Tenants given a directory of their own; any more share `_other`. |
 
 **`deltapack collect`**: a log sink that stores what is posted to it in DPK1 ([above](#quick-start-point-your-opentelemetry-exporter-at-deltapack)).
 
@@ -516,6 +518,8 @@ library does it in your own stack. Everything about it is in [docs/dpd1.md](docs
 | `--keep-bytes` | `DELTAPACK_KEEP_BYTES` | off | Delete the oldest closed files while the directory holds more than this. |
 | `--keep-days` | `DELTAPACK_KEEP_DAYS` | off | Delete closed files last written more than this many days ago (checked at start, at each new file, and hourly). |
 | `--on-rotate` | `DELTAPACK_ON_ROTATE` | off | Run this with `sh -c` once a file is closed, its path as `$1`: `'aws s3 mv "$1" s3://bucket/deltapack/'`. It should move or delete the file. One runs at a time, in order; wrap a slow one in `timeout`. Retention keeps a file until its command succeeds; files left from an earlier run, or whose command failed, get it again at start. |
+| `--tenant-header` | `DELTAPACK_TENANT_HEADER` | off | Record each request in the directory of the tenant this header names (`acme/` in the record directory; `_none` when absent, `_invalid` for a name with anything but letters, digits, `.`, `_`, `-`), each with its own files, lock, retention and `--on-rotate`. Set it at a gateway that authenticates the tenant. |
+| `--max-tenants` | `DELTAPACK_MAX_TENANTS` | 256 | Tenants given a directory of their own; any more share `_other`. |
 | `--max-body` | `DELTAPACK_MAX_BODY` | 64 MiB | The largest body stored, after decoding; larger ones are answered 413. |
 | `--metrics` | `DELTAPACK_METRICS` | off | |
 
@@ -556,9 +560,11 @@ previous copy of a prompt is usually in another block. In the end-to-end run abo
 3.26 MB. Keep the backend for
 search and dashboards, and Deltapack for the full bodies.
 
-**One collector for several tenants?** Run one per tenant, each with its own `--record-dir`: a
-tenant's files can then be kept, shipped and deleted on their own. A record cannot be deleted from
-the middle of a file without rewriting the records that delta against it.
+**One collector for several tenants?** Yes: `--tenant-header x-tenant` records each tenant in a
+directory of its own, so its files are kept, shipped and deleted on their own. The header is taken
+as given: set it at a gateway that authenticates the tenant, not at the exporter. A record cannot be
+deleted from the middle of a file without rewriting the records that delta against it, which is why
+tenants get files of their own.
 
 **What if the collector is down?** Exporters retry for a while, then drop the batch: neither
 Deltapack nor the backend behind `--forward` gets it. Where the backend must keep getting data,

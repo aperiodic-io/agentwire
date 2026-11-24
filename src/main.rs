@@ -85,6 +85,8 @@ enum Mode {
         rotate_bytes: u64,
         #[command(flatten)]
         retention: Retention,
+        #[command(flatten)]
+        tenants: Tenants,
     },
     /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
     /// DPK1, decoded (gzip, deflate, br, zstd, snappy); forward each request as received when given a backend. Also accepts
@@ -115,6 +117,8 @@ enum Mode {
         metrics: Option<SocketAddr>,
         #[command(flatten)]
         retention: Retention,
+        #[command(flatten)]
+        tenants: Tenants,
     },
     /// Accept plain requests from a local tool and send them to a `deltapack server` as deltas.
     Client {
@@ -156,6 +160,19 @@ struct Retention {
     /// whose command failed, get it again at start; retention keeps a file until its command succeeds.
     #[arg(long, env = "DELTAPACK_ON_ROTATE")]
     on_rotate: Option<String>,
+}
+
+/// Records kept apart by tenant: a directory each, in the record directory.
+#[derive(clap::Args, Clone, Default)]
+struct Tenants {
+    /// Record each request in the directory of the tenant this header names (letters, digits, `.`,
+    /// `_` and `-`, up to 64; `_none` when absent, `_invalid` otherwise), each with its own files,
+    /// lock, retention and --on-rotate. Set it at a gateway that authenticates the tenant.
+    #[arg(long, env = "DELTAPACK_TENANT_HEADER")]
+    tenant_header: Option<HeaderName>,
+    /// Tenants given a directory of their own; requests of any more share `_other`.
+    #[arg(long, env = "DELTAPACK_MAX_TENANTS", default_value_t = 256)]
+    max_tenants: usize,
 }
 
 #[derive(Subcommand)]
@@ -262,9 +279,10 @@ async fn main() -> Result<(), BoxError> {
             record_window,
             rotate_bytes,
             retention,
+            tenants,
         } => {
             let record = match record_dir {
-                Some(dir) => Some(Recording::start(dir, record_window, rotate_bytes, retention)?),
+                Some(dir) => Some(Recorders::start(dir, record_window, rotate_bytes, retention, tenants)?),
                 None => None,
             };
             let store = Store::new(store_bytes, Duration::from_secs(ttl_seconds));
@@ -273,8 +291,18 @@ async fn main() -> Result<(), BoxError> {
             let forward = Forward { http, upstream: Some(Arc::new(upstream)), record, max_body, grpc: false };
             run_server(vec![listen], store, Config { max_body, scope_headers }, metrics, forward).await
         }
-        Mode::Collect { listen, record_dir, forward, record_window, rotate_bytes, max_body, metrics, retention } => {
-            let record = Some(Recording::start(record_dir, record_window, rotate_bytes, retention)?);
+        Mode::Collect {
+            listen,
+            record_dir,
+            forward,
+            record_window,
+            rotate_bytes,
+            max_body,
+            metrics,
+            retention,
+            tenants,
+        } => {
+            let record = Some(Recorders::start(record_dir, record_window, rotate_bytes, retention, tenants)?);
             let forward = Forward { http, upstream: forward.map(Arc::new), record, max_body, grpc: true };
             let config = Config { max_body, ..Config::default() };
             run_server(listen, Store::new(1 << 30, Duration::from_secs(1800)), config, metrics, forward).await
@@ -316,7 +344,7 @@ async fn run_server(
     if let Some(addr) = metrics {
         let (stats, store, record) = (layer.stats().clone(), store.clone(), forward.record.clone());
         serve_metrics(addr, move || {
-            server_metrics(&stats, &store) + &record.as_ref().map_or_else(String::new, |r| lock(r).metrics())
+            server_metrics(&stats, &store) + &record.as_ref().map_or_else(String::new, Recorders::metrics)
         })
         .await?;
     }
@@ -372,6 +400,91 @@ async fn shutdown_signal() {
 }
 
 type Recorder = Arc<Mutex<Recording>>;
+
+/// Where requests are recorded: the record directory, or with --tenant-header a directory per
+/// tenant in it, each recording started at its tenant's first request.
+#[derive(Clone)]
+struct Recorders {
+    root: PathBuf,
+    window: usize,
+    rotate_bytes: u64,
+    retention: Retention,
+    tenants: Tenants,
+    /// by tenant ("" without --tenant-header)
+    open: Arc<Mutex<std::collections::HashMap<String, Recorder>>>,
+}
+
+impl Recorders {
+    fn start(
+        root: PathBuf,
+        window: usize,
+        rotate_bytes: u64,
+        retention: Retention,
+        tenants: Tenants,
+    ) -> io::Result<Self> {
+        let r = Recorders { root, window, rotate_bytes, retention, tenants, open: Default::default() };
+        if r.tenants.tenant_header.is_none() {
+            // one recording: started now, so that a directory it cannot use stops the process
+            let one = Recording::start(r.root.clone(), window, rotate_bytes, r.retention.clone())?;
+            lock_open(&r.open).insert(String::new(), one);
+        }
+        Ok(r)
+    }
+
+    /// The recording for a request; none when its tenant's cannot be started (logged).
+    fn of(&self, headers: &HeaderMap) -> Option<Recorder> {
+        let Some(name) = &self.tenants.tenant_header else { return lock_open(&self.open).get("").cloned() };
+        let mut open = lock_open(&self.open);
+        let mut tenant = tenant_dir(headers.get(name));
+        if !open.contains_key(&tenant) && open.len() >= self.tenants.max_tenants {
+            tenant = "_other".into();
+        }
+        if let Some(r) = open.get(&tenant) {
+            return Some(r.clone());
+        }
+        match Recording::start(self.root.join(&tenant), self.window, self.rotate_bytes, self.retention.clone()) {
+            Ok(r) => Some(open.entry(tenant).or_insert(r).clone()),
+            Err(e) => {
+                tracing::error!(tenant, error = %e, "cannot record for this tenant; forwarding unrecorded");
+                None
+            }
+        }
+    }
+
+    /// Every recording's counters, summed.
+    fn metrics(&self) -> String {
+        let mut sum = [0; 5];
+        for r in lock_open(&self.open).values() {
+            for (s, n) in sum.iter_mut().zip(lock(r).counters()) {
+                *s += n;
+            }
+        }
+        let names =
+            ["recorded", "recorded_body_bytes", "recorded_file_bytes", "record_failures", "rotate_command_failures"];
+        names
+            .iter()
+            .zip(sum)
+            .map(|(name, n)| format!("# TYPE deltapack_{name}_total counter\ndeltapack_{name}_total {n}\n"))
+            .collect()
+    }
+}
+
+fn lock_open(
+    m: &Mutex<std::collections::HashMap<String, Recorder>>,
+) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Recorder>> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// A tenant's directory name, from its header: kept only if it cannot name another place (letters,
+/// digits, `.`, `_`, `-`; up to 64; not starting with `.`).
+fn tenant_dir(v: Option<&http::HeaderValue>) -> String {
+    let Some(v) = v else { return "_none".into() };
+    let ok = |b: &u8| b.is_ascii_alphanumeric() || b"._-".contains(b);
+    match v.as_bytes() {
+        t if !t.is_empty() && t.len() <= 64 && t[0] != b'.' && t.iter().all(ok) => String::from_utf8_lossy(t).into(),
+        _ => "_invalid".into(),
+    }
+}
 
 fn lock(r: &Recorder) -> std::sync::MutexGuard<'_, Recording> {
     // every append completes, or fails and moves to a new file, under the lock
@@ -550,19 +663,10 @@ impl Recording {
         Ok(())
     }
 
-    fn metrics(&self) -> String {
+    /// Records, their bytes, bytes of the files written, failed writes, failed --on-rotate commands.
+    fn counters(&self) -> [u64; 5] {
         let on_disk = self.closed + std::fs::metadata(&self.path).map_or(0, |m| m.len());
-        format!(
-            "# TYPE deltapack_recorded_total counter\ndeltapack_recorded_total {}\n\
-             # TYPE deltapack_recorded_body_bytes_total counter\ndeltapack_recorded_body_bytes_total {}\n\
-             # TYPE deltapack_recorded_file_bytes_total counter\ndeltapack_recorded_file_bytes_total {on_disk}\n\
-             # TYPE deltapack_record_failures_total counter\ndeltapack_record_failures_total {}\n\
-             # TYPE deltapack_rotate_command_failures_total counter\ndeltapack_rotate_command_failures_total {}\n",
-            self.recorded,
-            self.body_bytes,
-            self.failures,
-            self.command_failures.load(Ordering::Relaxed),
-        )
+        [self.recorded, self.body_bytes, on_disk, self.failures, self.command_failures.load(Ordering::Relaxed)]
     }
 }
 
@@ -625,7 +729,7 @@ fn unix_ms() -> u128 {
 struct Forward {
     http: reqwest::Client,
     upstream: Option<Arc<reqwest::Url>>,
-    record: Option<Recorder>,
+    record: Option<Recorders>,
     max_body: usize,
     /// `collect`: take OTLP/gRPC Export calls too
     grpc: bool,
@@ -641,13 +745,14 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
     }
 
     fn call(&mut self, request: Request<InnerBody<Incoming>>) -> Self::Future {
-        let (http, upstream, record, max_body) =
-            (self.http.clone(), self.upstream.clone(), self.record.clone(), self.max_body);
+        let (http, upstream, max_body) = (self.http.clone(), self.upstream.clone(), self.max_body);
+        // which recording, by the request's tenant; none when its tenant's cannot be started
+        let record = self.record.as_ref().map(|r| r.of(request.headers()));
         let grpc = self.grpc && grpc::is_grpc(request.headers());
         Box::pin(async move {
             let (parts, body) = request.into_parts();
             if let (true, Some(record)) = (grpc, &record) {
-                return Ok(export(&http, upstream.as_deref(), record, parts, body, max_body).await);
+                return Ok(export(&http, upstream.as_deref(), record.as_ref(), parts, body, max_body).await);
             }
             let (Some(record), upstream) = (record, &upstream) else {
                 let upstream = upstream.as_ref().expect("a server without a recorder has an upstream");
@@ -661,7 +766,9 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
                 Ok(d) => d,
                 Err(code) => return Ok(status(code)),
             };
-            store(&record, &parts, &encoding, stored).await;
+            if let Some(record) = &record {
+                store(record, &parts, &encoding, stored).await;
+            }
             Ok(match upstream {
                 Some(upstream) => forward(&http, upstream, &parts, body).await,
                 None => ack(&parts.headers),
@@ -701,7 +808,7 @@ async fn store(record: &Recorder, parts: &http::request::Parts, encoding: &str, 
 async fn export(
     http: &reqwest::Client,
     upstream: Option<&reqwest::Url>,
-    record: &Recorder,
+    record: Option<&Recorder>,
     mut parts: http::request::Parts,
     body: InnerBody<Incoming>,
     max_body: usize,
@@ -724,7 +831,9 @@ async fn export(
     } else {
         body.slice_ref(message)
     };
-    store(record, &parts, "-", message.clone()).await;
+    if let Some(record) = record {
+        store(record, &parts, "-", message.clone()).await;
+    }
     let Some(upstream) = upstream else { return grpc::ok(b"") };
     // OTLP/HTTP: the same message, as protobuf, at the signal's path; the request's other headers
     // (authorization, user-agent) go along
@@ -1381,7 +1490,7 @@ mod tests {
             })
             .collect();
         assert_eq!(bodies, [&b"before"[..], b"after"]);
-        assert!(r.metrics().contains("deltapack_record_failures_total 1\n"));
+        assert_eq!(r.counters()[3], 1, "one failed write");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1466,6 +1575,20 @@ mod tests {
         assert_eq!(listed, [("1-x.dpk".into(), 7), ("2-x.dpk".into(), 7)]);
         assert!(dpk_files(&dir.join("missing")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_tenant_names_a_directory_inside_the_record_directory_only() {
+        let dir = |v: &str| tenant_dir(Some(&http::HeaderValue::from_str(v).unwrap()));
+        assert_eq!(tenant_dir(None), "_none");
+        for ok in ["acme", "Acme-2", "a.b_c", "x".repeat(64).as_str()] {
+            assert_eq!(dir(ok), ok);
+        }
+        for bad in ["", ".", "..", "../x", "a/b", ".hidden", "a b", "a\\b", "x".repeat(65).as_str(), "é"] {
+            assert_eq!(dir(bad), "_invalid", "{bad:?}");
+        }
+        let bytes = http::HeaderValue::from_bytes(b"\xff").unwrap();
+        assert_eq!(tenant_dir(Some(&bytes)), "_invalid");
     }
 
     #[test]
