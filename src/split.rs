@@ -57,7 +57,7 @@ fn varint(out: &mut Vec<u8>, mut v: u64) {
 /// Field `n`, length-delimited, holding `payload`.
 fn field(n: u64, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len() + 12);
-    varint(&mut out, n << 3 | 2);
+    varint(&mut out, (n << 3) + 2);
     varint(&mut out, payload.len() as u64);
     out.extend_from_slice(payload);
     out
@@ -115,7 +115,7 @@ fn split_json(v: &Value, path: &[&str], max: usize) -> Vec<Value> {
     let room = len(&context);
     let (mut parts, mut part, mut size) = (Vec::new(), Vec::new(), room);
     for item in items {
-        let n = len(item) + 1; // and its comma
+        let n = len(item);
         if room + n > max && !deeper.is_empty() {
             if !part.is_empty() {
                 parts.push(with(std::mem::take(&mut part)));
@@ -126,12 +126,13 @@ fn split_json(v: &Value, path: &[&str], max: usize) -> Vec<Value> {
             }
             continue;
         }
-        if !part.is_empty() && size + n > max {
+        // after the first, an item costs its comma too
+        if !part.is_empty() && size + 1 + n > max {
             parts.push(with(std::mem::take(&mut part)));
             size = room;
         }
+        size += n + usize::from(!part.is_empty());
         part.push(item.clone());
-        size += n;
     }
     if !part.is_empty() || parts.is_empty() {
         parts.push(with(part));
@@ -219,6 +220,74 @@ mod tests {
                 assert!(p.len() <= max || spans(std::slice::from_ref(p)).len() == 1, "{} > {max}", p.len());
             }
         }
+    }
+
+    /// Each part's size and spans, checked: every span in order with its resource and scope, and no
+    /// part over `max` unless it holds a single span.
+    fn check(body: &[u8], signal: Signal, max: usize) -> Vec<Vec<u8>> {
+        let parts = split(body, signal, max).unwrap();
+        assert_eq!(spans(&parts), spans(&[body.to_vec()]), "max {max}");
+        for p in &parts {
+            assert!(p.len() <= max || spans(std::slice::from_ref(p)).len() == 1, "{} > {max}", p.len());
+        }
+        parts
+    }
+
+    #[test]
+    fn every_limit_gives_parts_that_fit_holding_every_span_in_order() {
+        // resources of different sizes, so a small one waits while a large one is split
+        let body = [export(1, 1, 1, 10), export(1, 2, 3, 100), export(2, 1, 2, 40)].concat();
+        for max in (150..1200).step_by(7) {
+            check(&body, Signal::Traces, max);
+        }
+        let json = serde_json::to_vec(&json_export(3, 4, 60)).unwrap();
+        for max in (120..1500).step_by(7) {
+            for p in check(&json, Signal::Traces, max) {
+                assert!(p.len() <= max || spans(std::slice::from_ref(&p)).len() == 1, "{} > {max}", p.len());
+            }
+        }
+    }
+
+    #[test]
+    fn a_resource_waiting_in_a_part_goes_before_one_that_is_split() {
+        let small = export(1, 1, 1, 10);
+        let large = export(1, 2, 3, 100);
+        let body = [small.clone(), large.clone()].concat();
+        let parts = split(&body, Signal::Traces, large.len() / 2).unwrap();
+        assert_eq!(parts[0], small, "the small resource first, whole");
+        assert_eq!(spans(&parts), spans(&[body]));
+    }
+
+    #[test]
+    fn a_resource_that_fits_exactly_is_kept_whole() {
+        let one = export(1, 2, 2, 50);
+        let body = [one.clone(), export(1, 2, 2, 50)].concat();
+        let parts = split(&body, Signal::Traces, one.len()).unwrap();
+        assert_eq!(parts.len(), 2, "a resource a part, not split into its scopes");
+        assert_eq!(parts[0].len(), one.len());
+    }
+
+    #[test]
+    fn json_parts_hold_as_many_spans_as_fit_exactly() {
+        let size = |k: usize| serde_json::to_vec(&json_export(1, k, 40)).unwrap().len();
+        let body = serde_json::to_vec(&json_export(1, 10, 40)).unwrap();
+        for max in [size(3), size(3) + 1, size(4) - 1] {
+            let parts = split(&body, Signal::Traces, max).unwrap();
+            let per: Vec<usize> = parts.iter().map(|p| spans(std::slice::from_ref(p)).len()).collect();
+            assert_eq!(per, [3, 3, 3, 1], "max {max}");
+            assert!(parts.iter().all(|p| p.len() <= max));
+        }
+        // a resource exactly the limit's size is not split into its scopes
+        let two = serde_json::to_vec(&json!({"resourceSpans": [json_export(1, 2, 40)["resourceSpans"][0], json_export(1, 2, 40)["resourceSpans"][0]]})).unwrap();
+        assert_eq!(split(&two, Signal::Traces, size(2)).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_field_that_is_not_a_message_where_a_resource_belongs_is_no_export() {
+        // fixed64 (wire type 1) as field 1, its 8 bytes themselves valid protobuf
+        assert_eq!(split(&pb(1, 1, &[8, 1, 8, 1, 8, 1, 8, 1]), Signal::Traces, 1), None);
+        assert_eq!(field(1, b"ab"), pb(1, 2, b"ab"));
+        assert_eq!(field(300, b""), [0xe2, 0x12, 0], "a field number past one byte");
     }
 
     #[test]
