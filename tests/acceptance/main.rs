@@ -1677,6 +1677,54 @@ async fn unpack_with_key(w: &mut Proxies) {
     assert!(out == jsonl(&w.lines));
 }
 
+#[given(
+    expr = "a deltapack collector in front of it, recording to a directory, splitting what it forwards at {int} bytes"
+)]
+async fn a_splitting_collector(w: &mut Proxies, max: usize) {
+    w.start_collector(&["--forward-max-body", &max.to_string()]).await;
+}
+
+/// (traceId, spanId) of every span of an OTLP/JSON export, in order.
+fn json_spans(body: &[u8]) -> Vec<(String, String)> {
+    let v: serde_json::Value = serde_json::from_slice(body).unwrap();
+    let mut out = Vec::new();
+    for rs in v["resourceSpans"].as_array().unwrap() {
+        for ss in rs["scopeSpans"].as_array().unwrap() {
+            for span in ss["spans"].as_array().unwrap() {
+                out.push((span["traceId"].as_str().unwrap().to_owned(), span["spanId"].as_str().unwrap().to_owned()));
+            }
+        }
+    }
+    out
+}
+
+#[then(expr = "the upstream received each batch in parts of at most {int} bytes, holding its spans in order")]
+async fn upstream_received_parts(w: &mut Proxies, max: usize) {
+    let recorded = w.recorded();
+    assert!(recorded.len() > w.sent.len(), "{} requests for {} batches", recorded.len(), w.sent.len());
+    for (headers, body) in &recorded {
+        assert!(body.len() <= max, "{} bytes", body.len());
+        assert!(headers.get("content-encoding").is_none(), "parts go decoded");
+    }
+    let received: Vec<_> = recorded.iter().flat_map(|(_, b)| json_spans(b)).collect();
+    let sent: Vec<_> = w.sent.iter().flat_map(|s| json_spans(&s.body)).collect();
+    assert_eq!(received, sent);
+}
+
+#[then(expr = "the upstream received {int} protobuf parts at {string}, each of at most {int} bytes")]
+async fn upstream_received_proto_parts(w: &mut Proxies, n: usize, path: String, max: usize) {
+    let recorded = w.recorded();
+    assert_eq!(recorded.len(), n);
+    for (headers, body) in &recorded {
+        assert!(body.len() <= max, "{} bytes", body.len());
+        assert_eq!(headers["content-type"], "application/x-protobuf");
+    }
+    assert!(w.upstream_paths().iter().all(|p| *p == path));
+    let total: usize = recorded.iter().map(|(_, b)| b.len()).sum();
+    let sent: usize = w.grpc.iter().map(|g| g.0.len()).sum();
+    assert!(total >= sent, "every span arrived: {total} bytes of {sent}");
+}
+
 #[tokio::main]
 async fn main() {
     Proxies::cucumber().fail_on_skipped().run_and_exit("tests/acceptance/features").await;

@@ -38,6 +38,7 @@ use tower_layer::Layer;
 
 mod grpc;
 mod show;
+mod split;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ResBody = UnsyncBoxBody<Bytes, BoxError>;
@@ -115,6 +116,11 @@ enum Mode {
         /// The largest body stored, after decoding.
         #[arg(long, env = "DELTAPACK_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
+        /// Split an OTLP export larger than this (decoded) into exports that fit before forwarding
+        /// it, for backends with a body limit (New Relic 1 MB, Datadog 15 MiB): by resource, then
+        /// scope, then span. The record holds the whole export.
+        #[arg(long, env = "DELTAPACK_FORWARD_MAX_BODY", requires = "forward")]
+        forward_max_body: Option<usize>,
         #[arg(long, env = "DELTAPACK_METRICS")]
         metrics: Option<SocketAddr>,
         #[command(flatten)]
@@ -329,7 +335,8 @@ async fn main() -> Result<(), BoxError> {
             let store = Store::new(store_bytes, Duration::from_secs(ttl_seconds));
             let scope_headers =
                 scope_headers.iter().map(|h| HeaderName::try_from(h.as_str())).collect::<Result<_, _>>()?;
-            let forward = Forward { http, upstream: Some(Arc::new(upstream)), record, max_body, grpc: false };
+            let forward =
+                Forward { http, upstream: Some(Arc::new(upstream)), record, max_body, grpc: false, split: None };
             run_server(vec![listen], store, Config { max_body, scope_headers }, metrics, forward).await
         }
         Mode::Collect {
@@ -339,13 +346,21 @@ async fn main() -> Result<(), BoxError> {
             record_window,
             rotate_bytes,
             max_body,
+            forward_max_body,
             metrics,
             retention,
             tenants,
             keys,
         } => {
             let record = Some(Recorders::start(record_dir, record_window, rotate_bytes, retention, tenants, keys)?);
-            let forward = Forward { http, upstream: forward.map(Arc::new), record, max_body, grpc: true };
+            let forward = Forward {
+                http,
+                upstream: forward.map(Arc::new),
+                record,
+                max_body,
+                grpc: true,
+                split: forward_max_body,
+            };
             let config = Config { max_body, ..Config::default() };
             run_server(listen, Store::new(1 << 30, Duration::from_secs(1800)), config, metrics, forward).await
         }
@@ -902,6 +917,8 @@ struct Forward {
     max_body: usize,
     /// `collect`: take OTLP/gRPC Export calls too
     grpc: bool,
+    /// --forward-max-body
+    split: Option<usize>,
 }
 
 impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
@@ -914,7 +931,7 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
     }
 
     fn call(&mut self, request: Request<InnerBody<Incoming>>) -> Self::Future {
-        let (http, upstream, max_body) = (self.http.clone(), self.upstream.clone(), self.max_body);
+        let (http, upstream, max_body, split) = (self.http.clone(), self.upstream.clone(), self.max_body, self.split);
         // which recording, by the request's tenant; none when its tenant's cannot be started
         let record = self.record.as_ref().map(|r| r.of(request.headers()));
         let grpc = self.grpc && grpc::is_grpc(request.headers());
@@ -929,7 +946,7 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
                 });
             }
             if let (true, Some(record)) = (grpc, &record) {
-                return Ok(export(&http, upstream.as_deref(), record.as_ref(), parts, body, max_body).await);
+                return Ok(export(&http, upstream.as_deref(), record.as_ref(), parts, body, max_body, split).await);
             }
             let (Some(record), upstream) = (record, &upstream) else {
                 let upstream = upstream.as_ref().expect("a server without a recorder has an upstream");
@@ -943,12 +960,17 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
                 Ok(d) => d,
                 Err(code) => return Ok(status(code)),
             };
+            let pieces = match (split, show::signal(parts.uri.path())) {
+                (Some(max), Some(signal)) if stored.len() > max => split::split(&stored, signal, max),
+                _ => None,
+            };
             if let Some(record) = &record {
                 store(record, &parts, &encoding, stored).await;
             }
-            Ok(match upstream {
-                Some(upstream) => forward(&http, upstream, &parts, body).await,
-                None => ack(&parts.headers),
+            Ok(match (upstream, pieces) {
+                (Some(upstream), Some(pieces)) => forward_pieces(&http, upstream, parts, pieces).await,
+                (Some(upstream), None) => forward(&http, upstream, &parts, body).await,
+                (None, _) => ack(&parts.headers),
             })
         })
     }
@@ -989,6 +1011,7 @@ async fn export(
     mut parts: http::request::Parts,
     body: InnerBody<Incoming>,
     max_body: usize,
+    split: Option<usize>,
 ) -> Response<ResBody> {
     let Some(otlp_path) = grpc::otlp_http_path(parts.uri.path()) else {
         return grpc::error(grpc::Code::Unimplemented, "not an OTLP Export method");
@@ -1019,7 +1042,14 @@ async fn export(
     for name in ["grpc-encoding", "grpc-accept-encoding", "grpc-timeout", "content-length"] {
         parts.headers.remove(name);
     }
-    let response = forward(http, upstream, &parts, message).await;
+    let pieces = match (split, show::signal(otlp_path)) {
+        (Some(max), Some(signal)) if message.len() > max => split::split(&message, signal, max),
+        _ => None,
+    };
+    let response = match pieces {
+        Some(pieces) => forward_pieces(http, upstream, parts, pieces).await,
+        None => forward(http, upstream, &parts, message).await,
+    };
     let code = grpc::code_for(response.status());
     if code != grpc::Code::Ok {
         return grpc::error(code, "the backend refused the export");
@@ -1200,6 +1230,26 @@ async fn forward(
             status(StatusCode::BAD_GATEWAY)
         }
     }
+}
+
+/// An export split by --forward-max-body, sent one piece after another, decoded: the first answer
+/// that is not a success, or the last.
+async fn forward_pieces(
+    http: &reqwest::Client,
+    upstream: &reqwest::Url,
+    mut parts: http::request::Parts,
+    pieces: Vec<Vec<u8>>,
+) -> Response<ResBody> {
+    parts.headers.remove(header::CONTENT_ENCODING);
+    parts.headers.remove(header::CONTENT_LENGTH);
+    let mut last = status(StatusCode::OK);
+    for piece in pieces {
+        last = forward(http, upstream, &parts, piece).await;
+        if !last.status().is_success() {
+            break;
+        }
+    }
+    last
 }
 
 /// The upstream's own path, then the request's (`Url::join` would replace the upstream's last segment).

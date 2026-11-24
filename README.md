@@ -525,6 +525,7 @@ library does it in your own stack. Everything about it is in [docs/dpd1.md](docs
 | `--key-file` | `DELTAPACK_KEY_FILE` | off | Seal every record with this key, a file of 64 hex digits (`openssl rand -hex 32`): bodies are unreadable without it (`deltapack log --key-file … show`). Each record's meta (time, method, path, trace ids) stays readable. |
 | `--key-dir` | `DELTAPACK_KEY_DIR` | off | With `--tenant-header`: seal each tenant's records with its own key, `DIR/<tenant>.key`. Delete a tenant's key and its records are unreadable everywhere, copies included (the running collector keeps the key it read until it restarts). A tenant without a key, or one past `--max-tenants`, is not recorded: refused with 503 when there is no `--forward`, counted in `deltapack_unrecorded_total`. |
 | `--max-body` | `DELTAPACK_MAX_BODY` | 64 MiB | The largest body stored, after decoding; larger ones are answered 413. |
+| `--forward-max-body` | `DELTAPACK_FORWARD_MAX_BODY` | off | Split an OTLP export larger than this (decoded) into exports that fit before forwarding it: by resource, then scope, then span, each part keeping its resource and scope. For backends with a body limit (New Relic 1 MB, Datadog 15 MiB). The record holds the whole export. |
 | `--metrics` | `DELTAPACK_METRICS` | off | |
 
 **`deltapack client`**: for tools you cannot change. They post plain requests to it, and it sends

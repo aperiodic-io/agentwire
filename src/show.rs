@@ -434,7 +434,7 @@ fn field(m: Msg, n: u64) -> Option<(&'static str, Kind, bool)> {
 const MAX_DEPTH: u32 = 64;
 
 /// A field's payload as the wire carries it.
-enum Wire<'a> {
+pub(crate) enum Wire<'a> {
     Varint(u64),
     Bytes(&'a [u8]),
 }
@@ -461,7 +461,7 @@ fn decode(mut buf: &[u8], m: Msg, depth: u32) -> Option<Value> {
 
 /// The next field's number and payload; `None` when it is truncated or of a wire type OTLP does not
 /// use (groups).
-fn next_field<'a>(buf: &mut &'a [u8]) -> Option<(u64, Wire<'a>)> {
+pub(crate) fn next_field<'a>(buf: &mut &'a [u8]) -> Option<(u64, Wire<'a>)> {
     let key = varint(buf)?;
     let wire = match key & 7 {
         0 => Wire::Varint(varint(buf)?),

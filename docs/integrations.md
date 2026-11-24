@@ -1834,7 +1834,8 @@ forwarded and never stored.
 Watch for these:
 
 - **Body limits.** New Relic rejects payloads over 1 MB, and Datadog caps at 15 MiB uncompressed.
-  Long agent spans can exceed both.
+  Long agent spans can exceed both: add `--forward-max-body 1000000` (or `15000000`), and each
+  export is forwarded in parts that fit, while the recording keeps it whole.
 - **Encodings.** Dynatrace and Weave take protobuf only, so have the exporter send
   `http/protobuf`, not `http/json`.
 - **Splunk Observability Cloud** uses `/v2/trace/otlp`, not `/v1/traces`, so `--forward` cannot

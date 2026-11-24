@@ -5,6 +5,10 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- `collect --forward-max-body N` splits an OTLP export (JSON or protobuf, HTTP or gRPC) larger than
+  N decoded bytes into exports that fit before forwarding it, by resource, then scope, then span,
+  each part with its resource and scope; parts go decoded, and the first answer that is not a
+  success is the exporter's. The record holds the whole export.
 - Records sealed at rest: `collect` and `server --record-dir` take `--key-file` (one key) or, with
   `--tenant-header`, `--key-dir` (a key per tenant, `DIR/<tenant>.key`; a tenant without one is not
   recorded). Sealed files are DPK1 version 2 (SPEC.md, "Sealed files"): each record's delta sealed
