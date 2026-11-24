@@ -5,6 +5,16 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+## [0.1.0]
+
+First release.
+
+- DPD1 version 1 (SPEC.md): request bodies as deltas against a base the server confirmed it kept,
+  rebuilt byte-exact and checked by SHA-256.
+- `deltapack::codec`, `deltapack::client::Client`, and `deltapack::server::Dpd1Layer` (a tower layer),
+  with `deltapack::store::Store` (per-tenant bases, byte budget, idle TTL).
+- The `deltapack` binary (feature `proxy`): `deltapack server`, a reverse proxy, and `deltapack client`,
+  a local proxy for tools that only take a base URL; Prometheus metrics; graceful shutdown.
 - Releases publish every package from one tag (RELEASING.md): the Python wheels `deltapack` and
   `deltapack-cli` to PyPI (Linux wheels, and the library's sdist for other platforms), the
   TypeScript reader to npm, the Go modules' tags, and a Homebrew formula (`Formula/deltapack.rb`,
@@ -99,14 +109,3 @@ version byte (SPEC.md); a crate release that changes it says so here.
   `deltapack_recorded_*` and `deltapack_record_failures_total` metrics.
 - `deltapack client` decodes gzip request bodies before it deltas them, and sends a body in any
   other content coding as is (a `dpd1` delta of it used to drop that coding).
-
-## [0.1.0]
-
-First release.
-
-- AWD1 version 1 (SPEC.md): request bodies as deltas against a base the server confirmed it kept,
-  rebuilt byte-exact and checked by SHA-256.
-- `agentwire::codec`, `agentwire::client::Client`, and `agentwire::server::Awd1Layer` (a tower layer),
-  with `agentwire::store::Store` (per-tenant bases, byte budget, idle TTL).
-- The `agentwire` binary (feature `proxy`): `agentwire server`, a reverse proxy, and `agentwire client`,
-  a local proxy for tools that only take a base URL; Prometheus metrics; graceful shutdown.
