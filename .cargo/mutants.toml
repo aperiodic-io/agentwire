@@ -10,6 +10,9 @@ cap_lints = true
 # every test, the acceptance scenarios (the binary) included
 additional_cargo_args = ["--all-features"]
 exclude_re = [
+  # Equivalent mutant: an item exactly the room left (`room + n == max`) is sent alone and whole
+  # whether it is split (into one part: itself) or not.
+  "split.rs:.*replace > with >= in split_json",
   # Equivalent mutant: a failed start forgotten when exactly `retry_after` has passed or just after
   # (`<` as `<=` on an `Instant`'s elapsed time) cannot be told apart by any test.
   "main.rs:.*replace < with <= in Recorders::of",

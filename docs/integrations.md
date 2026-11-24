@@ -31,9 +31,10 @@ For **full request** and **messages**, use A. For the rest, use B.
 **Sources.** Keys and flags below were read from each project's official documentation in
 November 2026, and each section links its pages. Settings marked *(unverified)* were not
 confirmed by the docs. Check those against the linked page before you rely on them. Deltapack's
-CI runs only LiteLLM, Kong and Portkey ([tests/gateways/](../tests/gateways/test_gateways.py)).
-Langfuse and the OpenTelemetry Collector were run end to end once, by hand (the README's
-"Measured end to end"). The rest have not been run end to end.
+CI runs LiteLLM, Kong and Portkey ([tests/gateways/](../tests/gateways/test_gateways.py)), and the
+OpenTelemetry Collector (both as the backend deltapack forwards to and teeing into deltapack) and
+Arize Phoenix ([tests/backends/](../tests/backends/test_backends.py)). Langfuse was run end to end
+once, by hand (the README's "Measured end to end"). The rest have not been run end to end.
 
 ## Contents
 
@@ -124,7 +125,7 @@ deltapack server --listen 127.0.0.1:8081 --upstream https://api.openai.com --rec
 ```
 
 Run one server per provider, each on its own port and directory. The proxy speaks plain HTTP,
-including streamed (SSE) responses. It does not speak WebSocket. The default `--listen` is
+including streamed (SSE) responses, and WebSocket sessions, each message a record. The default `--listen` is
 `0.0.0.0:8080`, so pass `127.0.0.1` on a laptop.
 
 **Any common compression works.** `collect` and `server --record-dir` decode gzip, deflate, brotli,
@@ -404,8 +405,9 @@ wire_api = "responses"
 deltapack server --listen 127.0.0.1:8081 --upstream https://api.openai.com --record-dir ~/deltapack/codex
 ```
 
-- Leave `supports_websockets` unset or false on this provider. The Responses WebSocket transport
-  would not pass through the proxy.
+- `supports_websockets` can stay unset (SSE, one record per request). With it on, the session
+  passes through the proxy as WebSocket, each message a record; Codex over that path is
+  *(unverified)*.
 - `openai_base_url = "http://127.0.0.1:8081/v1"` redirects the built-in provider instead. Whether
   that path also tries WebSocket, or honours ChatGPT-subscription login, is *(unverified)*. Prefer
   the custom provider with an API key.
@@ -777,7 +779,7 @@ env_key = "OPENAI_API_KEY"
 wire_api = "responses"   # or "chat"
 ```
 
-Leave `supports_websockets` off on this provider.
+`supports_websockets` can stay off (SSE); with it on, each WebSocket message is a record *(unverified)*.
 
 **A (prompts).** The schema has a Codex-style `[otel]` table with `log_user_prompt` and an
 `exporter = { otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "binary" } }`
@@ -1834,7 +1836,8 @@ forwarded and never stored.
 Watch for these:
 
 - **Body limits.** New Relic rejects payloads over 1 MB, and Datadog caps at 15 MiB uncompressed.
-  Long agent spans can exceed both.
+  Long agent spans can exceed both: add `--forward-max-body 1000000` (or `15000000`), and each
+  export is forwarded in parts that fit, while the recording keeps it whole.
 - **Encodings.** Dynatrace and Weave take protobuf only, so have the exporter send
   `http/protobuf`, not `http/json`.
 - **Splunk Observability Cloud** uses `/v2/trace/otlp`, not `/v1/traces`, so `--forward` cannot
@@ -1890,7 +1893,6 @@ AWS Bedrock is not on this list: its SigV4 signature covers the host name. Use i
 |---|---|---|
 | Cursor | Requests with your own key are "routed through Cursor's servers for final prompt building", so a local base URL is never called | none locally |
 | Amp | Bring-your-own-key was removed; inference goes through Amp's servers | none |
-| Codex over WebSocket | `deltapack server` does not proxy WebSocket | a custom provider without `supports_websockets` |
 | Splunk Observability Cloud as `--forward` | its OTLP path is not `/v1/traces` | tee through an OpenTelemetry Collector |
 
 Missing a tool, or found a key that changed? Open an issue or a pull request against this file.

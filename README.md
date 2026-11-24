@@ -256,6 +256,18 @@ recording proxy instead.
 </table>
 <!-- integrations:end -->
 
+## Deploy it
+
+- **Docker Compose:** [deploy/docker-compose.yml](deploy/docker-compose.yml) runs `deltapack collect`
+  in front of Arize Phoenix: exporters send to `localhost:4318`, Phoenix shows the traces, deltapack
+  keeps every span whole for 30 days.
+- **Kubernetes:** [deploy/k8s/deltapack.yaml](deploy/k8s/deltapack.yaml) is a StatefulSet with its
+  record directory on a persistent volume, unprivileged and with a read-only root, behind a Service
+  on 4318 and 4317, with metrics on 9464.
+
+CI runs both on every pull request: the compose stack with spans checked in Phoenix and in the
+recording, the manifest on a kind cluster.
+
 ## Other ways in
 
 OpenTelemetry covers most tools. For the rest:
@@ -321,6 +333,14 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8080 claude
 ```
 
 API keys pass straight through. Headers are never written to the file.
+
+WebSocket sessions (realtime and voice APIs) go through too: the server passes the upgrade to the
+upstream (`ws://` or `wss://`, by `--upstream`'s scheme), with the tool's headers and subprotocols,
+and stores each text or binary message as a record of its own as it passes, `WS>` towards the
+upstream and `WS<` back, after the time in its meta (`deltapack log ls` shows them in order). A
+handshake the upstream refuses is refused to the tool with the same status; one it cannot reach,
+with 502, or 504 after 30 s. A message is limited to `--max-body`. The tool is pinged every 30 s,
+and a tool silent for 75 s (no message, no pong) has its session, and the upstream's, ended.
 
 ### On files you already have
 
@@ -403,6 +423,20 @@ value: a session, a model, a user (repeat it to need all of them). Numbers match
 ```bash
 deltapack log show --attr gen_ai.request.model=gpt-4o --attr session.id=s-42 ~/deltapack/*.dpk
 ```
+
+A tracing backend shows a span's attributes, often truncated. With `--read-listen`, the collector
+serves each trace's spans with their prompts whole, so the backend can link a span to them (a
+Grafana data link, a Langfuse or Datadog custom link): `http://deltapack:4319/v1/traces/${traceId}`.
+
+```bash
+deltapack collect --record-dir ~/deltapack --read-listen 127.0.0.1:4319
+curl -s http://127.0.0.1:4319/v1/traces/4bf92f3577b34da6a3ce929d0e0e4736 | jq .name
+```
+
+Each read scans the directory's files, at most 4 at once (one more is answered 503), and an answer
+is at most `--max-body` bytes (413 past it: use `log show`). The token is one for every tenant:
+whoever holds it reads any tenant's prompts with `?tenant=` (`_none` and `_other` included), so
+give it only to what may read them all.
 
 `stats` says what the files save: records, the bytes they stand for, the bytes on disk, and the
 ratio, per file (its name last, after a tab) and in total. A file it cannot read is named on stderr
@@ -507,6 +541,8 @@ library does it in your own stack. Everything about it is in [docs/dpd1.md](docs
 | `--max-tenants` | `DELTAPACK_MAX_TENANTS` | 256 | Tenants given a directory of their own; any more share `_other` (with `--key-dir`, any more are not recorded). |
 | `--key-file` | `DELTAPACK_KEY_FILE` | off | Seal every record with this key, a file of 64 hex digits (`openssl rand -hex 32`): bodies are unreadable without it (`deltapack log --key-file … show`). Each record's meta (time, method, path, trace ids) stays readable. |
 | `--key-dir` | `DELTAPACK_KEY_DIR` | off | With `--tenant-header`: seal each tenant's records with its own key, `DIR/<tenant>.key`. Delete a tenant's key and its records are unreadable everywhere, copies included (the running collector keeps the key it read until it restarts). A tenant without a key, or one past `--max-tenants`, is not recorded: refused with 503 when there is no `--forward`, counted in `deltapack_unrecorded_total`. |
+| `--read-listen` | `DELTAPACK_READ_LISTEN` | off | Serve `GET /v1/traces/{trace id}`: the trace's spans and log records as JSON lines, prompts whole (`?since=2h`; `?tenant=` with `--tenant-header`). Off a loopback address it needs `--read-token-file`. |
+| `--read-token-file` | `DELTAPACK_READ_TOKEN_FILE` | off | A file holding the token a reader must send as `Authorization: Bearer …`. |
 
 **`deltapack collect`**: a log sink that stores what is posted to it in DPK1 ([above](#quick-start-point-your-opentelemetry-exporter-at-deltapack)).
 
@@ -524,7 +560,10 @@ library does it in your own stack. Everything about it is in [docs/dpd1.md](docs
 | `--max-tenants` | `DELTAPACK_MAX_TENANTS` | 256 | Tenants given a directory of their own; any more share `_other` (with `--key-dir`, any more are not recorded). |
 | `--key-file` | `DELTAPACK_KEY_FILE` | off | Seal every record with this key, a file of 64 hex digits (`openssl rand -hex 32`): bodies are unreadable without it (`deltapack log --key-file … show`). Each record's meta (time, method, path, trace ids) stays readable. |
 | `--key-dir` | `DELTAPACK_KEY_DIR` | off | With `--tenant-header`: seal each tenant's records with its own key, `DIR/<tenant>.key`. Delete a tenant's key and its records are unreadable everywhere, copies included (the running collector keeps the key it read until it restarts). A tenant without a key, or one past `--max-tenants`, is not recorded: refused with 503 when there is no `--forward`, counted in `deltapack_unrecorded_total`. |
+| `--read-listen` | `DELTAPACK_READ_LISTEN` | off | Serve `GET /v1/traces/{trace id}`: the trace's spans and log records as JSON lines, prompts whole (`?since=2h`; `?tenant=` with `--tenant-header`). Off a loopback address it needs `--read-token-file`. |
+| `--read-token-file` | `DELTAPACK_READ_TOKEN_FILE` | off | A file holding the token a reader must send as `Authorization: Bearer …`. |
 | `--max-body` | `DELTAPACK_MAX_BODY` | 64 MiB | The largest body stored, after decoding; larger ones are answered 413. |
+| `--forward-max-body` | `DELTAPACK_FORWARD_MAX_BODY` | off | Split an OTLP export larger than this (decoded) into exports that fit before forwarding it: by resource, then scope, then span, each part keeping its resource and scope. For backends with a body limit (New Relic 1 MB, Datadog 15 MiB). The record holds the whole export. Parts go in order; if one is refused after others were taken, the exporter's retry sends those again. |
 | `--metrics` | `DELTAPACK_METRICS` | off | |
 
 **`deltapack client`**: for tools you cannot change. They post plain requests to it, and it sends

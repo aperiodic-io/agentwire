@@ -5,6 +5,21 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- `server` proxies WebSocket sessions (realtime and voice APIs) to `--upstream` as `ws://` or
+  `wss://`, with the tool's headers and subprotocols, and with `--record-dir` stores each text or
+  binary message as a record, its direction (`WS>`, `WS<`), path and kind in the meta. A handshake
+  the upstream refuses keeps its status; an upstream that cannot be reached is a 502.
+- `deploy/`: a docker-compose stack (deltapack in front of Arize Phoenix) and a Kubernetes
+  StatefulSet; the image creates `/data` for its unprivileged user. CI runs both, and runs deltapack
+  between real backends: the OpenTelemetry Collector both ways, and Phoenix (`tests/backends/`).
+- `--read-listen ADDR` (`collect`, `server --record-dir`) serves `GET /v1/traces/{trace id}`: the
+  trace's spans and log records as JSON lines, as `log show --trace` writes them (`?since=`,
+  `?tenant=`; sealed files read with the collector's key), so a backend can link a span to its
+  full prompt. `--read-token-file` sets a bearer token; off a loopback address one is required.
+- `collect --forward-max-body N` splits an OTLP export (JSON or protobuf, HTTP or gRPC) larger than
+  N decoded bytes into exports that fit before forwarding it, by resource, then scope, then span,
+  each part with its resource and scope; parts go decoded, and the first answer that is not a
+  success is the exporter's. The record holds the whole export.
 - Records sealed at rest: `collect` and `server --record-dir` take `--key-file` (one key) or, with
   `--tenant-header`, `--key-dir` (a key per tenant, `DIR/<tenant>.key`; a tenant without one is not
   recorded). Sealed files are DPK1 version 2 (SPEC.md, "Sealed files"): each record's delta sealed

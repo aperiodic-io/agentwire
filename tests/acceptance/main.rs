@@ -51,6 +51,11 @@ struct Proxies {
     moved_to: Option<std::path::PathBuf>,
     /// a key file (`--key-file`), or a directory of them (`--key-dir`)
     key: Option<std::path::PathBuf>,
+    /// the WebSocket upstream: its address, what it saw (path, authorization), its accept loop
+    ws: Option<WsUpstream>,
+    /// what the tool sent and was answered on its session
+    ws_sent: Vec<tokio_tungstenite::tungstenite::Message>,
+    ws_answers: Vec<tokio_tungstenite::tungstenite::Message>,
     earlier: Vec<std::path::PathBuf>,
 }
 
@@ -67,6 +72,8 @@ struct Proc {
     _child: Child,
     addr: SocketAddr,
     metrics: Option<SocketAddr>,
+    /// --read-listen's address, when it serves reads
+    reads: Option<SocketAddr>,
 }
 
 /// A conversation's request after `turns` turns: a 57 KB system prompt of its own that does not
@@ -170,19 +177,21 @@ async fn spawn(args: &[&str]) -> Proc {
         .spawn()
         .unwrap();
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-    let (mut addr, mut metrics) = (None, None);
+    let (mut addr, mut metrics, mut reads) = (None, None, None);
     while addr.is_none() {
         let line = tokio::time::timeout(Duration::from_secs(30), lines.next_line()).await.unwrap().unwrap().unwrap();
         let logged = || line.split("addr=").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
         if line.contains(" metrics ") {
             metrics = Some(logged());
+        } else if line.contains(" reads ") {
+            reads = Some(logged());
         } else if line.contains(" listening ") {
             addr = Some(logged());
         }
     }
     // keep draining its log, or it blocks once the pipe is full
     tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
-    Proc { _child: child, addr: addr.unwrap(), metrics }
+    Proc { _child: child, addr: addr.unwrap(), metrics, reads }
 }
 
 impl Proxies {
@@ -1675,6 +1684,339 @@ async fn unpack_with_key(w: &mut Proxies) {
     let out =
         log(&["--key-file", key.to_str().unwrap(), "unpack", w.packed.as_ref().unwrap().to_str().unwrap()], b"").await;
     assert!(out == jsonl(&w.lines));
+}
+
+#[given(
+    expr = "a deltapack collector in front of it, recording to a directory, splitting what it forwards at {int} bytes"
+)]
+async fn a_splitting_collector(w: &mut Proxies, max: usize) {
+    w.start_collector(&["--forward-max-body", &max.to_string()]).await;
+}
+
+#[given(
+    "a deltapack collector in front of it, recording to a directory, splitting what it forwards at the size of a batch decoded"
+)]
+async fn a_collector_splitting_at_a_batch(w: &mut Proxies) {
+    let max = batch(1).len();
+    w.start_collector(&["--forward-max-body", &max.to_string()]).await;
+}
+
+#[then(expr = "the upstream received the batch unchanged, still {word}-encoded")]
+async fn upstream_received_unsplit(w: &mut Proxies, coding: String) {
+    let recorded = w.recorded();
+    assert_eq!(recorded.len(), 1, "one request, not parts");
+    assert_eq!(recorded[0].0["content-encoding"], coding.as_str());
+    if coding == "lz4" {
+        assert!(recorded[0].1 == w.gzipped[0], "as it came");
+    }
+}
+
+/// (traceId, spanId) of every span of an OTLP/JSON export, in order.
+fn json_spans(body: &[u8]) -> Vec<(String, String)> {
+    let v: serde_json::Value = serde_json::from_slice(body).unwrap();
+    let mut out = Vec::new();
+    for rs in v["resourceSpans"].as_array().unwrap() {
+        for ss in rs["scopeSpans"].as_array().unwrap() {
+            for span in ss["spans"].as_array().unwrap() {
+                out.push((span["traceId"].as_str().unwrap().to_owned(), span["spanId"].as_str().unwrap().to_owned()));
+            }
+        }
+    }
+    out
+}
+
+#[then(expr = "the upstream received each batch in parts of at most {int} bytes, holding its spans in order")]
+async fn upstream_received_parts(w: &mut Proxies, max: usize) {
+    let recorded = w.recorded();
+    assert!(recorded.len() > w.sent.len(), "{} requests for {} batches", recorded.len(), w.sent.len());
+    for (headers, body) in &recorded {
+        assert!(body.len() <= max, "{} bytes", body.len());
+        assert!(headers.get("content-encoding").is_none(), "parts go decoded");
+    }
+    let received: Vec<_> = recorded.iter().flat_map(|(_, b)| json_spans(b)).collect();
+    let sent: Vec<_> = w.sent.iter().flat_map(|s| json_spans(&s.body)).collect();
+    assert_eq!(received, sent);
+}
+
+#[then(expr = "the upstream received {int} protobuf parts at {string}, each of at most {int} bytes")]
+async fn upstream_received_proto_parts(w: &mut Proxies, n: usize, path: String, max: usize) {
+    let recorded = w.recorded();
+    assert_eq!(recorded.len(), n);
+    for (headers, body) in &recorded {
+        assert!(body.len() <= max, "{} bytes", body.len());
+        assert_eq!(headers["content-type"], "application/x-protobuf");
+    }
+    assert!(w.upstream_paths().iter().all(|p| *p == path));
+    let total: usize = recorded.iter().map(|(_, b)| b.len()).sum();
+    let sent: usize = w.grpc.iter().map(|g| g.0.len()).sum();
+    assert!(total >= sent, "every span arrived: {total} bytes of {sent}");
+}
+
+#[given("a deltapack collector recording to a directory, serving reads")]
+async fn a_reading_collector(w: &mut Proxies) {
+    w.start_collector(&["--read-listen", "127.0.0.1:0"]).await;
+}
+
+#[given("a deltapack collector recording to a directory, serving reads to holders of a token")]
+async fn a_token_reading_collector(w: &mut Proxies) {
+    let token = scratch("token").join("t");
+    std::fs::write(&token, "s3cret\n").unwrap();
+    w.start_collector(&["--read-listen", "127.0.0.1:0", "--read-token-file", token.to_str().unwrap()]).await;
+}
+
+#[given(expr = "a deltapack collector recording to a directory, a directory per tenant by {string}, serving reads")]
+async fn a_tenant_reading_collector(w: &mut Proxies, header: String) {
+    w.start_collector(&["--tenant-header", &header, "--read-listen", "127.0.0.1:0"]).await;
+}
+
+impl Proxies {
+    async fn read(&self, path: &str, token: Option<&str>) -> (u16, Vec<serde_json::Value>) {
+        let addr = self.server.as_ref().unwrap().reads.expect("serving reads");
+        let mut r = self.http.get(format!("http://{addr}{path}"));
+        if let Some(t) = token {
+            r = r.header("authorization", format!("Bearer {t}"));
+        }
+        let r = r.send().await.unwrap();
+        let status = r.status().as_u16();
+        let text = r.text().await.unwrap();
+        let rows =
+            if status == 200 { text.lines().map(|l| serde_json::from_str(l).unwrap()).collect() } else { Vec::new() };
+        (status, rows)
+    }
+
+    fn check_trace(&self, rows: &[serde_json::Value], trace: usize, n: usize) {
+        assert_eq!(rows.len(), n, "{rows:?}");
+        for (turn, row) in (1..).zip(rows) {
+            assert_eq!(row["trace_id"], format!("{trace:032x}"));
+            let prompt = String::from_utf8(conversation(&format!("t{trace}"), turn).to_vec()).unwrap();
+            assert_eq!(row["attributes"]["gen_ai.input.messages"], prompt.as_str(), "span {turn}");
+        }
+    }
+}
+
+#[then(expr = r"GET \/v1\/traces\/ of trace {int} answers {int} with its {int} spans in order, each with its prompt")]
+async fn get_trace(w: &mut Proxies, trace: usize, status: u16, n: usize) {
+    let (got, rows) = w.read(&format!("/v1/traces/{trace:032x}"), None).await;
+    assert_eq!(got, status);
+    w.check_trace(&rows, trace, n);
+}
+
+#[then(expr = r"GET \/v1\/traces\/ of a trace never sent answers {int}")]
+async fn get_unknown_trace(w: &mut Proxies, status: u16) {
+    assert_eq!(w.read(&format!("/v1/traces/{:032x}", 999), None).await.0, status);
+}
+
+#[then(expr = r"GET \/v1\/traces\/not-an-id answers {int}")]
+async fn get_bad_id(w: &mut Proxies, status: u16) {
+    assert_eq!(w.read("/v1/traces/not-an-id", None).await.0, status);
+}
+
+#[then(expr = r"GET \/v1\/traces\/ of trace {int} without the token answers {int}")]
+async fn get_without_token(w: &mut Proxies, trace: usize, status: u16) {
+    assert_eq!(w.read(&format!("/v1/traces/{trace:032x}"), None).await.0, status);
+    assert_eq!(w.read(&format!("/v1/traces/{trace:032x}"), Some("wrong")).await.0, status);
+}
+
+#[then(
+    expr = r"GET \/v1\/traces\/ of trace {int} with the token answers {int} with its {int} spans in order, each with its prompt"
+)]
+async fn get_with_token(w: &mut Proxies, trace: usize, status: u16, n: usize) {
+    let (got, rows) = w.read(&format!("/v1/traces/{trace:032x}"), Some("s3cret")).await;
+    assert_eq!(got, status);
+    w.check_trace(&rows, trace, n);
+}
+
+#[then(expr = r"GET \/v1\/traces\/ of trace {int} without a tenant answers {int}")]
+async fn get_without_tenant(w: &mut Proxies, trace: usize, status: u16) {
+    assert_eq!(w.read(&format!("/v1/traces/{trace:032x}"), None).await.0, status);
+}
+
+#[then(
+    expr = r"GET \/v1\/traces\/ of trace {int} for tenant {string} answers {int} with the {int} spans of it {string} sent"
+)]
+async fn get_for_tenant(w: &mut Proxies, trace: usize, tenant: String, status: u16, n: usize, sender: String) {
+    let (got, rows) = w.read(&format!("/v1/traces/{trace:032x}?tenant={tenant}"), None).await;
+    assert_eq!(got, status);
+    assert_eq!(rows.len(), n);
+    let acme: Vec<_> =
+        w.sent_by(&sender).iter().flat_map(|b| json_spans(b)).filter(|s| s.0 == format!("{trace:032x}")).collect();
+    let got: Vec<_> = rows
+        .iter()
+        .map(|r| (r["trace_id"].as_str().unwrap().to_owned(), r["span_id"].as_str().unwrap().to_owned()))
+        .collect();
+    assert_eq!(got, acme);
+}
+
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
+
+/// The WebSocket upstream: its address, what it saw (path, authorization), its accept loop.
+type WsUpstream = (SocketAddr, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>);
+
+#[given("an upstream WebSocket API that answers each message")]
+// tungstenite's handshake callback returns its own (large) error response
+#[allow(clippy::result_large_err)]
+async fn a_ws_upstream(w: &mut Proxies) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let saw = Arc::new(Mutex::new(Vec::new()));
+    let seen = saw.clone();
+    let task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let check =
+                    |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                     mut res: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        let auth = req.headers().get("authorization").map_or("", |v| v.to_str().unwrap());
+                        seen.lock().unwrap().push(format!("{} {auth}", req.uri()));
+                        if auth.is_empty() {
+                            let mut refused = http::Response::new(Some("no API key".to_owned()));
+                            *refused.status_mut() = http::StatusCode::UNAUTHORIZED;
+                            return Err(refused);
+                        }
+                        // the first subprotocol the tool offers, chosen
+                        if let Some(p) = req.headers().get("sec-websocket-protocol") {
+                            let first = p.to_str().unwrap().split(',').next().unwrap().trim().to_owned();
+                            res.headers_mut().insert("sec-websocket-protocol", first.parse().unwrap());
+                        }
+                        Ok(res)
+                    };
+                let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, check).await else { return };
+                while let Some(Ok(m)) = ws.next().await {
+                    let answer = match m {
+                        Message::Text(t) => Message::text(format!("answer to {t}")),
+                        Message::Binary(b) => Message::binary([&b"answer to "[..], &b].concat()),
+                        Message::Close(_) => break,
+                        _ => continue,
+                    };
+                    if ws.send(answer).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    w.ws = Some((addr, saw, task));
+}
+
+#[given("a deltapack server in front of the WebSocket API, recording to a directory")]
+async fn a_ws_server(w: &mut Proxies) {
+    let dir = w.record_dir.insert(scratch("ws")).to_str().unwrap().to_owned();
+    let upstream = format!("http://{}", w.ws.as_ref().unwrap().0);
+    w.server = Some(spawn(&["server", "--upstream", &upstream, "--record-dir", &dir]).await);
+}
+
+fn ws_request(addr: SocketAddr) -> http::Request<()> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = format!("ws://{addr}/v1/realtime?model=m").into_client_request().unwrap();
+    req.headers_mut().insert("authorization", "Bearer k-123".parse().unwrap());
+    req
+}
+
+#[when(expr = "a tool opens a session through the server and sends {int} messages, waiting for each answer")]
+async fn ws_session(w: &mut Proxies, n: usize) {
+    let addr = w.server.as_ref().unwrap().addr;
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_request(addr)).await.unwrap();
+    for i in 0..n {
+        let m = match i % 3 {
+            0 => Message::text(format!("{{\"type\":\"session.update\",\"n\":{i}}}")),
+            1 => Message::text(String::from_utf8(conversation("ws", i + 2).to_vec()).unwrap()),
+            _ => Message::binary(vec![i as u8; 1000]),
+        };
+        ws.send(m.clone()).await.unwrap();
+        w.ws_sent.push(m);
+        loop {
+            match ws.next().await.unwrap().unwrap() {
+                a @ (Message::Text(_) | Message::Binary(_)) => {
+                    w.ws_answers.push(a);
+                    break;
+                }
+                _ => continue,
+            }
+        }
+    }
+    ws.close(None).await.unwrap();
+}
+
+fn ws_bytes(m: &Message) -> Vec<u8> {
+    match m {
+        Message::Text(t) => t.as_bytes().to_vec(),
+        Message::Binary(b) => b.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+#[then(expr = "the tool received the {int} answers")]
+async fn ws_answers(w: &mut Proxies, n: usize) {
+    assert_eq!(w.ws_answers.len(), n);
+    for (sent, answer) in w.ws_sent.iter().zip(&w.ws_answers) {
+        assert_eq!(ws_bytes(answer), [&b"answer to "[..], &ws_bytes(sent)].concat());
+    }
+}
+
+#[then("the upstream saw the session's path and its API key")]
+async fn ws_upstream_saw(w: &mut Proxies) {
+    let saw = w.ws.as_ref().unwrap().1.lock().unwrap().clone();
+    assert_eq!(saw, ["/v1/realtime?model=m Bearer k-123"]);
+}
+
+#[then(expr = "the recording holds the {int} messages and the {int} answers, in order, each with its direction")]
+async fn ws_recorded(w: &mut Proxies, _n: usize, _m: usize) {
+    let file = recording(w);
+    let listed = String::from_utf8(log(&["ls", &file], b"").await).unwrap();
+    let mut expected = Vec::new();
+    for (sent, answer) in w.ws_sent.iter().zip(&w.ws_answers) {
+        for (dir, m) in [("WS>", sent), ("WS<", answer)] {
+            let kind = if matches!(m, Message::Text(_)) { "text" } else { "binary" };
+            expected.push((dir, kind, ws_bytes(m)));
+        }
+    }
+    assert_eq!(listed.lines().count(), expected.len(), "{listed}");
+    for (i, (line, (dir, kind, body))) in listed.lines().zip(&expected).enumerate() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields[4..8], [*dir, "/v1/realtime?model=m", *kind, "-"], "{line}");
+        assert_eq!(&log(&["get", &file, &i.to_string()], b"").await, body, "record {i}");
+    }
+}
+
+#[then(expr = "a tool's session without its API key is refused with {int}")]
+async fn ws_refused_without_key(w: &mut Proxies, status: u16) {
+    let addr = w.server.as_ref().unwrap().addr;
+    let mut req = ws_request(addr);
+    req.headers_mut().remove("authorization");
+    match tokio_tungstenite::connect_async(req).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) => assert_eq!(r.status().as_u16(), status),
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+}
+
+#[then(expr = "a tool that offers the subprotocols {string} gets {string}, the upstream's choice")]
+async fn ws_subprotocol(w: &mut Proxies, offered: String, chosen: String) {
+    let addr = w.server.as_ref().unwrap().addr;
+    let mut req = ws_request(addr);
+    req.headers_mut().insert("sec-websocket-protocol", offered.parse().unwrap());
+    let (mut ws, answer) = tokio_tungstenite::connect_async(req).await.unwrap();
+    assert_eq!(answer.headers().get("sec-websocket-protocol").unwrap(), &chosen);
+    ws.send(Message::text("hi")).await.unwrap();
+    assert_eq!(ws.next().await.unwrap().unwrap(), Message::text("answer to hi"));
+    ws.close(None).await.unwrap();
+}
+
+#[when("the upstream WebSocket API is down")]
+async fn ws_down(w: &mut Proxies) {
+    let (_, _, task) = w.ws.as_ref().unwrap();
+    task.abort();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[then(expr = "a tool's session through the server is refused with {int}")]
+async fn ws_refused(w: &mut Proxies, status: u16) {
+    let addr = w.server.as_ref().unwrap().addr;
+    match tokio_tungstenite::connect_async(ws_request(addr)).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) => assert_eq!(r.status().as_u16(), status),
+        other => panic!("{:?}", other.map(|_| ())),
+    }
 }
 
 #[tokio::main]

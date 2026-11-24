@@ -38,6 +38,7 @@ use tower_layer::Layer;
 
 mod grpc;
 mod show;
+mod split;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ResBody = UnsyncBoxBody<Bytes, BoxError>;
@@ -89,6 +90,8 @@ enum Mode {
         tenants: Tenants,
         #[command(flatten)]
         keys: Keys,
+        #[command(flatten)]
+        reads: Reads,
     },
     /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
     /// DPK1, decoded (gzip, deflate, br, zstd, snappy); forward each request as received when given a backend. Also accepts
@@ -115,6 +118,11 @@ enum Mode {
         /// The largest body stored, after decoding.
         #[arg(long, env = "DELTAPACK_MAX_BODY", default_value_t = 64 << 20)]
         max_body: usize,
+        /// Split an OTLP export larger than this (decoded) into exports that fit before forwarding
+        /// it, for backends with a body limit (New Relic 1 MB, Datadog 15 MiB): by resource, then
+        /// scope, then span. The record holds the whole export.
+        #[arg(long, env = "DELTAPACK_FORWARD_MAX_BODY", requires = "forward")]
+        forward_max_body: Option<usize>,
         #[arg(long, env = "DELTAPACK_METRICS")]
         metrics: Option<SocketAddr>,
         #[command(flatten)]
@@ -123,6 +131,8 @@ enum Mode {
         tenants: Tenants,
         #[command(flatten)]
         keys: Keys,
+        #[command(flatten)]
+        reads: Reads,
     },
     /// Accept plain requests from a local tool and send them to a `deltapack server` as deltas.
     Client {
@@ -196,6 +206,19 @@ struct Keys {
     /// key is not recorded.
     #[arg(long, env = "DELTAPACK_KEY_DIR", requires = "tenant_header")]
     key_dir: Option<PathBuf>,
+}
+
+/// The read API: a trace's spans over HTTP, for a backend to link a span to its full prompt.
+#[derive(clap::Args, Clone, Default)]
+struct Reads {
+    /// Serve GET /v1/traces/{trace id} here: the trace's spans and log records as JSON lines, as
+    /// `log show --trace` writes them (`?since=2h`; `?tenant=` with --tenant-header). Off a loopback
+    /// address it needs --read-token-file: it serves prompts.
+    #[arg(long, env = "DELTAPACK_READ_LISTEN")]
+    read_listen: Option<SocketAddr>,
+    /// A file holding the bearer token a reader must send (`Authorization: Bearer …`).
+    #[arg(long, env = "DELTAPACK_READ_TOKEN_FILE", requires = "read_listen")]
+    read_token_file: Option<PathBuf>,
 }
 
 /// Whether a key file's mode lets anyone but its owner read it.
@@ -321,15 +344,18 @@ async fn main() -> Result<(), BoxError> {
             retention,
             tenants,
             keys,
+            reads,
         } => {
             let record = match record_dir {
                 Some(dir) => Some(Recorders::start(dir, record_window, rotate_bytes, retention, tenants, keys)?),
                 None => None,
             };
+            start_reads(&reads, record.as_ref(), max_body).await?;
             let store = Store::new(store_bytes, Duration::from_secs(ttl_seconds));
             let scope_headers =
                 scope_headers.iter().map(|h| HeaderName::try_from(h.as_str())).collect::<Result<_, _>>()?;
-            let forward = Forward { http, upstream: Some(Arc::new(upstream)), record, max_body, grpc: false };
+            let forward =
+                Forward { http, upstream: Some(Arc::new(upstream)), record, max_body, grpc: false, split: None };
             run_server(vec![listen], store, Config { max_body, scope_headers }, metrics, forward).await
         }
         Mode::Collect {
@@ -339,13 +365,23 @@ async fn main() -> Result<(), BoxError> {
             record_window,
             rotate_bytes,
             max_body,
+            forward_max_body,
             metrics,
             retention,
             tenants,
             keys,
+            reads,
         } => {
             let record = Some(Recorders::start(record_dir, record_window, rotate_bytes, retention, tenants, keys)?);
-            let forward = Forward { http, upstream: forward.map(Arc::new), record, max_body, grpc: true };
+            start_reads(&reads, record.as_ref(), max_body).await?;
+            let forward = Forward {
+                http,
+                upstream: forward.map(Arc::new),
+                record,
+                max_body,
+                grpc: true,
+                split: forward_max_body,
+            };
             let config = Config { max_body, ..Config::default() };
             run_server(listen, Store::new(1 << 30, Duration::from_secs(1800)), config, metrics, forward).await
         }
@@ -902,6 +938,8 @@ struct Forward {
     max_body: usize,
     /// `collect`: take OTLP/gRPC Export calls too
     grpc: bool,
+    /// --forward-max-body
+    split: Option<usize>,
 }
 
 impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
@@ -913,11 +951,20 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, request: Request<InnerBody<Incoming>>) -> Self::Future {
-        let (http, upstream, max_body) = (self.http.clone(), self.upstream.clone(), self.max_body);
+    fn call(&mut self, mut request: Request<InnerBody<Incoming>>) -> Self::Future {
+        let (http, upstream, max_body, split) = (self.http.clone(), self.upstream.clone(), self.max_body, self.split);
         // which recording, by the request's tenant; none when its tenant's cannot be started
         let record = self.record.as_ref().map(|r| r.of(request.headers()));
         let grpc = self.grpc && grpc::is_grpc(request.headers());
+        // `server` only: a collector's backend takes OTLP, not sessions
+        if let (true, false, Some(upstream)) = (websocket::is_upgrade(&request), self.grpc, &upstream) {
+            let upgrade = hyper::upgrade::on(&mut request);
+            let (parts, _) = request.into_parts();
+            let upstream = upstream.clone();
+            return Box::pin(async move {
+                Ok(websocket::proxy(&upstream, record.flatten(), parts, upgrade, max_body).await)
+            });
+        }
         Box::pin(async move {
             let (parts, body) = request.into_parts();
             // a tenant that cannot be recorded, and nothing to forward to: refused, so the exporter
@@ -929,7 +976,7 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
                 });
             }
             if let (true, Some(record)) = (grpc, &record) {
-                return Ok(export(&http, upstream.as_deref(), record.as_ref(), parts, body, max_body).await);
+                return Ok(export(&http, upstream.as_deref(), record.as_ref(), parts, body, max_body, split).await);
             }
             let (Some(record), upstream) = (record, &upstream) else {
                 let upstream = upstream.as_ref().expect("a server without a recorder has an upstream");
@@ -943,14 +990,209 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
                 Ok(d) => d,
                 Err(code) => return Ok(status(code)),
             };
+            let pieces = match (split, show::signal(parts.uri.path())) {
+                // a body still in a coding deltapack cannot decode is forwarded as it came
+                (Some(max), Some(signal)) if encoding == "-" => split::split(&stored, signal, max),
+                _ => None,
+            };
             if let Some(record) = &record {
                 store(record, &parts, &encoding, stored).await;
             }
-            Ok(match upstream {
-                Some(upstream) => forward(&http, upstream, &parts, body).await,
-                None => ack(&parts.headers),
+            Ok(match (upstream, pieces) {
+                (Some(upstream), Some(pieces)) => forward_pieces(&http, upstream, parts, pieces).await,
+                (Some(upstream), None) => forward(&http, upstream, &parts, body).await,
+                (None, _) => ack(&parts.headers),
             })
         })
+    }
+}
+
+/// `server`'s WebSocket sessions (realtime and voice APIs): the upgrade is proxied to the upstream,
+/// and each text or binary message, either way, is stored as a record of its own as it passes. Its
+/// meta is the time, `WS>` (to the upstream) or `WS<` (from it), the session's path, `text` or
+/// `binary`, and `-` (stored as it came). Pings, pongs and the close are passed on, not stored.
+mod websocket {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{self, Message, handshake::derive_accept_key, protocol::WebSocketConfig};
+
+    /// The longest the upstream may take to answer a handshake.
+    const HANDSHAKE: Duration = Duration::from_secs(30);
+    /// How often the tool is pinged; a tool silent for [`IDLE`] (no message, no pong) has gone, and
+    /// its session (and the upstream's, perhaps billed) is ended.
+    const PING: Duration = Duration::from_secs(30);
+    const IDLE: Duration = Duration::from_secs(75);
+    /// Longer than any session: a timer that does not fire.
+    const NEVER: Duration = Duration::from_secs(1 << 30);
+
+    /// A WebSocket handshake (RFC 6455 §4.1): a GET asking to upgrade to `websocket`.
+    pub(super) fn is_upgrade<B>(request: &Request<B>) -> bool {
+        let has = |name, token: &str| {
+            request
+                .headers()
+                .get_all(name)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .flat_map(|v| v.split(','))
+                .any(|t| t.trim().eq_ignore_ascii_case(token))
+        };
+        request.method() == http::Method::GET && has(header::UPGRADE, "websocket") && has(header::CONNECTION, "upgrade")
+    }
+
+    /// The upstream's answer to the handshake, given to the tool: 101 and the session pumped both
+    /// ways, or the upstream's refusal (its status), or 502 when it cannot be reached.
+    pub(super) async fn proxy(
+        upstream: &reqwest::Url,
+        record: Option<Recorder>,
+        parts: http::request::Parts,
+        upgrade: hyper::upgrade::OnUpgrade,
+        max_body: usize,
+    ) -> Response<ResBody> {
+        let path = parts.uri.path_and_query().map_or("/", |p| p.as_str()).to_owned();
+        let Some(key) = parts.headers.get(header::SEC_WEBSOCKET_KEY).cloned() else {
+            return status(StatusCode::BAD_REQUEST);
+        };
+        let Ok(mut url) = upstream_url(upstream, &path) else { return status(StatusCode::BAD_REQUEST) };
+        if url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" }).is_err() {
+            return status(StatusCode::BAD_GATEWAY);
+        }
+        let Ok(mut to_upstream) = tungstenite::client::IntoClientRequest::into_client_request(url.as_str()) else {
+            return status(StatusCode::BAD_GATEWAY);
+        };
+        // the tool's own headers (authorization, subprotocols, ...); the handshake's are the
+        // upstream connection's own, and no extension is offered (none is spoken here)
+        let mut headers = parts.headers.clone();
+        strip_hop_by_hop(&mut headers);
+        for name in [
+            header::SEC_WEBSOCKET_KEY,
+            header::SEC_WEBSOCKET_VERSION,
+            header::SEC_WEBSOCKET_EXTENSIONS,
+            header::CONTENT_LENGTH,
+        ] {
+            headers.remove(name);
+        }
+        for (name, value) in &headers {
+            to_upstream.headers_mut().append(name, value.clone());
+        }
+        let config = WebSocketConfig::default().max_message_size(Some(max_body)).max_frame_size(Some(max_body));
+        let connect = tokio_tungstenite::connect_async_with_config(to_upstream, Some(config), false);
+        let Ok(connected) = tokio::time::timeout(HANDSHAKE, connect).await else {
+            tracing::warn!("upstream WebSocket handshake timed out");
+            return status(StatusCode::GATEWAY_TIMEOUT);
+        };
+        let (upstream_ws, answer) = match connected {
+            Ok(c) => c,
+            Err(tungstenite::Error::Http(refused)) => {
+                let code = refused.status();
+                return status(if code.is_client_error() || code.is_server_error() {
+                    code
+                } else {
+                    StatusCode::BAD_GATEWAY
+                });
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "upstream WebSocket handshake failed");
+                return status(StatusCode::BAD_GATEWAY);
+            }
+        };
+        tokio::spawn(async move {
+            let tool = match upgrade.await {
+                Ok(io) => {
+                    let io = hyper_util::rt::TokioIo::new(io);
+                    tokio_tungstenite::WebSocketStream::from_raw_socket(
+                        io,
+                        tungstenite::protocol::Role::Server,
+                        Some(config),
+                    )
+                    .await
+                }
+                Err(e) => return tracing::warn!(error = %e, "the tool's WebSocket upgrade failed"),
+            };
+            let (to_tool, from_tool) = tool.split();
+            let (to_up, from_up) = upstream_ws.split();
+            let mut sent =
+                tokio::spawn(pump(from_tool, to_up, record.clone(), "WS>", path.clone(), Keepalive::Idle(IDLE)));
+            let mut answered = tokio::spawn(pump(from_up, to_tool, record, "WS<", path, Keepalive::Ping(PING)));
+            // a side that ends lets the other finish its close a moment later, then ends it too
+            let grace = Duration::from_secs(5);
+            tokio::select! {
+                _ = &mut sent => { let _ = tokio::time::timeout(grace, &mut answered).await; answered.abort(); }
+                _ = &mut answered => { let _ = tokio::time::timeout(grace, &mut sent).await; sent.abort(); }
+            }
+        });
+        let mut response = Response::new(ResBody::default());
+        *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+        let h = response.headers_mut();
+        h.insert(header::UPGRADE, http::HeaderValue::from_static("websocket"));
+        h.insert(header::CONNECTION, http::HeaderValue::from_static("upgrade"));
+        if let Ok(accept) = http::HeaderValue::from_str(&derive_accept_key(key.as_bytes())) {
+            h.insert(header::SEC_WEBSOCKET_ACCEPT, accept);
+        }
+        if let Some(protocol) = answer.headers().get(header::SEC_WEBSOCKET_PROTOCOL) {
+            h.insert(header::SEC_WEBSOCKET_PROTOCOL, protocol.clone());
+        }
+        response
+    }
+
+    /// How a pump knows its tool is still there: it ends when the tool has said nothing for so
+    /// long, or it pings the tool so often (the other direction's pump hears the pong).
+    #[derive(Clone, Copy)]
+    pub(super) enum Keepalive {
+        Idle(Duration),
+        Ping(Duration),
+    }
+
+    /// One direction of a session: each message stored (text and binary), then passed on.
+    pub(super) async fn pump<S, T>(
+        mut from: S,
+        mut to: T,
+        record: Option<Recorder>,
+        direction: &'static str,
+        path: String,
+        keepalive: Keepalive,
+    ) where
+        S: futures_util::Stream<Item = Result<Message, tungstenite::Error>> + Unpin,
+        T: futures_util::Sink<Message> + Unpin,
+    {
+        let (idle, every) = match keepalive {
+            Keepalive::Idle(d) => (d, NEVER),
+            Keepalive::Ping(d) => (NEVER, d),
+        };
+        let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        loop {
+            let next = tokio::select! {
+                next = tokio::time::timeout(idle, from.next()) => next,
+                _ = ping.tick() => {
+                    if to.send(Message::Ping(Bytes::new())).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            // silent too long, ended, or broken
+            let Ok(Some(Ok(m))) = next else { break };
+            let (kind, body) = match &m {
+                Message::Text(t) => ("text", Bytes::copy_from_slice(t.as_bytes())),
+                Message::Binary(b) => ("binary", b.clone()),
+                // answered by the side that received it
+                Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
+                Message::Close(_) => {
+                    let _ = to.send(m).await;
+                    break;
+                }
+            };
+            if let Some(record) = &record {
+                let meta = format!("{} {direction} {path} {kind} -", unix_ms());
+                let record = record.clone();
+                if let Err(e) = tokio::task::spawn_blocking(move || lock(&record).append(meta.as_bytes(), body)).await {
+                    tracing::error!(error = %e, "recording panicked; passing the message on unrecorded");
+                }
+            }
+            if to.send(m).await.is_err() {
+                break;
+            }
+        }
+        let _ = to.close().await;
     }
 }
 
@@ -989,6 +1231,7 @@ async fn export(
     mut parts: http::request::Parts,
     body: InnerBody<Incoming>,
     max_body: usize,
+    split: Option<usize>,
 ) -> Response<ResBody> {
     let Some(otlp_path) = grpc::otlp_http_path(parts.uri.path()) else {
         return grpc::error(grpc::Code::Unimplemented, "not an OTLP Export method");
@@ -1019,7 +1262,14 @@ async fn export(
     for name in ["grpc-encoding", "grpc-accept-encoding", "grpc-timeout", "content-length"] {
         parts.headers.remove(name);
     }
-    let response = forward(http, upstream, &parts, message).await;
+    let pieces = match (split, show::signal(otlp_path)) {
+        (Some(max), Some(signal)) => split::split(&message, signal, max),
+        _ => None,
+    };
+    let response = match pieces {
+        Some(pieces) => forward_pieces(http, upstream, parts, pieces).await,
+        None => forward(http, upstream, &parts, message).await,
+    };
     let code = grpc::code_for(response.status());
     if code != grpc::Code::Ok {
         return grpc::error(code, "the backend refused the export");
@@ -1080,28 +1330,7 @@ fn run_log(cmd: LogCmd, key: Option<&log::Key>) -> Result<(), BoxError> {
                 until: until.map(|s| show::when(&s, now)).transpose()?,
                 attrs,
             };
-            for file in &files {
-                let name = serde_json::Value::from(file.display().to_string());
-                let mut index = 0;
-                // ponytail: every record is rebuilt to reach the ones wanted; `get` per indexed match
-                // when files outgrow a scan
-                open_log(file, max_body, key)?.scan(|record, body| {
-                    let meta = show::Meta::parse(&record.meta);
-                    if filter.wants(&meta) {
-                        let otlp = meta.decoded().then(|| show::rows(body, meta.path.and_then(show::signal)));
-                        let rows = otlp.flatten().unwrap_or_else(|| vec![show::whole(body)]);
-                        for mut row in rows.into_iter().filter(|r| filter.keeps(r)) {
-                            row["file"] = name.clone();
-                            row["record"] = index.into();
-                            row["received"] = meta.time.into();
-                            serde_json::to_writer(&mut out, &row)?;
-                            out.write_all(b"\n")?;
-                        }
-                    }
-                    index += 1;
-                    Ok(())
-                })?;
-            }
+            show_files(&files, &filter, max_body, key, &mut out)?;
         }
         LogCmd::Stats { files, max_body } => {
             let (mut total, mut unread) = ((0, 0, 0), 0);
@@ -1147,6 +1376,42 @@ fn run_log(cmd: LogCmd, key: Option<&log::Key>) -> Result<(), BoxError> {
 fn stats_line(name: &str, records: u64, body: u64, disk: u64) -> String {
     // the name last, after a tab: it may hold spaces
     format!("{records} records, {body} bytes in {disk} on disk ({:.1}x)\t{name}", body as f64 / disk.max(1) as f64)
+}
+
+/// The rows of `files` that `filter` keeps, one JSON line each, with their file, record and time
+/// received; how many.
+fn show_files(
+    files: &[PathBuf],
+    filter: &show::Filter,
+    max_body: usize,
+    key: Option<&log::Key>,
+    out: &mut impl Write,
+) -> io::Result<u64> {
+    let mut shown = 0;
+    for file in files {
+        let name = serde_json::Value::from(file.display().to_string());
+        let mut index = 0;
+        // ponytail: every record is rebuilt to reach the ones wanted; `get` per indexed match
+        // when files outgrow a scan
+        open_log(file, max_body, key)?.scan(|record, body| {
+            let meta = show::Meta::parse(&record.meta);
+            if filter.wants(&meta) {
+                let otlp = meta.decoded().then(|| show::rows(body, meta.path.and_then(show::signal)));
+                let rows = otlp.flatten().unwrap_or_else(|| vec![show::whole(body)]);
+                for mut row in rows.into_iter().filter(|r| filter.keeps(r)) {
+                    row["file"] = name.clone();
+                    row["record"] = index.into();
+                    row["received"] = meta.time.into();
+                    serde_json::to_writer(&mut *out, &row)?;
+                    out.write_all(b"\n")?;
+                    shown += 1;
+                }
+            }
+            index += 1;
+            Ok(())
+        })?;
+    }
+    Ok(shown)
 }
 
 /// Counts what is written to it, and keeps none of it.
@@ -1200,6 +1465,27 @@ async fn forward(
             status(StatusCode::BAD_GATEWAY)
         }
     }
+}
+
+/// An export split by --forward-max-body, sent one piece after another (in order), decoded: the
+/// first answer that is not a success, or the last. A piece refused after others were taken fails
+/// the export, and the exporter's retry sends those again: a backend may then hold them twice.
+async fn forward_pieces(
+    http: &reqwest::Client,
+    upstream: &reqwest::Url,
+    mut parts: http::request::Parts,
+    pieces: Vec<Vec<u8>>,
+) -> Response<ResBody> {
+    parts.headers.remove(header::CONTENT_ENCODING);
+    parts.headers.remove(header::CONTENT_LENGTH);
+    let mut last = status(StatusCode::OK);
+    for piece in pieces {
+        last = forward(http, upstream, &parts, piece).await;
+        if !last.status().is_success() {
+            break;
+        }
+    }
+    last
 }
 
 /// The upstream's own path, then the request's (`Url::join` would replace the upstream's last segment).
@@ -1454,6 +1740,150 @@ fn server_metrics(stats: &Stats, store: &Store) -> String {
 }
 
 /// A plain-text Prometheus endpoint on its own address, so it never shadows an upstream path.
+/// The read API's address is refused off a loopback address without a token: it serves prompts.
+fn reads_allowed(addr: SocketAddr, token: Option<&str>) -> Result<(), String> {
+    match (addr.ip().is_loopback(), token) {
+        (false, None) => Err(format!("--read-listen {addr} serves prompts beyond this host: give --read-token-file")),
+        _ => Ok(()),
+    }
+}
+
+/// Whether `authorization` is `Bearer <token>` (the scheme in any case, RFC 9110 §11.1), compared
+/// by digest: what a comparison's time could tell is where two digests differ, which says nothing
+/// of the token, nor of its length.
+fn authorized(authorization: Option<&http::HeaderValue>, token: Option<&str>) -> bool {
+    use sha2::{Digest, Sha256};
+    let Some(token) = token else { return true };
+    let given = authorization.map_or(&b""[..], |v| v.as_bytes());
+    let (scheme, given) = given.split_at(given.len().min(7));
+    let (given, want) = (Sha256::digest(given), Sha256::digest(token.as_bytes()));
+    scheme.eq_ignore_ascii_case(b"bearer ") & (given == want)
+}
+
+/// Reads at once, at most: one more is answered 503 rather than scanning files beside the others.
+const MAX_READS: usize = 4;
+
+/// The JSON lines of a read, in memory: at most `left` more bytes.
+struct Capped {
+    out: Vec<u8>,
+    left: usize,
+}
+
+impl Write for Capped {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.left = self.left.checked_sub(buf.len()).ok_or(io::ErrorKind::FileTooLarge)?;
+        self.out.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// One read: the status and the JSON lines of a trace's rows.
+fn read_trace(record: &Recorders, path: &str, query: &str, max_body: usize) -> (StatusCode, Vec<u8>) {
+    let Some(id) =
+        path.strip_prefix("/v1/traces/").filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+    else {
+        return (StatusCode::NOT_FOUND, b"GET /v1/traces/{32 hex digits}\n".to_vec());
+    };
+    let param = |name: &str| query.split('&').find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='));
+    let since = match param("since").map(|s| show::when(s, unix_ms() as u64)).transpose() {
+        Ok(since) => since,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("{e}\n").into_bytes()),
+    };
+    let (dir, key) = match (&record.tenants.tenant_header, param("tenant")) {
+        (None, _) => (record.root.clone(), record.key.clone()),
+        (Some(_), None) => return (StatusCode::BAD_REQUEST, b"give ?tenant=\n".to_vec()),
+        (Some(_), Some(t)) => {
+            let mut h = HeaderMap::new();
+            if let Ok(v) = http::HeaderValue::from_str(t) {
+                h.insert(header::HOST, v); // any name: tenant_dir reads the values given
+            }
+            // the directories of requests without a tenant, and past --max-tenants, by their names
+            let tenant = match t {
+                "_none" | "_other" => t.to_owned(),
+                _ => tenant_dir(h.get_all(header::HOST)),
+            };
+            let key = match &record.key_dir {
+                Some(d) => match read_key(&d.join(format!("{tenant}.key"))) {
+                    Ok(k) => Some(k),
+                    Err(_) => return (StatusCode::NOT_FOUND, Vec::new()),
+                },
+                None => record.key.clone(),
+            };
+            (record.root.join(tenant), key)
+        }
+    };
+    let files: Vec<PathBuf> = dpk_files(&dir).map(|f| f.into_iter().map(|f| f.0).collect()).unwrap_or_default();
+    let filter = show::Filter { trace: Some(id.to_ascii_lowercase()), since, ..show::Filter::default() };
+    let mut out = Capped { out: Vec::new(), left: max_body };
+    match show_files(&files, &filter, max_body, key.as_ref(), &mut out) {
+        Ok(0) => (StatusCode::NOT_FOUND, out.out),
+        Ok(_) => (StatusCode::OK, out.out),
+        Err(e) if e.kind() == io::ErrorKind::FileTooLarge => {
+            let why =
+                format!("the trace's rows exceed {max_body} bytes (--max-body): read them with `deltapack log show`\n");
+            (StatusCode::PAYLOAD_TOO_LARGE, why.into_bytes())
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}\n").into_bytes()),
+    }
+}
+
+/// The read API, when --read-listen asks for it: it reads what is recorded, so it needs a recording.
+async fn start_reads(reads: &Reads, record: Option<&Recorders>, max_body: usize) -> Result<(), BoxError> {
+    match (record, reads.read_listen) {
+        (Some(r), Some(_)) => serve_reads(reads, r.clone(), max_body).await,
+        (None, Some(_)) => Err("--read-listen needs --record-dir".into()),
+        (_, None) => Ok(()),
+    }
+}
+
+/// The read API (`--read-listen`): runs beside the collector until the process ends.
+async fn serve_reads(reads: &Reads, record: Recorders, max_body: usize) -> Result<(), BoxError> {
+    let addr = reads.read_listen.expect("called with --read-listen");
+    let token = reads.read_token_file.as_deref().map(std::fs::read_to_string).transpose()?;
+    let token: Option<Arc<str>> = token.map(|t| t.trim().into()).filter(|t: &Arc<str>| !t.is_empty());
+    reads_allowed(addr, token.as_deref())?;
+    let listener = TcpListener::bind(addr).await?;
+    tracing::info!(addr = %listener.local_addr()?, "reads");
+    let reading = Arc::new(tokio::sync::Semaphore::new(MAX_READS));
+    tokio::spawn(async move {
+        let mut builder = auto::Builder::new(TokioExecutor::new());
+        builder.http1().timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(30));
+        while let Ok((stream, _)) = listener.accept().await {
+            let (record, token, reading) = (record.clone(), token.clone(), reading.clone());
+            let service = hyper::service::service_fn(move |r: Request<Incoming>| {
+                let (record, token, reading) = (record.clone(), token.clone(), reading.clone());
+                async move {
+                    let (status, body) = if !authorized(r.headers().get(header::AUTHORIZATION), token.as_deref()) {
+                        (StatusCode::UNAUTHORIZED, Vec::new())
+                    } else if r.method() != http::Method::GET {
+                        (StatusCode::METHOD_NOT_ALLOWED, Vec::new())
+                    } else if let Ok(permit) = reading.try_acquire_owned() {
+                        let (path, query) = (r.uri().path().to_owned(), r.uri().query().unwrap_or("").to_owned());
+                        let read = move || (read_trace(&record, &path, &query, max_body), drop(permit)).0;
+                        tokio::task::spawn_blocking(read)
+                            .await
+                            .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, Vec::new()))
+                    } else {
+                        (StatusCode::SERVICE_UNAVAILABLE, b"too many reads at once; try again\n".to_vec())
+                    };
+                    let mut response = Response::new(Full::new(Bytes::from(body)));
+                    *response.status_mut() = status;
+                    response
+                        .headers_mut()
+                        .insert(header::CONTENT_TYPE, http::HeaderValue::from_static("application/x-ndjson"));
+                    Ok::<_, Infallible>(response)
+                }
+            });
+            tokio::spawn(builder.serve_connection(TokioIo::new(stream), service).into_owned());
+        }
+    });
+    Ok(())
+}
+
 async fn serve_metrics<F>(addr: SocketAddr, render: F) -> Result<(), BoxError>
 where
     F: Fn() -> String + Clone + Send + Sync + 'static,
@@ -1872,6 +2302,181 @@ mod tests {
         assert!(key_too_open(0o100640));
         assert!(key_too_open(0o100604));
         assert!(key_too_open(0o100644));
+    }
+
+    #[test]
+    fn reads_off_loopback_need_a_token() {
+        let at = |a: &str| a.parse::<SocketAddr>().unwrap();
+        assert!(reads_allowed(at("127.0.0.1:4319"), None).is_ok());
+        assert!(reads_allowed(at("[::1]:4319"), None).is_ok());
+        assert!(reads_allowed(at("0.0.0.0:4319"), None).is_err());
+        assert!(reads_allowed(at("10.0.0.5:4319"), Some("t")).is_ok());
+    }
+
+    fn plain_recorders(dir: &std::path::Path) -> Recorders {
+        let tenants = Tenants { tenant_header: None, max_tenants: 1 };
+        Recorders::start(
+            dir.to_owned(),
+            4,
+            1 << 30,
+            Retention::default(),
+            tenants,
+            Keys { key_file: None, key_dir: None },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_answers_by_trace_time_size_and_damage() {
+        let dir = std::env::temp_dir().join(format!("deltapack-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let r = plain_recorders(&dir);
+        let id = format!("{:032x}", 7);
+        let body =
+            format!(r#"{{"resourceSpans":[{{"scopeSpans":[{{"spans":[{{"traceId":"{id}","name":"chat"}}]}}]}}]}}"#);
+        let body_len = body.len();
+        // received in 1970: before any --since
+        lock(&r.of(&HeaderMap::new()).unwrap())
+            .append(format!("1000 POST /v1/traces application/json - {id}").as_bytes(), body.into())
+            .unwrap();
+        let read = |path: &str, query: &str, max: usize| read_trace(&r, path, query, max);
+        let (status, rows) = read(&format!("/v1/traces/{id}"), "", 1 << 20);
+        assert_eq!((status, rows.iter().filter(|&&b| b == b'\n').count()), (StatusCode::OK, 1));
+        assert_eq!(
+            read(&format!("/v1/traces/{id}"), "since=1h", 1 << 20).0,
+            StatusCode::NOT_FOUND,
+            "before the time asked"
+        );
+        assert_eq!(read(&format!("/v1/traces/{id}"), "since=soon", 1 << 20).0, StatusCode::BAD_REQUEST);
+        // a record within the limit whose row (its file's name, its times) is past it
+        let (status, why) = read(&format!("/v1/traces/{id}"), "", body_len + 1);
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "past --max-body: {}", String::from_utf8_lossy(&why));
+        for bad in ["/v1/traces/zz", &format!("/v1/traces/{}", "z".repeat(32)), &format!("/v1/traces/{id}0"), "/other"]
+        {
+            let (status, why) = read(bad, "", 1 << 20);
+            assert_eq!(status, StatusCode::NOT_FOUND, "{bad}");
+            assert!(why.starts_with(b"GET /v1/traces/"), "{bad}: says what it takes");
+        }
+        // a file that does not read: an error, not too large
+        let file = dpk_files(&dir).unwrap()[0].0.clone();
+        drop(r);
+        let mut bytes = std::fs::read(&file).unwrap();
+        let n = bytes.len();
+        bytes[n - 3] ^= 0xff;
+        std::fs::write(&file, bytes).unwrap();
+        let r = plain_recorders(&dir.join("again"));
+        let (status, _) = read_trace(&Recorders { root: dir.clone(), ..r }, &format!("/v1/traces/{id}"), "", 1 << 20);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reads_need_a_recording() {
+        let reads = Reads { read_listen: Some("127.0.0.1:0".parse().unwrap()), read_token_file: None };
+        let refused = start_reads(&reads, None, 1).await.unwrap_err();
+        assert!(refused.to_string().contains("--record-dir"), "{refused}");
+        let none = Reads { read_listen: None, read_token_file: None };
+        start_reads(&none, None, 1).await.unwrap();
+    }
+
+    #[test]
+    fn a_read_holds_at_most_so_many_bytes() {
+        let mut out = Capped { out: Vec::new(), left: 5 };
+        out.write_all(b"abc").unwrap();
+        out.write_all(b"de").unwrap();
+        assert_eq!(out.write_all(b"f").unwrap_err().kind(), io::ErrorKind::FileTooLarge);
+        assert_eq!(out.out, b"abcde");
+        out.flush().unwrap();
+    }
+
+    fn ws_sink() -> (
+        impl futures_util::Sink<tokio_tungstenite::tungstenite::Message, Error = ()> + Unpin,
+        Arc<Mutex<Vec<tokio_tungstenite::tungstenite::Message>>>,
+    ) {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = futures_util::sink::unfold(got.clone(), |got, m| async move {
+            got.lock().unwrap().push(m);
+            Ok::<_, ()>(got)
+        });
+        (Box::pin(sink), got)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tool_silent_too_long_ends_its_session() {
+        use tokio_tungstenite::tungstenite::Message;
+        let (sink, got) = ws_sink();
+        let silent = futures_util::stream::pending::<Result<Message, tokio_tungstenite::tungstenite::Error>>();
+        let idle = Duration::from_secs(75);
+        let ended =
+            tokio::spawn(websocket::pump(silent, sink, None, "WS>", "/".into(), websocket::Keepalive::Idle(idle)));
+        tokio::time::sleep(idle - Duration::from_secs(1)).await;
+        assert!(!ended.is_finished(), "not yet");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        assert!(ended.is_finished(), "past it: ended");
+        assert!(got.lock().unwrap().is_empty(), "no ping from this side");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_tool_is_pinged_while_the_upstream_says_nothing() {
+        use tokio_tungstenite::tungstenite::Message;
+        let (sink, got) = ws_sink();
+        let silent = futures_util::stream::pending::<Result<Message, tokio_tungstenite::tungstenite::Error>>();
+        let every = Duration::from_secs(30);
+        let pump =
+            tokio::spawn(websocket::pump(silent, sink, None, "WS<", "/".into(), websocket::Keepalive::Ping(every)));
+        tokio::time::sleep(every * 3 + Duration::from_secs(1)).await;
+        assert_eq!(*got.lock().unwrap(), vec![Message::Ping(Bytes::new()); 3]);
+        assert!(!pump.is_finished(), "an upstream may be quiet for as long as it likes");
+        pump.abort();
+    }
+
+    #[tokio::test]
+    async fn messages_are_passed_on_pings_are_not_and_a_close_ends_the_pump() {
+        use tokio_tungstenite::tungstenite::Message;
+        let (sink, got) = ws_sink();
+        let from = futures_util::stream::iter(
+            [
+                Message::text("a"),
+                Message::Ping(Bytes::new()),
+                Message::binary(vec![1]),
+                Message::Close(None),
+                Message::text("late"),
+            ]
+            .map(Ok),
+        );
+        websocket::pump(from, sink, None, "WS>", "/".into(), websocket::Keepalive::Idle(Duration::from_secs(5))).await;
+        assert_eq!(*got.lock().unwrap(), [Message::text("a"), Message::binary(vec![1]), Message::Close(None)]);
+    }
+
+    #[test]
+    fn a_read_carries_the_token_or_is_refused() {
+        let v = |s: &str| http::HeaderValue::from_str(s).unwrap();
+        assert!(authorized(None, None), "no token set: anyone on the address");
+        assert!(authorized(Some(&v("Bearer s3cret")), Some("s3cret")));
+        assert!(authorized(Some(&v("bearer s3cret")), Some("s3cret")), "the scheme in any case");
+        for bad in ["Bearer s3cre", "Bearer s3cret2", "Basic  s3cret", "Bearers3cret", "s3cret", "Bearer S3cret", ""] {
+            assert!(!authorized(Some(&v(bad)), Some("s3cret")), "{bad:?}");
+        }
+        assert!(!authorized(None, Some("s3cret")));
+    }
+
+    #[test]
+    fn a_websocket_handshake_is_a_get_asking_to_upgrade_to_websocket() {
+        let req = |method: &str, headers: &[(&str, &str)]| {
+            let mut r = Request::builder().method(method).uri("/v1/realtime");
+            for (k, v) in headers {
+                r = r.header(*k, *v);
+            }
+            r.body(()).unwrap()
+        };
+        let ws = [("upgrade", "websocket"), ("connection", "Upgrade")];
+        assert!(websocket::is_upgrade(&req("GET", &ws)));
+        assert!(websocket::is_upgrade(&req("GET", &[("upgrade", "WebSocket"), ("connection", "keep-alive, Upgrade")])));
+        assert!(!websocket::is_upgrade(&req("POST", &ws)), "only a GET");
+        assert!(!websocket::is_upgrade(&req("GET", &[("connection", "upgrade")])), "no upgrade");
+        assert!(!websocket::is_upgrade(&req("GET", &[("upgrade", "websocket")])), "no connection: upgrade");
+        assert!(!websocket::is_upgrade(&req("GET", &[("upgrade", "h2c"), ("connection", "upgrade")])), "not websocket");
     }
 
     #[test]
