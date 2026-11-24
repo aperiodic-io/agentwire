@@ -1,6 +1,7 @@
 # Roadmap: from a place to keep prompts to a place to use them
 
-Status: proposed 2026-11-23. Each step lands as its own pull request, test first (AGENTS.md).
+Status: phase 1 done (2026-11-23: #11, #13, #14, #15; the rename in #12); phase 2 in progress. Each step
+lands as its own pull request, test first (AGENTS.md), after an independent review.
 
 Deltapack is strong on the way in: one binary, OTLP over HTTP and gRPC, every common content coding,
 `--forward` to the backend a team already has, and setup for about 80 tools. It is weak on the way
@@ -8,7 +9,7 @@ out. A record's meta is its time, method, path, content type and encoding; `delt
 unpacks, gets a record by position and lists. To find "the prompt of trace `ab12`", a user unpacks
 everything and decodes OTLP protobuf themselves. The files are a cheap backup, not yet a tool.
 
-## Steps, in order
+## Phase 1: done
 
 | # | Step | What it adds | Why |
 |---|---|---|---|
@@ -18,7 +19,21 @@ everything and decodes OTLP protobuf themselves. The files are a cheap backup, n
 | 4 | **Prebuilt binaries** | Linux (x86_64, aarch64) binaries on every GitHub release; macOS (arm64) once the organisation has macOS runners (the job never got one) | Today the choice is `cargo install deltapack --features proxy` or the ghcr.io image: a host without Docker or a Rust toolchain has neither |
 | 5 | **README** | What the files are for (replay, eval sets, audit, cost), a demo that ends in a readable conversation, a FAQ (redaction, why not zstd in the backend, tenants), DPD1 moved to its own page | The README goes from "how to store" straight to the format |
 
-## Considered and left for later
+## Phase 2
+
+| # | Step | What it adds |
+|---|---|---|
+| A | **Read-side polish** | `log show --attr KEY=VALUE` (session, model or any attribute, without an index); `log estimate` (the ratio and the cost on a raw export, no file written); `log ls` and `log unpack` over many files; `log show \| head` ends quietly |
+| B | **Tenants and encryption at rest** | Records routed to a directory per tenant by a header, so a tenant is kept, shipped and deleted on its own; stored records encrypted with a key the operator holds |
+| C | **Forwarding to strict backends, and a read API** | Batches over a backend's body limit split before forwarding (New Relic, Datadog); an HTTP endpoint a backend can link a span to for its full prompt |
+| D | **Deployment and CI** | A docker-compose demo, Kubernetes manifests, and more tools run in CI (the OpenTelemetry Collector, Phoenix) |
+| E | **WebSocket** | `server` proxies and records WebSocket traffic: realtime and voice APIs |
+| F | **Bindings and the Collector** | Spans decoded in Python (and so pandas); Parquet through DuckDB; TypeScript and Go readers; an OpenTelemetry Collector exporter; the CLI in the Python wheel |
+
+Phase 1 left these for later. Phase 2 takes on all but two: an index of attributes (`--attr` filters
+without one; add it when files are too large to decode on each query) and built-in object-store
+clients (`--on-rotate` with the provider's CLI does the job; add them when an operator cannot run a
+CLI beside the collector).
 
 | Item | Why not now | Add when |
 |---|---|---|

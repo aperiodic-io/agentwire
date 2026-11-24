@@ -112,8 +112,8 @@ deltapack log stats ~/deltapack/*.dpk       # per file: records, their bytes, by
 deltapack log show ~/deltapack/*.dpk        # one JSON line per span or log record
 ```
 
-`log ls` lists a file's records and `log unpack` writes them back byte for byte, one file at a
-time ([Reading it back](#reading-it-back)).
+`log ls` lists the records and `log unpack` writes them back byte for byte
+([Reading it back](#reading-it-back)).
 
 It takes OTLP traces, logs and metrics, as protobuf or JSON, compressed or not (gzip, deflate,
 brotli, zstd, snappy). Nothing sits in the path of your model calls: unset the variable and
@@ -396,12 +396,27 @@ duckdb -c "SELECT name, count(*) FROM read_json('spans.jsonl') GROUP BY name"   
 requires; the spans of an exporter that writes them in base64 are shown, but `--trace` cannot find
 them. `--since` and `--until` take Unix ms or a duration ago (`90s`, `15m`, `2h`, `7d`).
 
+`--attr KEY=VALUE` keeps the spans and log records whose attribute, or resource attribute, has that
+value: a session, a model, a user (repeat it to need all of them). Numbers match by value (`1` and
+`1.0` alike); arrays and objects only as their exact JSON.
+
+```bash
+deltapack log show --attr gen_ai.request.model=gpt-4o --attr session.id=s-42 ~/deltapack/*.dpk
+```
+
 `stats` says what the files save: records, the bytes they stand for, the bytes on disk, and the
 ratio, per file (its name last, after a tab) and in total. A file it cannot read is named on stderr
 and skipped, and the command fails once the others are counted.
 
 ```bash
 deltapack log stats ~/deltapack/*.dpk
+```
+
+Before you run a collector, `estimate` says what your own export would save: JSON lines on stdin,
+nothing written.
+
+```bash
+deltapack log estimate --usd-per-gb 0.10 < exported-spans.jsonl
 ```
 
 ## What you can rely on
