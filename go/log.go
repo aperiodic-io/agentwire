@@ -96,42 +96,53 @@ func Open(src io.ReaderAt, size int64, maxBody int) (*Reader, error) {
 			return nil, fmt.Errorf("%w: truncated header", ErrMalformed)
 		}
 	}
+	truncated := func() (*Reader, error) {
+		r.Truncated = true
+		return r, nil
+	}
 	for {
 		start := pos
 		back, err := varint()
 		if errors.Is(err, io.EOF) && pos == start {
 			return r, nil // the end, between records
 		}
-		var meta []byte
-		var deltaLen uint64
-		if err == nil {
-			var metaLen uint64
-			if metaLen, err = varint(); err == nil && metaLen > r.maxBody {
-				return nil, ErrTooLarge
-			} else if err == nil {
-				if meta, err = read(int(metaLen)); err == nil {
-					deltaLen, err = varint()
-				}
-			}
-		}
-		if err == nil && deltaLen > r.maxBody+headerLen+64 {
-			return nil, ErrTooLarge
-		}
-		if err == nil {
-			_, err = in.Discard(int(deltaLen))
-			pos += int64(deltaLen)
-		}
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			r.Truncated = true
-			return r, nil
-		}
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return truncated()
+			}
 			return nil, err
 		}
 		i := uint64(len(r.records))
 		if back > i || back > r.window {
 			return nil, fmt.Errorf("%w: record %d names a base %d back", ErrMalformed, i, back)
 		}
+		metaLen, err := varint()
+		if errors.Is(err, io.EOF) {
+			return truncated()
+		} else if err != nil {
+			return nil, err
+		}
+		// lengths past the file's end are a record cut short: nothing is allocated for them
+		if metaLen > uint64(size-pos) {
+			return truncated()
+		}
+		meta, err := read(int(metaLen))
+		if err != nil {
+			return truncated()
+		}
+		deltaLen, err := varint()
+		if errors.Is(err, io.EOF) {
+			return truncated()
+		} else if err != nil {
+			return nil, err
+		}
+		if deltaLen > uint64(size-pos) {
+			return truncated()
+		}
+		if _, err := in.Discard(int(deltaLen)); err != nil {
+			return truncated()
+		}
+		pos += int64(deltaLen)
 		r.records = append(r.records, Record{Meta: meta, Back: back, Stored: deltaLen, offset: pos - int64(deltaLen)})
 	}
 }
@@ -248,7 +259,7 @@ func (r *Reader) Get(i int) ([]byte, error) {
 // Scan calls f with every record and its body, in order, each rebuilt once (it holds the last
 // window bodies, not the file).
 func (r *Reader) Scan(f func(i int, rec Record, body []byte) error) error {
-	recent := make([][]byte, 0, r.window+1)
+	var recent [][]byte // grown as read: the header's window is not trusted for an allocation
 	for i, rec := range r.records {
 		var base []byte
 		if rec.Back > 0 {

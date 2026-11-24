@@ -1,6 +1,6 @@
 // Reads DPK1 files (deltapack's SPEC.md §7): LLM request logs and trace spans stored as DPD1 deltas
-// against earlier records, every body checked by SHA-256. Node 22.15 or later (its zlib speaks
-// zstd); no dependencies. Files are those `deltapack collect`, the CLI and the Rust, Python and Go
+// against earlier records, every body checked by SHA-256. Node 22.19 or later (its zlib's zstd
+// takes a dictionary; 22.15 to 22.18 ignore it); no dependencies. Files are those `deltapack collect`, the CLI and the Rust, Python and Go
 // libraries write, sealed ones included.
 
 import { createDecipheriv, createHash, hkdfSync } from "node:crypto";
@@ -120,16 +120,16 @@ export class Reader {
       let back: number, metaLen: number, deltaLen: number, p: number;
       try {
         [back, p] = varint(data, pos);
+        const i = this.records.length;
+        if (back > i || back > this.window) {
+          throw new DeltapackError("malformed", `record ${i} names a base ${back} back`);
+        }
         [metaLen, p] = varint(data, p);
         if (metaLen > maxBody) throw new DeltapackError("too-large", "a meta past the limit");
         const meta = data.subarray(p, p + metaLen);
         p += metaLen;
         [deltaLen, p] = varint(data, p);
         if (p + deltaLen > data.length || meta.length < metaLen) throw new DeltapackError("malformed", "truncated record");
-        const i = this.records.length;
-        if (back > i || back > this.window) {
-          throw new DeltapackError("malformed", `record ${i} names a base ${back} back`);
-        }
         this.records.push({ meta, back, stored: deltaLen, offset: p });
         pos = p + deltaLen;
       } catch (e) {

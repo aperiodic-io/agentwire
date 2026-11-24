@@ -1,6 +1,6 @@
 # Deltapack (TypeScript)
 
-Reads DPK1 files in Node 22.15 or later, with no dependencies (Node's own zstd and crypto): what
+Reads DPK1 files in Node 22.19 or later, with no dependencies (Node's own zstd and crypto): what
 `deltapack collect`, the CLI and the Rust, Python and Go libraries write
 ([SPEC.md §7](../SPEC.md#7-dpk1-a-log-of-bodies-stored-as-deltas)), sealed files included. Every
 body is checked by SHA-256.

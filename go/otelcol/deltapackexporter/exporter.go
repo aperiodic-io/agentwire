@@ -75,7 +75,8 @@ func createLogs(ctx context.Context, set exporter.Settings, cfg component.Config
 		exporterhelper.WithStart(r.start), exporterhelper.WithShutdown(r.shutdown))
 }
 
-// one recorder per configuration: a traces and a logs pipeline to one directory share its files
+// one recorder per configuration: a traces and a logs pipeline to one directory share its files;
+// forgotten once both have shut down
 var recorders = shared{byConfig: map[*Config]*recorder{}}
 
 type shared struct {
@@ -89,13 +90,22 @@ func (s *shared) get(cfg *Config) *recorder {
 	if r, ok := s.byConfig[cfg]; ok {
 		return r
 	}
-	r := &recorder{cfg: *cfg}
+	r := &recorder{cfg: *cfg, key: cfg}
 	s.byConfig[cfg] = r
 	return r
 }
 
+func (s *shared) forget(r *recorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.byConfig[r.key] == r {
+		delete(s.byConfig, r.key)
+	}
+}
+
 type recorder struct {
 	cfg     Config
+	key     *Config
 	mu      sync.Mutex
 	started int
 	file    *os.File
@@ -107,38 +117,45 @@ type recorder struct {
 func (r *recorder) start(context.Context, component.Host) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.started++
-	if r.started > 1 {
-		return nil
+	if r.started == 0 {
+		if err := os.MkdirAll(r.cfg.Directory, 0o700); err != nil {
+			return err
+		}
+		if err := r.open(); err != nil {
+			return err
+		}
 	}
-	if err := os.MkdirAll(r.cfg.Directory, 0o700); err != nil {
-		return err
-	}
-	return r.open()
-}
-
-// open starts a new file, named as `deltapack collect` names its own: start time, pid, sequence.
-func (r *recorder) open() error {
-	name := fmt.Sprintf("%d-%d-%06d.dpk", time.Now().UnixMilli(), os.Getpid(), r.seq)
-	f, err := os.OpenFile(filepath.Join(r.cfg.Directory, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	w, err := deltapack.NewWriter(f, r.cfg.Window)
-	if err != nil {
-		f.Close()
-		return err
-	}
-	r.file, r.writer, r.written = f, w, 0
-	r.seq++
+	r.started++ // only once started: a failed start is tried again by the next pipeline's
 	return nil
 }
 
-func (r *recorder) shutdown(context.Context) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.started--
-	if r.started > 0 || r.file == nil {
+// open starts a new file, named as `deltapack collect` names its own: start time, pid, sequence.
+// A name taken (another exporter on this directory, the same millisecond) takes the next sequence.
+func (r *recorder) open() error {
+	for tries := 0; ; tries++ {
+		name := fmt.Sprintf("%d-%d-%06d.dpk", time.Now().UnixMilli(), os.Getpid(), r.seq)
+		r.seq++
+		f, err := os.OpenFile(filepath.Join(r.cfg.Directory, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) && tries < 100 {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		w, err := deltapack.NewWriter(f, r.cfg.Window)
+		if err != nil {
+			f.Close()
+			return err
+		}
+		r.file, r.writer, r.written = f, w, 0
+		return nil
+	}
+}
+
+// drop closes the file being written: after a write failed (a writer's error stays), or to
+// rotate. The next export opens a new one.
+func (r *recorder) drop() error {
+	if r.file == nil {
 		return nil
 	}
 	err := errors.Join(r.writer.Flush(), r.file.Close())
@@ -146,27 +163,45 @@ func (r *recorder) shutdown(context.Context) error {
 	return err
 }
 
-// append stores one export, flushed before the export is acknowledged.
+func (r *recorder) shutdown(context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.started == 0 {
+		return nil // never started (the Collector shuts down what failed to start too)
+	}
+	r.started--
+	if r.started > 0 {
+		return nil
+	}
+	recorders.forget(r)
+	return r.drop()
+}
+
+// append stores one export, flushed before the export is acknowledged. A failed write fails the
+// export (so it is retried) and starts a new file for the next.
 func (r *recorder) append(path string, ids []string, body []byte) error {
 	meta := fmt.Sprintf("%d POST %s application/x-protobuf - %s", time.Now().UnixMilli(), path, traceIDs(ids))
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.writer == nil {
+	if r.started == 0 {
 		return errors.New("the deltapack exporter is not started")
 	}
-	if r.written >= r.cfg.RotateBytes {
-		if err := errors.Join(r.writer.Flush(), r.file.Close()); err != nil {
+	if r.file != nil && r.written >= r.cfg.RotateBytes {
+		if err := r.drop(); err != nil {
 			return err
 		}
+	}
+	if r.file == nil {
 		if err := r.open(); err != nil {
 			return err
 		}
 	}
-	if _, err := r.writer.Append([]byte(meta), body); err != nil {
-		return err
+	_, err := r.writer.Append([]byte(meta), body)
+	if err == nil {
+		err = r.writer.Flush()
 	}
-	if err := r.writer.Flush(); err != nil {
-		return err
+	if err != nil {
+		return errors.Join(err, r.drop())
 	}
 	if st, err := r.file.Stat(); err == nil {
 		r.written = st.Size()
@@ -185,8 +220,10 @@ func (r *recorder) traces(_ context.Context, td ptrace.Traces) error {
 		for j := range ss.Len() {
 			spans := ss.At(j).Spans()
 			for k := range spans.Len() {
-				id := spans.At(k).TraceID()
-				ids = append(ids, hex.EncodeToString(id[:]))
+				// an empty id is none, as `collect` lists them
+				if id := spans.At(k).TraceID(); !id.IsEmpty() {
+					ids = append(ids, hex.EncodeToString(id[:]))
+				}
 			}
 		}
 	}

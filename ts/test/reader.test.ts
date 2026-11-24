@@ -99,6 +99,10 @@ test("what is not a DPK1 file is refused", () => {
   assert.throws(() => new Reader(Buffer.from([0x44, 0x50, 0x4b, 0x31, 1, 4, 1, 0, 0])), (e: DeltapackError) =>
     e.message.includes("names a base"),
   );
+  // a base before the start is refused even in a record cut short
+  assert.throws(() => new Reader(Buffer.from([0x44, 0x50, 0x4b, 0x31, 1, 4, 3, 5])), (e: DeltapackError) =>
+    e.message.includes("names a base"),
+  );
   // non-canonical and overlong varints
   assert.throws(() => new Reader(Buffer.from([0x44, 0x50, 0x4b, 0x31, 1, 0x84, 0x00])), (e: DeltapackError) =>
     e.message.includes("non-canonical"),

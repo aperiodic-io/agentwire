@@ -251,3 +251,74 @@ func TestTheCLIShowsATraceTheExporterStored(t *testing.T) {
 		t.Fatalf("trace 2's spans: %v", turns)
 	}
 }
+
+func TestAFailedWriteFailsTheExportAndTheNextGoesToANewFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{Directory: dir, Window: 16, RotateBytes: 1 << 30}
+	traces, _, stop := start(t, cfg)
+	traces(turn(1, 0))
+	r := recorders.get(cfg)
+	r.mu.Lock()
+	r.file.Close() // the disk goes away under the writer
+	r.mu.Unlock()
+	body, _ := (&ptrace.ProtoMarshaler{}).MarshalTraces(turn(1, 1))
+	if err := r.append("/v1/traces", nil, body); err == nil {
+		t.Fatal("a failed write is an error, so the export is retried")
+	}
+	traces(turn(1, 2))
+	stop()
+	found := files(t, dir)
+	if len(found) != 2 || read(t, found[1]).Len() != 1 {
+		t.Fatalf("a new file after the failure: %v", found)
+	}
+}
+
+func TestShutdownWithoutStartAndAStartThatFailed(t *testing.T) {
+	f := NewFactory()
+	blocked := filepath.Join(t.TempDir(), "a-file")
+	os.WriteFile(blocked, nil, 0o600)
+	cfg := &Config{Directory: blocked, Window: 16, RotateBytes: 1}
+	tr, err := f.CreateTraces(context.Background(), exportertest.NewNopSettings(f.Type()), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Shutdown(context.Background()); err != nil {
+		t.Fatal("never started: nothing to shut down", err)
+	}
+	if err := tr.Start(context.Background(), componenttest.NewNopHost()); err == nil {
+		t.Fatal("a directory that is a file cannot be recorded to")
+	}
+	r := recorders.get(cfg)
+	if r.started != 0 {
+		t.Fatalf("a failed start is not counted: %d", r.started)
+	}
+	if err := r.append("/v1/traces", nil, nil); err == nil {
+		t.Fatal("not started")
+	}
+}
+
+func TestTwoExportersOnOneDirectoryEachKeepTheirOwnFiles(t *testing.T) {
+	dir := t.TempDir()
+	a, _, stopA := start(t, &Config{Directory: dir, Window: 16, RotateBytes: 1 << 30})
+	b, _, stopB := start(t, &Config{Directory: dir, Window: 16, RotateBytes: 1 << 30})
+	a(turn(1, 0))
+	b(turn(2, 0))
+	stopA()
+	stopB()
+	if found := files(t, dir); len(found) != 2 {
+		t.Fatalf("%v", found)
+	}
+}
+
+func TestASpanWithoutATraceIDListsNone(t *testing.T) {
+	td := ptrace.NewTraces()
+	td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty().SetName("orphan")
+	dir := t.TempDir()
+	traces, _, stop := start(t, &Config{Directory: dir, Window: 16, RotateBytes: 1 << 30})
+	traces(td)
+	stop()
+	meta := strings.Fields(string(read(t, files(t, dir)[0]).Records()[0].Meta))
+	if meta[5] != "-" {
+		t.Fatalf("%v", meta)
+	}
+}

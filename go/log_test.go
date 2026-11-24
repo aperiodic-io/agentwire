@@ -293,3 +293,53 @@ func TestASealedFileIsReadWithItsKeyOnly(t *testing.T) {
 		t.Fatal("a short key")
 	}
 }
+
+func TestAHeaderWindowIsNotTrustedForAnAllocation(t *testing.T) {
+	var buf bytes.Buffer
+	w, _ := NewWriter(&buf, 4)
+	w.Append(nil, []byte("one"))
+	w.Flush()
+	data := buf.Bytes()
+	huge := append(appendVarint([]byte("DPK1\x01"), 1<<62), data[6:]...) // the window, replaced
+	r, err := Open(bytes.NewReader(huge), int64(len(huge)), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Scan(func(int, Record, []byte) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestARecordStoredWholeAtTheLimitOpens(t *testing.T) {
+	body := make([]byte, 4<<20)
+	for i := range body {
+		body[i] = byte(i*7919 ^ i>>8) // little to compress
+	}
+	path := filepath.Join(t.TempDir(), "big.dpk")
+	write(t, path, 4, [][]byte{body})
+	f, _ := os.Open(path)
+	defer f.Close()
+	st, _ := f.Stat()
+	r, err := Open(f, st.Size(), len(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.Get(0); err != nil || !bytes.Equal(got, body) {
+		t.Fatal(err)
+	}
+}
+
+func TestLengthsPastTheEndAreARecordCutShort(t *testing.T) {
+	data := appendVarint([]byte("DPK1\x01"), 4)
+	data = append(data, 0)           // back
+	data = appendVarint(data, 1<<30) // a meta of 1 GiB, in a file of a few bytes
+	r, err := Open(bytes.NewReader(data), int64(len(data)), 1<<31)
+	if err != nil || !r.Truncated || r.Len() != 0 {
+		t.Fatalf("%v %v", err, r)
+	}
+	// a base before the start is refused even in a record cut short
+	bad := append(appendVarint([]byte("DPK1\x01"), 4), 3, 5)
+	if _, err := Open(bytes.NewReader(bad), int64(len(bad)), 1<<20); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("got %v", err)
+	}
+}
