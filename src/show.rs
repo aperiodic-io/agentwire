@@ -137,6 +137,8 @@ pub fn whole(body: &[u8]) -> Value {
 #[derive(Debug, Default)]
 pub struct Filter {
     pub trace: Option<String>,
+    /// attribute (or resource attribute) = value, all of them
+    pub attrs: Vec<(String, String)>,
     /// Unix ms, inclusive
     pub since: Option<u64>,
     pub until: Option<u64>,
@@ -158,7 +160,14 @@ impl Filter {
 
     /// Whether a row of a wanted record is shown.
     pub fn keeps(&self, row: &Value) -> bool {
-        self.trace.as_deref().is_none_or(|t| row["trace_id"] == t)
+        let has = |(k, want): &(String, String)| {
+            [&row["attributes"][k], &row["resource"][k]].iter().any(|v| match v {
+                Value::String(s) => s == want,
+                Value::Null => false,
+                v => v.to_string() == *want,
+            })
+        };
+        self.trace.as_deref().is_none_or(|t| row["trace_id"] == t) && self.attrs.iter().all(has)
     }
 }
 
@@ -187,6 +196,14 @@ impl<'a> Meta<'a> {
     /// Whether the body is stored decoded, so that it can be read as OTLP.
     pub fn decoded(&self) -> bool {
         self.encoding.is_none_or(|e| e == "-")
+    }
+}
+
+/// An attribute as `--attr` takes it: `key=value`, split at the first `=`.
+pub fn attr(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((k, v)) if !k.is_empty() => Ok((k.into(), v.into())),
+        _ => Err(format!("{s:?} is not key=value")),
     }
 }
 
@@ -933,6 +950,36 @@ mod tests {
         assert!(!trace.keeps(&json!({"trace_id": "aa"})));
         assert!(!trace.keeps(&json!({"body": "x"})));
         assert!(all.keeps(&json!({"body": "x"})));
+    }
+
+    #[test]
+    fn rows_are_kept_by_attribute_values() {
+        let row = json!({"attributes": {"model": "m1", "tokens": 3, "ok": true}, "resource": {"service.name": "swe"}});
+        let with = |attrs: &[(&str, &str)]| Filter {
+            attrs: attrs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            ..Filter::default()
+        };
+        assert!(with(&[]).keeps(&row));
+        assert!(with(&[("model", "m1")]).keeps(&row));
+        assert!(with(&[("tokens", "3")]).keeps(&row), "a number by its digits");
+        assert!(with(&[("ok", "true")]).keeps(&row));
+        assert!(with(&[("service.name", "swe")]).keeps(&row), "a resource attribute");
+        assert!(with(&[("model", "m1"), ("service.name", "swe")]).keeps(&row), "all of them");
+        assert!(!with(&[("model", "m1"), ("service.name", "x")]).keeps(&row));
+        assert!(!with(&[("model", "m2")]).keeps(&row));
+        assert!(!with(&[("absent", "m1")]).keeps(&row));
+        assert!(!with(&[("model", "m1")]).keeps(&json!({"body": "not OTLP"})));
+        let both = Filter { trace: Some("aa".into()), ..with(&[("model", "m1")]) };
+        assert!(!both.keeps(&row), "and the trace too");
+    }
+
+    #[test]
+    fn attributes_are_given_as_key_equals_value() {
+        assert_eq!(attr("model=m1"), Ok(("model".into(), "m1".into())));
+        assert_eq!(attr("q=a=b"), Ok(("q".into(), "a=b".into())), "the first = splits");
+        assert_eq!(attr("empty="), Ok(("empty".into(), "".into())));
+        assert!(attr("=v").is_err());
+        assert!(attr("novalue").is_err());
     }
 
     #[test]

@@ -41,6 +41,8 @@ Feature: Logs and traces cross the network as deltas and are stored as deltas
     Then the recording spans several files, each readable on its own, holding every batch in order
     And the collector reports 24 records stored in under 25% of their bytes, and no failures
     And `deltapack log stats` over every file reports each file, then their total
+    And `deltapack log unpack` over every file gives every batch in order
+    And `deltapack log ls` over every file lists every batch, each line led by its file
 
   Scenario: A collector refuses a body over its size limit before it keeps it as a base
     Given a deltapack collector recording to a directory, with a size limit of 1000 bytes

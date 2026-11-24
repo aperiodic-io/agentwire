@@ -169,7 +169,8 @@ enum LogCmd {
     },
     /// Write every record's body to stdout, one per line: `pack`'s input back.
     Unpack {
-        file: PathBuf,
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
         #[arg(long, default_value_t = 64 << 20)]
         max_body: usize,
     },
@@ -180,8 +181,22 @@ enum LogCmd {
         #[arg(long, default_value_t = 64 << 20)]
         max_body: usize,
     },
-    /// List the records: index, records back to its base (0: stored whole), bytes stored, meta.
-    Ls { file: PathBuf },
+    /// List the records: index, records back to its base (0: stored whole), bytes stored, meta. Given
+    /// more than one file, each line starts with its file and a tab.
+    Ls {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
+    /// Read JSON lines (or any lines) from stdin and say what `pack` would store, without writing a
+    /// file: records, their bytes, the bytes packed, the ratio; with --usd-per-gb, the cost of each.
+    Estimate {
+        /// Records a new one may delta against: about one per trace or conversation interleaved.
+        #[arg(long, default_value_t = 16)]
+        window: usize,
+        /// A storage price, to say what each would cost.
+        #[arg(long)]
+        usd_per_gb: Option<f64>,
+    },
     /// Per file: its records, the bytes they stand for, its bytes on disk and the ratio, then a tab
     /// and its name; then `(total)`, when given more than one file. A file that cannot be read is
     /// named on stderr, and the command fails once the others are counted.
@@ -205,6 +220,10 @@ enum LogCmd {
         /// Only records received at or before this time, in the same forms.
         #[arg(long)]
         until: Option<String>,
+        /// Only spans and log records whose attribute, or resource attribute, KEY has VALUE
+        /// (repeat: all of them), e.g. --attr gen_ai.request.model=gpt-4o --attr session.id=s1.
+        #[arg(long = "attr", value_name = "KEY=VALUE", value_parser = show::attr)]
+        attrs: Vec<(String, String)>,
         #[arg(long, default_value_t = 64 << 20)]
         max_body: usize,
     },
@@ -214,7 +233,11 @@ enum LogCmd {
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
     if let Mode::Log(cmd) = cli.mode {
-        return run_log(cmd);
+        return match run_log(cmd) {
+            // a reader that stopped reading (`| head`): the rest has nowhere to go, which is no error
+            Err(e) if e.downcast_ref::<io::Error>().is_some_and(|e| e.kind() == io::ErrorKind::BrokenPipe) => Ok(()),
+            done => done,
+        };
     }
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -734,20 +757,39 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
             }
             w.flush()?;
         }
-        LogCmd::Unpack { file, max_body } => {
-            let mut r = open_log(&file, max_body)?;
-            r.scan(|_, body| {
-                out.write_all(body)?;
-                out.write_all(b"\n")
-            })?;
+        LogCmd::Unpack { files, max_body } => {
+            for file in &files {
+                open_log(file, max_body)?.scan(|_, body| {
+                    out.write_all(body)?;
+                    out.write_all(b"\n")
+                })?;
+            }
+        }
+        LogCmd::Estimate { window, usd_per_gb } => {
+            let mut w = log::Writer::new(Vec::new(), window)?;
+            let (mut records, mut body) = (0u64, 0u64);
+            for line in io::stdin().lock().split(b'\n') {
+                let line = line?;
+                (records, body) = (records + 1, body + line.len() as u64);
+                w.append(b"", Bytes::from(line))?;
+            }
+            w.flush()?;
+            let packed = w.into_inner().len() as u64;
+            write!(out, "{records} records, {body} bytes, packed in {packed} ({:.1}x)", body as f64 / packed as f64)?;
+            if let Some(usd) = usd_per_gb {
+                let cost = |b: u64| b as f64 / 1e9 * usd;
+                write!(out, "; at ${usd:.2} per GB: ${:.6} as is, ${:.6} packed", cost(body), cost(packed))?;
+            }
+            writeln!(out)?;
         }
         LogCmd::Get { file, index, max_body } => out.write_all(&open_log(&file, max_body)?.get(index)?)?,
-        LogCmd::Show { files, trace, since, until, max_body } => {
+        LogCmd::Show { files, trace, since, until, attrs, max_body } => {
             let now = unix_ms() as u64;
             let filter = show::Filter {
                 trace: trace.map(|t| t.to_ascii_lowercase()),
                 since: since.map(|s| show::when(&s, now)).transpose()?,
                 until: until.map(|s| show::when(&s, now)).transpose()?,
+                attrs,
             };
             for file in &files {
                 let name = serde_json::Value::from(file.display().to_string());
@@ -800,9 +842,12 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
                 return Err(format!("{unread} of {} files could not be read", files.len()).into());
             }
         }
-        LogCmd::Ls { file } => {
-            for (i, r) in open_log(&file, 0)?.records().iter().enumerate() {
-                writeln!(out, "{i} {} {} {}", r.back, r.stored, String::from_utf8_lossy(&r.meta))?;
+        LogCmd::Ls { files } => {
+            for file in &files {
+                let lead = if files.len() > 1 { format!("{}\t", file.display()) } else { String::new() };
+                for (i, r) in open_log(file, 0)?.records().iter().enumerate() {
+                    writeln!(out, "{lead}{i} {} {} {}", r.back, r.stored, String::from_utf8_lossy(&r.meta))?;
+                }
             }
         }
     }

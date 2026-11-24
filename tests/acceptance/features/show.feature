@@ -33,3 +33,15 @@ Feature: A trace is found and read back as JSON lines
     When an exporter posts a batch of spans to "/v1/traces" in a coding deltapack does not decode
     Then its record's meta lists its trace ids as unknown
     And `deltapack log show` gives the record whole
+
+  Scenario: Spans are kept by the value of an attribute or a resource attribute
+    Given a deltapack collector recording to a directory
+    When a gRPC exporter sends 4 protobuf trace exports of 2 traces each
+    Then `deltapack log show --attr gen_ai.usage.input_tokens=3` gives the 2 spans of turn 3
+    And `deltapack log show --attr service.name=swe --attr gen_ai.usage.input_tokens=3` gives the 2 spans of turn 3
+    And `deltapack log show --attr service.name=other` gives none
+
+  Scenario: Reading only the start of `deltapack log show` ends it quietly
+    Given a deltapack collector recording to a directory
+    When an exporter posts 6 gzip-compressed JSON batches of spans to "/v1/traces"
+    Then `deltapack log show` read to its first line only ends with success and nothing on stderr

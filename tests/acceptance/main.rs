@@ -1321,6 +1321,90 @@ async fn stats_with_a_bad_file(w: &mut Proxies) {
     assert_eq!((stats[2].1, stats[2].2, stats[2].3), (stats[0].1 * 2, stats[0].2 * 2, stats[0].3 * 2));
 }
 
+#[then(expr = "`deltapack log show --attr gen_ai.usage.input_tokens={int}` gives the {int} spans of turn {int}")]
+async fn show_by_attr(w: &mut Proxies, tokens: u64, n: usize, turn: u64) {
+    let rows = show(w, &["--attr", &format!("gen_ai.usage.input_tokens={tokens}")]).await;
+    assert_eq!(rows.len(), n, "{rows:?}");
+    assert!(rows.iter().all(|r| r["attributes"]["gen_ai.usage.input_tokens"] == turn));
+}
+
+#[then(
+    expr = "`deltapack log show --attr service.name=swe --attr gen_ai.usage.input_tokens={int}` gives the {int} spans of turn {int}"
+)]
+async fn show_by_two_attrs(w: &mut Proxies, tokens: u64, n: usize, turn: u64) {
+    let rows = show(w, &["--attr", "service.name=swe", "--attr", &format!("gen_ai.usage.input_tokens={tokens}")]).await;
+    assert_eq!(rows.len(), n, "{rows:?}");
+    assert!(rows.iter().all(|r| r["attributes"]["gen_ai.usage.input_tokens"] == turn));
+}
+
+#[then("`deltapack log show --attr service.name=other` gives none")]
+async fn show_by_absent_attr(w: &mut Proxies) {
+    assert_eq!(show(w, &["--attr", "service.name=other"]).await, Vec::<serde_json::Value>::new());
+}
+
+#[then("`deltapack log show` read to its first line only ends with success and nothing on stderr")]
+async fn show_head(w: &mut Proxies) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_deltapack"))
+        .args(["log", "show", &recording(w)])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    assert!(lines.next_line().await.unwrap().is_some(), "a first line");
+    drop(lines); // as `| head -1` does: the rest of the output has nowhere to go
+    let out = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await.unwrap().unwrap();
+    assert!(out.status.success(), "{}", out.status);
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+}
+
+#[then(
+    expr = "`deltapack log estimate --usd-per-gb {float}` on the same lines reports their {int} records, their bytes, the packed file's size and the cost of each"
+)]
+async fn estimate(w: &mut Proxies, usd: f64, records: u64) {
+    let out = String::from_utf8(log(&["estimate", "--usd-per-gb", &usd.to_string()], &jsonl(&w.lines)).await).unwrap();
+    let body: u64 = w.lines.iter().map(|l| l.len() as u64).sum();
+    let packed = std::fs::metadata(w.packed.as_ref().unwrap()).unwrap().len();
+    let gb = |b: u64| b as f64 / 1e9 * usd;
+    let expected = format!(
+        "{records} records, {body} bytes, packed in {packed} ({:.1}x); at ${usd:.2} per GB: ${:.6} as is, ${:.6} packed\n",
+        body as f64 / packed as f64,
+        gb(body),
+        gb(packed)
+    );
+    assert_eq!(out, expected);
+}
+
+#[then("`deltapack log unpack` over every file gives every batch in order")]
+async fn unpack_files(w: &mut Proxies) {
+    let files: Vec<String> =
+        files_in(w.record_dir.as_ref().unwrap()).iter().map(|f| f.0.to_str().unwrap().to_owned()).collect();
+    let args: Vec<&str> = std::iter::once("unpack").chain(files.iter().map(String::as_str)).collect();
+    let expected: Vec<u8> = w.sent.iter().flat_map(|s| [&s.body[..], b"\n"].concat()).collect();
+    assert!(log(&args, b"").await == expected, "every batch, in order");
+}
+
+#[then("`deltapack log ls` over every file lists every batch, each line led by its file")]
+async fn ls_files(w: &mut Proxies) {
+    let files: Vec<String> =
+        files_in(w.record_dir.as_ref().unwrap()).iter().map(|f| f.0.to_str().unwrap().to_owned()).collect();
+    let args: Vec<&str> = std::iter::once("ls").chain(files.iter().map(String::as_str)).collect();
+    let out = String::from_utf8(log(&args, b"").await).unwrap();
+    assert_eq!(out.lines().count(), w.sent.len(), "{out}");
+    let mut last: Option<(String, u64)> = None;
+    for line in out.lines() {
+        let (file, rest) = line.split_once('\t').unwrap_or_else(|| panic!("no tab: {line}"));
+        assert!(files.iter().any(|f| f == file), "{line}");
+        let index: u64 = rest.split(' ').next().unwrap().parse().unwrap();
+        // indexes count from 0 in each file, files in the order given
+        match &last {
+            Some((f, i)) if f == file => assert_eq!(index, i + 1),
+            _ => assert_eq!(index, 0),
+        }
+        last = Some((file.to_owned(), index));
+    }
+}
+
 #[tokio::main]
 async fn main() {
     Proxies::cucumber().fail_on_skipped().run_and_exit("tests/acceptance/features").await;

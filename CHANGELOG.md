@@ -5,6 +5,10 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- `log show --attr KEY=VALUE` keeps the spans and log records with that attribute or resource
+  attribute (repeat for all of them). `log estimate` reads lines on stdin and says what `pack` would
+  store, and with `--usd-per-gb` what each would cost. `log ls` and `log unpack` take many files.
+  `log show | head` (or any reader that stops) ends with success, not an error.
 - README: what the files are for, a one-minute demo, a FAQ; DPD1 (the codec on the wire, its
   library, deploying, performance and security) moved to `docs/dpd1.md`.
 - Each release carries a `deltapack` binary for Linux (x86_64 and aarch64, static musl), each with

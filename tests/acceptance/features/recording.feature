@@ -23,3 +23,8 @@ Feature: Every request is stored as a delta, and read back byte for byte
     Given 3 traces of 8 spans, each span carrying the whole prompt, as JSON lines
     When they are packed with `deltapack log pack`
     Then `deltapack log stats` over it, a copy whose name has a space and an empty file reports both copies and their total, names the empty file and fails
+
+  Scenario: `deltapack log estimate` says what packing would save, without writing a file
+    Given 3 traces of 8 spans, each span carrying the whole prompt, as JSON lines
+    When they are packed with `deltapack log pack`
+    Then `deltapack log estimate --usd-per-gb 0.10` on the same lines reports their 24 records, their bytes, the packed file's size and the cost of each
