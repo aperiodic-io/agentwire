@@ -10,7 +10,8 @@ _Path = Union[str, PathLike[str]]
 class Writer:
     """Appends records to a new DPK1 file (never an existing one: FileExistsError)."""
 
-    def __init__(self, path: _Path, window: int = 16) -> None: ...
+    def __init__(self, path: _Path, window: int = 16, key: Optional[str] = None) -> None:
+        """With `key` (64 hex digits), every record is sealed with it."""
     def append(self, body: _Bytes, meta: Optional[_Bytes] = None) -> int:
         """Appends `body` with its `meta` (stored as is) and returns the record's index."""
     def flush(self) -> None: ...
@@ -21,7 +22,11 @@ class Writer:
 class Reader:
     """Reads a DPK1 file; a record that does not rebuild the body it names raises ValueError."""
 
-    def __init__(self, path: _Path, max_body: int = 64 << 20) -> None: ...
+    def __init__(self, path: _Path, max_body: int = 64 << 20, key: Optional[str] = None) -> None:
+        """`key` (64 hex digits) reads a sealed file: without it, or with another, ValueError."""
+    @property
+    def sealed(self) -> bool:
+        """The file's records are sealed: reading them needs its key."""
     def __len__(self) -> int: ...
     @property
     def truncated(self) -> bool:

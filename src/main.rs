@@ -87,6 +87,8 @@ enum Mode {
         retention: Retention,
         #[command(flatten)]
         tenants: Tenants,
+        #[command(flatten)]
+        keys: Keys,
     },
     /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
     /// DPK1, decoded (gzip, deflate, br, zstd, snappy); forward each request as received when given a backend. Also accepts
@@ -119,6 +121,8 @@ enum Mode {
         retention: Retention,
         #[command(flatten)]
         tenants: Tenants,
+        #[command(flatten)]
+        keys: Keys,
     },
     /// Accept plain requests from a local tool and send them to a `deltapack server` as deltas.
     Client {
@@ -137,8 +141,13 @@ enum Mode {
         metrics: Option<SocketAddr>,
     },
     /// Read and write DPK1 files: bodies stored as deltas against earlier ones.
-    #[command(subcommand)]
-    Log(LogCmd),
+    Log {
+        /// The key sealed files were sealed with (a file of 64 hex digits); `pack` seals with it.
+        #[arg(long, env = "DELTAPACK_KEY_FILE", global = true)]
+        key_file: Option<PathBuf>,
+        #[command(subcommand)]
+        cmd: LogCmd,
+    },
 }
 
 /// What happens to a record directory's closed files. Files are deleted oldest first; the open file
@@ -173,6 +182,27 @@ struct Tenants {
     /// Tenants given a directory of their own; requests of any more share `_other`.
     #[arg(long, env = "DELTAPACK_MAX_TENANTS", default_value_t = 256)]
     max_tenants: usize,
+}
+
+/// Records sealed at rest: a key for all, or one per tenant.
+#[derive(clap::Args, Clone, Default)]
+struct Keys {
+    /// Seal every record with this key: a file of 64 hex digits (`openssl rand -hex 32`). Bodies
+    /// are unreadable without it; each record's meta (time, method, path, trace ids) is not sealed.
+    #[arg(long, env = "DELTAPACK_KEY_FILE", conflicts_with = "key_dir")]
+    key_file: Option<PathBuf>,
+    /// With --tenant-header: seal each tenant's records with its own key, DIR/<tenant>.key. Deleting
+    /// a tenant's key makes its records unreadable everywhere, copies included. A tenant without a
+    /// key is not recorded.
+    #[arg(long, env = "DELTAPACK_KEY_DIR", requires = "tenant_header")]
+    key_dir: Option<PathBuf>,
+}
+
+/// A key file: 64 hex digits.
+fn read_key(path: &std::path::Path) -> io::Result<log::Key> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    log::Key::from_hex(&text).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }
 
 #[derive(Subcommand)]
@@ -249,8 +279,9 @@ enum LogCmd {
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
-    if let Mode::Log(cmd) = cli.mode {
-        return match run_log(cmd) {
+    if let Mode::Log { key_file, cmd } = cli.mode {
+        let key = key_file.as_deref().map(read_key).transpose()?;
+        return match run_log(cmd, key.as_ref()) {
             // a reader that stopped reading (`| head`): the rest has nowhere to go, which is no error
             Err(e) if e.downcast_ref::<io::Error>().is_some_and(|e| e.kind() == io::ErrorKind::BrokenPipe) => Ok(()),
             done => done,
@@ -266,7 +297,7 @@ async fn main() -> Result<(), BoxError> {
         .connect_timeout(Duration::from_secs(10))
         .build()?;
     match cli.mode {
-        Mode::Log(_) => unreachable!("handled above"),
+        Mode::Log { .. } => unreachable!("handled above"),
         Mode::Server {
             listen,
             upstream,
@@ -280,9 +311,10 @@ async fn main() -> Result<(), BoxError> {
             rotate_bytes,
             retention,
             tenants,
+            keys,
         } => {
             let record = match record_dir {
-                Some(dir) => Some(Recorders::start(dir, record_window, rotate_bytes, retention, tenants)?),
+                Some(dir) => Some(Recorders::start(dir, record_window, rotate_bytes, retention, tenants, keys)?),
                 None => None,
             };
             let store = Store::new(store_bytes, Duration::from_secs(ttl_seconds));
@@ -301,8 +333,9 @@ async fn main() -> Result<(), BoxError> {
             metrics,
             retention,
             tenants,
+            keys,
         } => {
-            let record = Some(Recorders::start(record_dir, record_window, rotate_bytes, retention, tenants)?);
+            let record = Some(Recorders::start(record_dir, record_window, rotate_bytes, retention, tenants, keys)?);
             let forward = Forward { http, upstream: forward.map(Arc::new), record, max_body, grpc: true };
             let config = Config { max_body, ..Config::default() };
             run_server(listen, Store::new(1 << 30, Duration::from_secs(1800)), config, metrics, forward).await
@@ -410,6 +443,9 @@ struct Recorders {
     rotate_bytes: u64,
     retention: Retention,
     tenants: Tenants,
+    /// --key-dir, or the key of --key-file
+    key_dir: Option<PathBuf>,
+    key: Option<log::Key>,
     /// by tenant ("" without --tenant-header)
     open: Arc<Mutex<std::collections::HashMap<String, Recorder>>>,
 }
@@ -421,11 +457,22 @@ impl Recorders {
         rotate_bytes: u64,
         retention: Retention,
         tenants: Tenants,
+        keys: Keys,
     ) -> io::Result<Self> {
-        let r = Recorders { root, window, rotate_bytes, retention, tenants, open: Default::default() };
+        let key = keys.key_file.as_deref().map(read_key).transpose()?;
+        let r = Recorders {
+            root,
+            window,
+            rotate_bytes,
+            retention,
+            tenants,
+            key_dir: keys.key_dir,
+            key,
+            open: Default::default(),
+        };
         if r.tenants.tenant_header.is_none() {
             // one recording: started now, so that a directory it cannot use stops the process
-            let one = Recording::start(r.root.clone(), window, rotate_bytes, r.retention.clone())?;
+            let one = Recording::start(r.root.clone(), window, rotate_bytes, r.retention.clone(), r.key.clone())?;
             lock_open(&r.open).insert(String::new(), one);
         }
         Ok(r)
@@ -442,7 +489,15 @@ impl Recorders {
         if let Some(r) = open.get(&tenant) {
             return Some(r.clone());
         }
-        match Recording::start(self.root.join(&tenant), self.window, self.rotate_bytes, self.retention.clone()) {
+        // a tenant's own key (--key-dir), or the one for all
+        let key = match &self.key_dir {
+            Some(dir) => read_key(&dir.join(format!("{tenant}.key"))).map(Some),
+            None => Ok(self.key.clone()),
+        };
+        let started = key.and_then(|key| {
+            Recording::start(self.root.join(&tenant), self.window, self.rotate_bytes, self.retention.clone(), key)
+        });
+        match started {
             Ok(r) => Some(open.entry(tenant).or_insert(r).clone()),
             Err(e) => {
                 tracing::error!(tenant, error = %e, "cannot record for this tenant; forwarding unrecorded");
@@ -495,6 +550,8 @@ fn lock(r: &Recorder) -> std::sync::MutexGuard<'_, Recording> {
 /// one, and in order by name. Each is self-contained: a new one starts without bases.
 struct Recording {
     dir: PathBuf,
+    /// what each file's records are sealed with, if anything
+    key: Option<log::Key>,
     window: usize,
     rotate_bytes: u64,
     path: PathBuf,
@@ -519,7 +576,13 @@ struct Recording {
 impl Recording {
     /// Opens a new file in `dir`; hands the files already there to `--on-rotate`, and applies
     /// retention now, at each new file, and hourly when it keeps by age.
-    fn start(dir: PathBuf, window: usize, rotate_bytes: u64, retention: Retention) -> io::Result<Recorder> {
+    fn start(
+        dir: PathBuf,
+        window: usize,
+        rotate_bytes: u64,
+        retention: Retention,
+        key: Option<log::Key>,
+    ) -> io::Result<Recorder> {
         std::fs::create_dir_all(&dir)?;
         // the directory itself is locked (flock), so it holds nothing but its files
         let dir_lock = File::open(&dir)?;
@@ -535,7 +598,7 @@ impl Recording {
             }
         }
         let earlier = dpk_files(&dir)?;
-        let (path, writer) = Self::create(&dir, window, 0)?;
+        let (path, writer) = Self::create(&dir, window, 0, key.as_ref())?;
         let by_age = retention.keep_days.is_some();
         let (held, command_failures) = (Arc::<Mutex<HashSet<PathBuf>>>::default(), Arc::<AtomicU64>::default());
         let commands = retention.on_rotate.clone().map(|command| {
@@ -576,6 +639,7 @@ impl Recording {
             commands,
             command_failures,
             _lock: dir_lock,
+            key,
         };
         for (file, ..) in earlier {
             r.hand_over(file);
@@ -622,11 +686,19 @@ impl Recording {
         }
     }
 
-    fn create(dir: &std::path::Path, window: usize, seq: u64) -> io::Result<(PathBuf, log::Writer<BufWriter<File>>)> {
+    fn create(
+        dir: &std::path::Path,
+        window: usize,
+        seq: u64,
+        key: Option<&log::Key>,
+    ) -> io::Result<(PathBuf, log::Writer<BufWriter<File>>)> {
         let path = dir.join(format!("{}-{}-{seq:06}.dpk", unix_ms(), std::process::id()));
         let file = File::options().write(true).create_new(true).open(&path)?;
         tracing::info!(path = %path.display(), "recording");
-        let mut w = log::Writer::new(BufWriter::new(file), window)?;
+        let mut w = match key {
+            Some(key) => log::Writer::new_sealed(BufWriter::new(file), window, key)?,
+            None => log::Writer::new(BufWriter::new(file), window)?,
+        };
         w.flush()?; // a valid, empty DPK1 file before the first record
         Ok((path, w))
     }
@@ -635,7 +707,7 @@ impl Recording {
         // first, so that a full disk is freed before the new file needs room (the open file is kept)
         self.prune();
         let len = std::fs::metadata(&self.path).map_or(0, |m| m.len());
-        let (path, writer) = Self::create(&self.dir, self.window, self.seq + 1)?;
+        let (path, writer) = Self::create(&self.dir, self.window, self.seq + 1, self.key.as_ref())?;
         let old = std::mem::replace(&mut self.path, path);
         (self.closed, self.seq, self.writer) = (self.closed + len, self.seq + 1, writer);
         self.hand_over(old);
@@ -855,12 +927,15 @@ async fn export(
     }
 }
 
-fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
+fn run_log(cmd: LogCmd, key: Option<&log::Key>) -> Result<(), BoxError> {
     let mut out = BufWriter::new(io::stdout().lock());
     match cmd {
         LogCmd::Pack { file, window } => {
             let file = File::options().write(true).create_new(true).open(file)?;
-            let mut w = log::Writer::new(BufWriter::new(file), window)?;
+            let mut w = match key {
+                Some(key) => log::Writer::new_sealed(BufWriter::new(file), window, key)?,
+                None => log::Writer::new(BufWriter::new(file), window)?,
+            };
             for line in io::stdin().lock().split(b'\n') {
                 w.append(b"", Bytes::from(line?))?;
             }
@@ -868,7 +943,7 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
         }
         LogCmd::Unpack { files, max_body } => {
             for file in &files {
-                open_log(file, max_body)?.scan(|_, body| {
+                open_log(file, max_body, key)?.scan(|_, body| {
                     out.write_all(body)?;
                     out.write_all(b"\n")
                 })?;
@@ -891,7 +966,7 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
             }
             writeln!(out)?;
         }
-        LogCmd::Get { file, index, max_body } => out.write_all(&open_log(&file, max_body)?.get(index)?)?,
+        LogCmd::Get { file, index, max_body } => out.write_all(&open_log(&file, max_body, key)?.get(index)?)?,
         LogCmd::Show { files, trace, since, until, attrs, max_body } => {
             let now = unix_ms() as u64;
             let filter = show::Filter {
@@ -905,7 +980,7 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
                 let mut index = 0;
                 // ponytail: every record is rebuilt to reach the ones wanted; `get` per indexed match
                 // when files outgrow a scan
-                open_log(file, max_body)?.scan(|record, body| {
+                open_log(file, max_body, key)?.scan(|record, body| {
                     let meta = show::Meta::parse(&record.meta);
                     if filter.wants(&meta) {
                         let otlp = meta.decoded().then(|| show::rows(body, meta.path.and_then(show::signal)));
@@ -929,7 +1004,7 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
                 // a file being written, deleted by retention or not DPK1 is named and skipped
                 let counted = std::fs::metadata(file).and_then(|m| {
                     let (mut records, mut body) = (0, 0);
-                    open_log(file, max_body)?.scan(|_, b| {
+                    open_log(file, max_body, key)?.scan(|_, b| {
                         (records, body) = (records + 1, body + b.len() as u64);
                         Ok(())
                     })?;
@@ -954,7 +1029,7 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
         LogCmd::Ls { files } => {
             for file in &files {
                 let lead = if files.len() > 1 { format!("{}\t", file.display()) } else { String::new() };
-                for (i, r) in open_log(file, 0)?.records().iter().enumerate() {
+                for (i, r) in open_log(file, 0, key)?.records().iter().enumerate() {
                     writeln!(out, "{lead}{i} {} {} {}", r.back, r.stored, String::from_utf8_lossy(&r.meta))?;
                 }
             }
@@ -983,8 +1058,11 @@ impl Write for Counted {
     }
 }
 
-fn open_log(path: &std::path::Path, max_body: usize) -> io::Result<log::Reader<File>> {
-    let r = log::Reader::open(File::open(path)?, max_body)?;
+fn open_log(path: &std::path::Path, max_body: usize, key: Option<&log::Key>) -> io::Result<log::Reader<File>> {
+    let mut r = log::Reader::open(File::open(path)?, max_body)?;
+    if let Some(key) = key {
+        r = r.with_key(key)?;
+    }
     if r.truncated {
         eprintln!("{}: the file ends inside a record; reading the records before it", path.display());
     }
@@ -1471,7 +1549,7 @@ mod tests {
     fn a_failed_write_moves_recording_to_a_new_file_and_loses_nothing_after_it() {
         let dir = std::env::temp_dir().join(format!("deltapack-recording-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let r = Recording::start(dir.clone(), 4, 1 << 30, Retention::default()).unwrap();
+        let r = Recording::start(dir.clone(), 4, 1 << 30, Retention::default(), None).unwrap();
         let mut r = lock(&r);
         r.append(b"m", Bytes::from_static(b"before")).unwrap();
         // the disk fills up: /dev/full fails every write with ENOSPC
@@ -1498,7 +1576,7 @@ mod tests {
     fn files_rotated_within_a_millisecond_get_their_own_names_in_order() {
         let dir = std::env::temp_dir().join(format!("deltapack-rotation-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let r = Recording::start(dir.clone(), 1, 1, Retention::default()).unwrap(); // every record fills its file
+        let r = Recording::start(dir.clone(), 1, 1, Retention::default(), None).unwrap(); // every record fills its file
         let mut r = lock(&r);
         for body in ["a", "b", "c"] {
             r.append(b"", Bytes::from(body)).unwrap();
@@ -1547,12 +1625,12 @@ mod tests {
     fn a_directory_is_recorded_to_by_one_process_at_a_time() {
         let dir = std::env::temp_dir().join(format!("deltapack-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let first = Recording::start(dir.clone(), 1, 1 << 30, Retention::default()).unwrap();
-        let second = Recording::start(dir.clone(), 1, 1 << 30, Retention::default()).map(|_| ());
+        let first = Recording::start(dir.clone(), 1, 1 << 30, Retention::default(), None).unwrap();
+        let second = Recording::start(dir.clone(), 1, 1 << 30, Retention::default(), None).map(|_| ());
         assert!(second.unwrap_err().to_string().contains("another process"), "the second is refused");
         drop(first);
         std::thread::sleep(Duration::from_millis(2)); // a file name of its own: the same pid, a new ms
-        Recording::start(dir.clone(), 1, 1 << 30, Retention::default()).unwrap();
+        Recording::start(dir.clone(), 1, 1 << 30, Retention::default(), None).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

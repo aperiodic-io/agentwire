@@ -154,6 +154,28 @@ trace ids in lowercase hex, comma-separated, each once, in order of first appear
 `?` when the body is still encoded, is not an export (or is JSON that does not start with its
 `{`), or holds more than 64, or a JSON trace id is escaped. In OTLP/JSON a trace id
 is read after each `"traceId"` key, so a link's may be listed too: the list names every trace the
-record may hold, never fewer. Readers MUST accept five fields. A file holds everything in it in the clear: protect it as you would the
-requests, and keep one file per tenant where a tenant's records must be deletable on their own
-(deleting one record means rewriting those that delta against it).
+record may hold, never fewer. Readers MUST accept five fields. A file that is not sealed (below) holds everything in it in the
+clear: protect it as you would the requests, and keep one file per tenant where a tenant's records
+must be deletable on their own (deleting one record means rewriting those that delta against it).
+
+### Sealed files (version 2)
+
+A sealed file's bodies are readable only with its key: 32 bytes the operator holds, written as 64
+hex digits.
+
+```
+file    = "DPK1" %x02 window salt key_id record*
+salt    = 16 bytes          ; random, one per file
+key_id  = 8 bytes           ; the first 8 bytes of SHA-256(key): names the key, reveals nothing of it
+record  = back meta_len meta delta_len sealed
+sealed  = delta_len bytes   ; ChaCha20-Poly1305(file_key, nonce, aad, delta), its 16-byte tag last
+```
+
+`file_key` is HKDF-SHA256 with the salt as salt, the key as input key material and
+`"DPK1 sealed records"` as info, 32 bytes. Record *i* (counted from 0) is sealed with the 12-byte
+nonce `u64le(i) || 0x00000000` and the associated data `u64le(i) || u64le(back) || meta`, so a record
+moved to another place, given another base or another meta does not open. `delta` is what a
+version-1 record holds. A reader MUST check `key_id` against its key, and MUST reject a record that
+does not open. `meta` is not sealed: a sealed file is indexed and listed without its key, and its
+trace ids (above) are readable. A sealed record's delta is against its base's body as a version-1
+record's is, so sealing costs 16 bytes a record and keeps the ratio.

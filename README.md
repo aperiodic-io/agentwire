@@ -505,6 +505,8 @@ library does it in your own stack. Everything about it is in [docs/dpd1.md](docs
 | `--on-rotate` | `DELTAPACK_ON_ROTATE` | off | Run this with `sh -c` once a file is closed, its path as `$1`: `'aws s3 mv "$1" s3://bucket/deltapack/'`. It should move or delete the file. One runs at a time, in order; wrap a slow one in `timeout`. Retention keeps a file until its command succeeds; files left from an earlier run, or whose command failed, get it again at start. |
 | `--tenant-header` | `DELTAPACK_TENANT_HEADER` | off | Record each request in the directory of the tenant this header names (`acme/` in the record directory; `_none` when absent, `_invalid` for a name with anything but letters, digits, `.`, `_`, `-`), each with its own files, lock, retention and `--on-rotate`. Set it at a gateway that authenticates the tenant. |
 | `--max-tenants` | `DELTAPACK_MAX_TENANTS` | 256 | Tenants given a directory of their own; any more share `_other`. |
+| `--key-file` | `DELTAPACK_KEY_FILE` | off | Seal every record with this key, a file of 64 hex digits (`openssl rand -hex 32`): bodies are unreadable without it (`deltapack log --key-file … show`). Each record's meta (time, method, path, trace ids) stays readable. |
+| `--key-dir` | `DELTAPACK_KEY_DIR` | off | With `--tenant-header`: seal each tenant's records with its own key, `DIR/<tenant>.key`. Delete a tenant's key and its records are unreadable everywhere, copies included. A tenant without a key is not recorded. |
 
 **`deltapack collect`**: a log sink that stores what is posted to it in DPK1 ([above](#quick-start-point-your-opentelemetry-exporter-at-deltapack)).
 
@@ -520,6 +522,8 @@ library does it in your own stack. Everything about it is in [docs/dpd1.md](docs
 | `--on-rotate` | `DELTAPACK_ON_ROTATE` | off | Run this with `sh -c` once a file is closed, its path as `$1`: `'aws s3 mv "$1" s3://bucket/deltapack/'`. It should move or delete the file. One runs at a time, in order; wrap a slow one in `timeout`. Retention keeps a file until its command succeeds; files left from an earlier run, or whose command failed, get it again at start. |
 | `--tenant-header` | `DELTAPACK_TENANT_HEADER` | off | Record each request in the directory of the tenant this header names (`acme/` in the record directory; `_none` when absent, `_invalid` for a name with anything but letters, digits, `.`, `_`, `-`), each with its own files, lock, retention and `--on-rotate`. Set it at a gateway that authenticates the tenant. |
 | `--max-tenants` | `DELTAPACK_MAX_TENANTS` | 256 | Tenants given a directory of their own; any more share `_other`. |
+| `--key-file` | `DELTAPACK_KEY_FILE` | off | Seal every record with this key, a file of 64 hex digits (`openssl rand -hex 32`): bodies are unreadable without it (`deltapack log --key-file … show`). Each record's meta (time, method, path, trace ids) stays readable. |
+| `--key-dir` | `DELTAPACK_KEY_DIR` | off | With `--tenant-header`: seal each tenant's records with its own key, `DIR/<tenant>.key`. Delete a tenant's key and its records are unreadable everywhere, copies included. A tenant without a key is not recorded. |
 | `--max-body` | `DELTAPACK_MAX_BODY` | 64 MiB | The largest body stored, after decoding; larger ones are answered 413. |
 | `--metrics` | `DELTAPACK_METRICS` | off | |
 
@@ -553,6 +557,11 @@ deltas on.
 sent, which is what makes replay exact. Redact where the content is produced (most instrumentations
 have a content-capture switch and a hook), or keep the files where only those allowed to read the
 prompts can, as you would the requests themselves.
+
+**Can the files be encrypted?** Yes: `--key-file` seals every record's body with a key you hold
+(ChaCha20-Poly1305; [SPEC.md](SPEC.md#sealed-files-version-2)), and `--key-dir` gives each tenant
+its own, so that deleting a tenant's key deletes its records wherever they were copied. Read with
+`deltapack log --key-file KEY …` or `deltapack.Reader(path, key=…)`. Meta is not sealed.
 
 **My backend compresses already. Why this?** A column store compresses a block at a time, and the
 previous copy of a prompt is usually in another block. In the end-to-end run above, Langfuse kept

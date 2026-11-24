@@ -49,6 +49,8 @@ struct Proxies {
     grpc: Vec<(Bytes, Option<u32>, Bytes)>,
     /// where `--on-rotate` moves closed files, and the files a directory held before the collector
     moved_to: Option<std::path::PathBuf>,
+    /// a key file (`--key-file`), or a directory of them (`--key-dir`)
+    key: Option<std::path::PathBuf>,
     earlier: Vec<std::path::PathBuf>,
 }
 
@@ -1531,6 +1533,128 @@ async fn holds_three(w: &mut Proxies, a: String, b: String, c: String) {
 #[then(expr = "the directory {string} holds tenant c's batch")]
 async fn holds_c(w: &mut Proxies, dir: String) {
     assert_eq!(w.stored_in(&dir).await, w.sent_by("c"));
+}
+
+/// `deltapack log <args>`: it must fail; its stderr.
+async fn log_fails(args: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_deltapack")).arg("log").args(args).output().await.unwrap();
+    assert!(!out.status.success(), "deltapack log {args:?} should fail");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn write_key(path: &std::path::Path, byte: u8) {
+    std::fs::write(path, format!("{}\n", format!("{byte:02x}").repeat(32))).unwrap();
+}
+
+#[given("a key in a file")]
+async fn a_key(w: &mut Proxies) {
+    let path = scratch("key").join("k.hex");
+    write_key(&path, 0x42);
+    w.key = Some(path);
+}
+
+#[given("a deltapack collector recording to a directory, sealing with that key")]
+async fn a_sealing_collector(w: &mut Proxies) {
+    let key = w.key.clone().unwrap();
+    w.start_collector(&["--key-file", key.to_str().unwrap()]).await;
+}
+
+#[then("no batch's bytes are in the recording in the clear")]
+async fn nothing_in_the_clear(w: &mut Proxies) {
+    let file = std::fs::read(recording(w)).unwrap();
+    for s in &w.sent {
+        // any 32 bytes from the middle of a batch: a prompt's hex
+        let probe = &s.body[s.body.len() / 2..s.body.len() / 2 + 32];
+        assert!(!file.windows(32).any(|x| x == probe), "a batch's bytes in the clear");
+    }
+}
+
+#[then(expr = "`deltapack log ls` lists its {int} records without the key")]
+async fn ls_without_key(w: &mut Proxies, n: usize) {
+    let listed = String::from_utf8(log(&["ls", &recording(w)], b"").await).unwrap();
+    assert_eq!(listed.lines().count(), n);
+}
+
+#[then("`deltapack log show` without the key fails, saying the file is sealed")]
+async fn show_without_key(w: &mut Proxies) {
+    let err = log_fails(&["show", &recording(w)]).await;
+    assert!(err.contains("sealed"), "{err}");
+}
+
+#[then(
+    expr = "`deltapack log show --trace` of trace {int} with the key gives its {int} spans in order, each with its prompt"
+)]
+async fn show_with_key(w: &mut Proxies, trace: usize, n: usize) {
+    let key = w.key.clone().unwrap();
+    let id = format!("{trace:032x}");
+    let out = log(&["--key-file", key.to_str().unwrap(), "show", "--trace", &id, &recording(w)], b"").await;
+    let rows: Vec<serde_json::Value> =
+        String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(rows.len(), n);
+    for (turn, row) in (1..).zip(&rows) {
+        let prompt = String::from_utf8(conversation(&format!("t{trace}"), turn).to_vec()).unwrap();
+        assert_eq!(row["attributes"]["gen_ai.input.messages"], prompt.as_str(), "span {turn}");
+    }
+}
+
+#[given(expr = "a directory of keys holding one for tenant {string}")]
+async fn a_key_dir(w: &mut Proxies, tenant: String) {
+    let dir = scratch("keys");
+    write_key(&dir.join(format!("{tenant}.key")), 0x17);
+    w.key = Some(dir);
+}
+
+#[given(
+    expr = "a deltapack collector recording to a directory, a directory per tenant by {string}, each sealed with its key"
+)]
+async fn a_tenant_sealing_collector(w: &mut Proxies, header: String) {
+    let dir = w.key.clone().unwrap();
+    w.start_collector(&["--tenant-header", &header, "--key-dir", dir.to_str().unwrap()]).await;
+}
+
+#[then("acme's batches read back with acme's key only")]
+async fn acme_reads_with_its_key(w: &mut Proxies) {
+    let files: Vec<String> = files_in(&w.record_dir.as_ref().unwrap().join("acme"))
+        .iter()
+        .map(|f| f.0.to_str().unwrap().to_owned())
+        .collect();
+    let acme = w.key.as_ref().unwrap().join("acme.key");
+    let mut args = vec!["--key-file", acme.to_str().unwrap(), "unpack"];
+    args.extend(files.iter().map(String::as_str));
+    let expected: Vec<u8> = w.sent_by("acme").iter().flat_map(|b| [&b[..], b"\n"].concat()).collect();
+    assert!(log(&args, b"").await == expected);
+    let other = scratch("other").join("o.key");
+    write_key(&other, 0x99);
+    let mut wrong = vec!["--key-file", other.to_str().unwrap(), "unpack"];
+    wrong.extend(files.iter().map(String::as_str));
+    assert!(log_fails(&wrong).await.contains("another key"));
+}
+
+#[then(expr = "nothing was recorded for {string}")]
+async fn nothing_for(w: &mut Proxies, tenant: String) {
+    assert!(!w.record_dir.as_ref().unwrap().join(&tenant).exists());
+}
+
+#[when("they are packed with the key")]
+async fn pack_with_key(w: &mut Proxies) {
+    let file = scratch("pack").join("sealed.dpk");
+    let key = w.key.clone().unwrap();
+    log(&["--key-file", key.to_str().unwrap(), "pack", file.to_str().unwrap()], &jsonl(&w.lines)).await;
+    w.packed = Some(file);
+}
+
+#[then("`deltapack log unpack` without the key fails, saying the file is sealed")]
+async fn unpack_without_key(w: &mut Proxies) {
+    let err = log_fails(&["unpack", w.packed.as_ref().unwrap().to_str().unwrap()]).await;
+    assert!(err.contains("sealed"), "{err}");
+}
+
+#[then("`deltapack log unpack` with the key gives back the same lines")]
+async fn unpack_with_key(w: &mut Proxies) {
+    let key = w.key.clone().unwrap();
+    let out =
+        log(&["--key-file", key.to_str().unwrap(), "unpack", w.packed.as_ref().unwrap().to_str().unwrap()], b"").await;
+    assert!(out == jsonl(&w.lines));
 }
 
 #[tokio::main]

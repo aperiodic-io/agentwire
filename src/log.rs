@@ -22,6 +22,11 @@ use crate::codec::{self, Hash};
 
 const MAGIC: &[u8; 4] = b"DPK1";
 const VERSION: u8 = 1;
+/// Version 2: each record's delta sealed with a key (SPEC.md §7, "Sealed files").
+const VERSION_SEALED: u8 = 2;
+
+/// A sealed file's salt and key id, from its header.
+type Sealed = ([u8; 16], [u8; 8]);
 /// Reading one record rebuilds at most this many bodies, and at most `MAX_CHAIN_BYTES` of them; the
 /// writer then stores a record whole. Small spans chain for long, multi-MB requests restart sooner.
 /// ponytail: fixed bounds; a knob if random reads (or ratio) need another trade-off
@@ -39,6 +44,8 @@ pub struct Writer<W: Write> {
     window: usize,
     recent: VecDeque<Recent>,
     next: u64,
+    #[cfg(feature = "encrypt")]
+    seal: Option<seal::Sealer>,
 }
 
 #[derive(Debug)]
@@ -58,7 +65,28 @@ impl<W: Write> Writer<W> {
         out.write_all(MAGIC)?;
         out.write_all(&[VERSION])?;
         write_varint(&mut out, window as u64)?;
-        Ok(Writer { out, window, recent: VecDeque::new(), next: 0 })
+        Ok(Writer {
+            out,
+            window,
+            recent: VecDeque::new(),
+            next: 0,
+            #[cfg(feature = "encrypt")]
+            seal: None,
+        })
+    }
+
+    /// A writer whose records are sealed with `key` (version 2): a reader needs the key to rebuild
+    /// them; their meta stays readable, so that a file is indexed (and `ls`ed) without it.
+    #[cfg(feature = "encrypt")]
+    pub fn new_sealed(mut out: W, window: usize, key: &Key) -> io::Result<Self> {
+        let salt = seal::salt();
+        out.write_all(MAGIC)?;
+        out.write_all(&[VERSION_SEALED])?;
+        write_varint(&mut out, window as u64)?;
+        out.write_all(&salt)?;
+        out.write_all(&key.id())?;
+        let seal = Some(seal::Sealer::new(key, &salt));
+        Ok(Writer { out, window, recent: VecDeque::new(), next: 0, seal })
     }
 
     /// Appends `body` with its `meta` (stored as is: a timestamp, an id, a path) and returns its index.
@@ -95,6 +123,11 @@ impl<W: Write> Writer<W> {
                     _ => whole,
                 }
             }
+        };
+        #[cfg(feature = "encrypt")]
+        let delta = match &self.seal {
+            Some(s) => s.seal(self.next, back, meta, &delta)?,
+            None => delta,
         };
         write_varint(&mut self.out, back)?;
         write_varint(&mut self.out, meta.len() as u64)?;
@@ -140,6 +173,10 @@ pub struct Reader<R> {
     records: Vec<Record>,
     /// The file ends inside a record (its writer stopped mid-write): the records before it are whole.
     pub truncated: bool,
+    /// A sealed file's salt and key id; and its opener, once given the key.
+    sealed: Option<Sealed>,
+    #[cfg(feature = "encrypt")]
+    opener: Option<seal::Sealer>,
 }
 
 impl<R: Read + Seek> Reader<R> {
@@ -148,9 +185,36 @@ impl<R: Read + Seek> Reader<R> {
         let mut src = BufReader::new(src);
         let len = src.seek(SeekFrom::End(0))?;
         src.seek(SeekFrom::Start(0))?;
-        let window = header(&mut src)?;
+        let (window, sealed) = header(&mut src)?;
         let (records, truncated) = index(&mut src, len, window)?;
-        Ok(Reader { src, window: window as usize, max_body, records, truncated })
+        Ok(Reader {
+            src,
+            window: window as usize,
+            max_body,
+            records,
+            truncated,
+            sealed,
+            #[cfg(feature = "encrypt")]
+            opener: None,
+        })
+    }
+
+    /// Whether the file's records are sealed: rebuilding them needs [`Reader::with_key`].
+    pub fn is_sealed(&self) -> bool {
+        self.sealed.is_some()
+    }
+
+    /// Gives a sealed file its key; refused when the key is not the one it was sealed with. A file
+    /// that is not sealed is read as it is.
+    #[cfg(feature = "encrypt")]
+    pub fn with_key(mut self, key: &Key) -> io::Result<Self> {
+        if let Some((salt, id)) = self.sealed {
+            if id != key.id() {
+                return Err(invalid("the file was sealed with another key"));
+            }
+            self.opener = Some(seal::Sealer::new(key, &salt));
+        }
+        Ok(self)
     }
 
     pub fn records(&self) -> &[Record] {
@@ -196,6 +260,9 @@ impl<R: Read + Seek> Reader<R> {
         self.src.seek(SeekFrom::Start(offset))?;
         let mut delta = vec![0; stored as usize];
         self.src.read_exact(&mut delta)?;
+        if self.sealed.is_some() {
+            delta = self.unseal(i, delta)?;
+        }
         let (header, frame) = codec::parse(&delta, self.max_body).map_err(invalid)?;
         if header.base != codec::hash(base) {
             return Err(invalid(codec::Error::Corrupt));
@@ -204,17 +271,136 @@ impl<R: Read + Seek> Reader<R> {
     }
 }
 
-/// The file header: its magic and version, then the window.
-fn header(src: &mut impl Read) -> io::Result<u64> {
+impl<R: Read + Seek> Reader<R> {
+    /// Record `i`'s stored bytes, opened with the key; an error without it, or when they (or the
+    /// record's place or meta) are not what was sealed.
+    #[cfg(feature = "encrypt")]
+    fn unseal(&self, i: usize, sealed: Vec<u8>) -> io::Result<Vec<u8>> {
+        let opener = self.opener.as_ref().ok_or_else(|| invalid("the file is sealed: give its key"))?;
+        let r = &self.records[i];
+        opener.open(i as u64, r.back, &r.meta, &sealed)
+    }
+
+    #[cfg(not(feature = "encrypt"))]
+    fn unseal(&self, _: usize, _: Vec<u8>) -> io::Result<Vec<u8>> {
+        Err(invalid("the file is sealed: this build reads no sealed files"))
+    }
+}
+
+/// The file header: its magic and version, then the window; for a sealed file, its salt and key id.
+fn header(src: &mut impl Read) -> io::Result<(u64, Option<Sealed>)> {
     let mut magic = [0; 5];
     src.read_exact(&mut magic).map_err(|_| invalid("not a DPK1 file"))?;
     if &magic[..4] != MAGIC {
         return Err(invalid("not a DPK1 file"));
     }
-    if magic[4] != VERSION {
+    if magic[4] != VERSION && magic[4] != VERSION_SEALED {
         return Err(invalid("unsupported DPK1 version"));
     }
-    read_varint(src)?.ok_or_else(|| invalid("truncated header"))
+    let window = read_varint(src)?.ok_or_else(|| invalid("truncated header"))?;
+    if magic[4] == VERSION {
+        return Ok((window, None));
+    }
+    let mut salt_id = [0; 24];
+    src.read_exact(&mut salt_id).map_err(|_| invalid("truncated header"))?;
+    let (salt, id) = salt_id.split_at(16);
+    Ok((window, Some((salt.try_into().expect("16 bytes"), id.try_into().expect("8 bytes")))))
+}
+
+/// A key that seals DPK1 records: 32 bytes, written as 64 hex digits (`openssl rand -hex 32`).
+#[cfg(feature = "encrypt")]
+#[derive(Clone)]
+pub struct Key([u8; 32]);
+
+#[cfg(feature = "encrypt")]
+impl Key {
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Key(bytes)
+    }
+
+    /// From 64 hex digits, surrounding whitespace ignored (a key file's contents).
+    pub fn from_hex(s: &str) -> io::Result<Self> {
+        let s = s.trim().as_bytes();
+        let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+        let bad = || io::Error::new(io::ErrorKind::InvalidInput, "a key is 64 hex digits");
+        if s.len() != 64 {
+            return Err(bad());
+        }
+        let mut key = [0; 32];
+        for (k, pair) in key.iter_mut().zip(s.chunks(2)) {
+            *k = digit(pair[0]).zip(digit(pair[1])).map(|(h, l)| h << 4 | l).ok_or_else(bad)?;
+        }
+        Ok(Key(key))
+    }
+
+    /// The first 8 bytes of the key's SHA-256: names the key in a file, reveals nothing of it.
+    pub fn id(&self) -> [u8; 8] {
+        codec::hash(&self.0)[..8].try_into().expect("8 bytes")
+    }
+}
+
+#[cfg(feature = "encrypt")]
+impl std::fmt::Debug for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Key({})", crate::hex(&self.id()))
+    }
+}
+
+/// Sealing records: ChaCha20-Poly1305 under a key of the file's own, HKDF-SHA256(key, salt); the
+/// nonce is the record's index, and the record's index, base and meta are authenticated with it.
+#[cfg(feature = "encrypt")]
+mod seal {
+    use chacha20poly1305::aead::{Aead, KeyInit, OsRng, Payload, rand_core::RngCore};
+    use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+
+    use super::{Key, invalid};
+
+    pub fn salt() -> [u8; 16] {
+        let mut salt = [0; 16];
+        OsRng.fill_bytes(&mut salt);
+        salt
+    }
+
+    pub struct Sealer(ChaCha20Poly1305);
+
+    impl std::fmt::Debug for Sealer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Sealer")
+        }
+    }
+
+    impl Sealer {
+        pub fn new(key: &Key, salt: &[u8; 16]) -> Self {
+            let mut file_key = [0; 32];
+            hkdf::Hkdf::<sha2::Sha256>::new(Some(salt), &key.0)
+                .expand(b"DPK1 sealed records", &mut file_key)
+                .expect("32 bytes is a valid HKDF-SHA256 length");
+            Sealer(ChaCha20Poly1305::new(&file_key.into()))
+        }
+
+        pub fn seal(&self, index: u64, back: u64, meta: &[u8], delta: &[u8]) -> std::io::Result<Vec<u8>> {
+            let aad = aad(index, back, meta);
+            self.0.encrypt(&nonce(index), Payload { msg: delta, aad: &aad }).map_err(|_| invalid("sealing failed"))
+        }
+
+        pub fn open(&self, index: u64, back: u64, meta: &[u8], sealed: &[u8]) -> std::io::Result<Vec<u8>> {
+            let aad = aad(index, back, meta);
+            self.0
+                .decrypt(&nonce(index), Payload { msg: sealed, aad: &aad })
+                .map_err(|_| invalid("a sealed record does not open: altered, moved, or another key's"))
+        }
+    }
+
+    fn nonce(index: u64) -> Nonce {
+        let mut n = [0; 12];
+        n[..8].copy_from_slice(&index.to_le_bytes());
+        n.into()
+    }
+
+    /// What a record's seal also vouches for: its index, its base, its meta.
+    fn aad(index: u64, back: u64, meta: &[u8]) -> Vec<u8> {
+        [&index.to_le_bytes()[..], &back.to_le_bytes(), meta].concat()
+    }
 }
 
 /// Every record's place from `src`'s position to `len`, payloads skipped; and whether the file ends
@@ -438,6 +624,126 @@ mod proofs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "encrypt")]
+    mod sealed {
+        use super::*;
+        use std::io::Cursor;
+
+        fn key(b: u8) -> Key {
+            Key::new([b; 32])
+        }
+
+        fn sealed_file(k: &Key, records: &[(&[u8], &[u8])]) -> Vec<u8> {
+            let mut w = Writer::new_sealed(Vec::new(), 4, k).unwrap();
+            for (meta, body) in records {
+                w.append(meta, Bytes::copy_from_slice(body)).unwrap();
+            }
+            w.into_inner()
+        }
+
+        const RECORDS: [(&[u8], &[u8]); 3] = [
+            (b"m0", b"the prompt, turn one"),
+            (b"m1", b"the prompt, turn one; turn two"),
+            (b"m2", b"the prompt, turn one; turn two; turn three"),
+        ];
+
+        #[test]
+        fn a_sealed_file_reads_back_with_its_key_only() {
+            let file = sealed_file(&key(1), &RECORDS);
+            assert_eq!(file[4], VERSION_SEALED);
+            assert!(!file.windows(10).any(|w| w == b"the prompt"), "no body in the clear");
+            let r = Reader::open(Cursor::new(&file), 1 << 20).unwrap();
+            assert!(r.is_sealed());
+            assert_eq!(
+                r.records().iter().map(|r| &r.meta[..]).collect::<Vec<_>>(),
+                [b"m0", b"m1", b"m2"],
+                "meta in the clear"
+            );
+            let mut without = r;
+            assert!(without.get(0).unwrap_err().to_string().contains("give its key"));
+            let wrong = Reader::open(Cursor::new(&file), 1 << 20).unwrap().with_key(&key(2));
+            assert!(wrong.unwrap_err().to_string().contains("another key"));
+            let mut r = Reader::open(Cursor::new(&file), 1 << 20).unwrap().with_key(&key(1)).unwrap();
+            for (i, (_, body)) in RECORDS.iter().enumerate() {
+                assert_eq!(r.get(i).unwrap(), *body);
+            }
+            let mut scanned = Vec::new();
+            r.scan(|_, b| {
+                scanned.push(b.to_vec());
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(scanned, RECORDS.map(|r| r.1.to_vec()));
+            assert!(r.records()[1].back > 0, "sealed records still delta");
+        }
+
+        #[test]
+        fn a_file_not_sealed_reads_as_it_is_with_a_key() {
+            let mut w = Writer::new(Vec::new(), 4).unwrap();
+            w.append(b"m", Bytes::from_static(b"plain")).unwrap();
+            let mut r = Reader::open(Cursor::new(w.into_inner()), 1 << 20).unwrap().with_key(&key(1)).unwrap();
+            assert!(!r.is_sealed());
+            assert_eq!(r.get(0).unwrap(), b"plain");
+        }
+
+        #[test]
+        fn an_altered_moved_or_relabelled_record_does_not_open() {
+            let file = sealed_file(&key(1), &RECORDS);
+            let read = |f: Vec<u8>, i: usize| {
+                Reader::open(Cursor::new(f), 1 << 20).and_then(|r| r.with_key(&key(1))).and_then(|mut r| r.get(i))
+            };
+            let r = Reader::open(Cursor::new(&file), 1 << 20).unwrap();
+            let (off, meta_at) = (r.records()[0].offset as usize, r.records()[0].offset as usize - 3);
+            let mut flipped = file.clone();
+            flipped[off] ^= 1;
+            assert!(read(flipped, 0).unwrap_err().to_string().contains("does not open"));
+            let mut relabelled = file.clone();
+            relabelled[meta_at] = b'X'; // "m0" -> "X0": the meta is vouched for
+            assert!(read(relabelled, 0).unwrap_err().to_string().contains("does not open"));
+            // the same bytes under another index or base: the place is vouched for too
+            let sealer = seal::Sealer::new(&key(1), &[7; 16]);
+            let sealed = sealer.seal(0, 0, b"m", b"delta").unwrap();
+            assert_eq!(sealer.open(0, 0, b"m", &sealed).unwrap(), b"delta");
+            assert!(sealer.open(1, 0, b"m", &sealed).is_err(), "another index");
+            assert!(sealer.open(0, 1, b"m", &sealed).is_err(), "another base");
+            assert!(seal::Sealer::new(&key(1), &[8; 16]).open(0, 0, b"m", &sealed).is_err(), "another salt");
+            let salt = file[6..22].to_vec();
+            let mut other_salt = file.clone();
+            other_salt[6] ^= 1; // another file's salt: another file key
+            assert!(read(other_salt, 0).is_err());
+            assert_eq!(salt.len(), 16);
+        }
+
+        #[test]
+        fn a_key_is_64_hex_digits() {
+            let k = Key::from_hex(&format!("  {}\n", "0f".repeat(32))).unwrap();
+            assert_eq!(k.0, [0x0f; 32]);
+            assert_eq!(Key::from_hex(&"AB".repeat(32)).unwrap().0, [0xab; 32]);
+            for bad in ["", "0f", &"0f".repeat(31), &"0f".repeat(33), &format!("{}zz", "0f".repeat(31))] {
+                assert!(Key::from_hex(bad).is_err(), "{bad:?}");
+            }
+            assert_ne!(key(1).id(), key(2).id());
+            assert_eq!(format!("{:?}", key(1)), format!("Key({})", crate::hex(&key(1).id())), "the id, not the key");
+        }
+
+        #[test]
+        fn every_sealed_file_gets_its_own_salt() {
+            let (a, b) = (sealed_file(&key(1), &RECORDS[..1]), sealed_file(&key(1), &RECORDS[..1]));
+            assert_ne!(a[6..22], b[6..22]);
+            assert_ne!(a, b, "the same record, sealed twice, differs");
+        }
+
+        #[test]
+        fn a_truncated_sealed_header_is_refused() {
+            let file = sealed_file(&key(1), &[]);
+            assert_eq!(file.len(), 6 + 24);
+            for cut in 6..file.len() {
+                assert!(Reader::open(Cursor::new(&file[..cut]), 1 << 20).is_err(), "{cut}");
+            }
+            assert!(Reader::open(Cursor::new(&file), 1 << 20).unwrap().records().is_empty());
+        }
+    }
     use crate::hex;
     use proptest::prelude::*;
     use std::io::Cursor;
