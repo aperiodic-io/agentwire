@@ -5,6 +5,15 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- Go (`go/`): DPK1 read (sealed files with their key) and written, and an OpenTelemetry Collector
+  exporter (`go/otelcol/deltapackexporter`) that stores traces and logs as `collect` does, trace ids
+  in the meta. TypeScript (`ts/`): DPK1 read in Node 22.19+, no dependencies. Both are tested
+  against files the CLI packs and reads, in CI.
+- Python: `Reader.spans(trace=, attrs=, since=, until=)` decodes a file's OTLP records into one dict
+  per span or log record, as `log show` writes them (so `pandas.DataFrame(r.spans())`). The CLI is a
+  wheel of its own, `deltapack-cli` (`python/cli/`). The library's `show` feature (`deltapack::show`,
+  `deltapack::split`) is what `log show`, `collect` and the bindings decode OTLP with. Parquet: through
+  DuckDB or pandas (README).
 - `server` proxies WebSocket sessions (realtime and voice APIs) to `--upstream` as `ws://` or
   `wss://`, with the tool's headers and subprotocols, and with `--record-dir` stores each text or
   binary message as a record, its direction (`WS>`, `WS<`), path and kind in the meta. A handshake

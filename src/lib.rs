@@ -3,6 +3,12 @@ pub mod codec;
 pub mod log;
 #[cfg(feature = "server")]
 pub mod server;
+/// OTLP exports as JSON rows, and the trace ids `collect` lists (`deltapack log show`).
+#[cfg(feature = "show")]
+pub mod show;
+/// OTLP exports split to fit a backend's body limit (`collect --forward-max-body`).
+#[cfg(feature = "show")]
+pub mod split;
 pub mod store;
 
 /// Request header: keep this body as a base for my next request. Its value is `?1`.

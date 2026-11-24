@@ -24,6 +24,7 @@ use deltapack::log;
 use deltapack::server::{Config, Dpd1Layer, InnerBody, Stats};
 use deltapack::store::Store;
 use deltapack::{ERROR, KEPT};
+use deltapack::{show, split};
 use http::header::{self, HeaderMap, HeaderName};
 use http::{Request, Response, StatusCode};
 use http_body_util::combinators::UnsyncBoxBody;
@@ -37,8 +38,6 @@ use tokio::net::TcpListener;
 use tower_layer::Layer;
 
 mod grpc;
-mod show;
-mod split;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ResBody = UnsyncBoxBody<Bytes, BoxError>;

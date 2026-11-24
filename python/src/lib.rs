@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
 
-use dpk::log;
+use dpk::{log, show};
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -158,6 +158,52 @@ impl Reader {
 
     fn __iter__(&self) -> PyResult<Records> {
         Ok(Records { inner: open(&self.path, self.max_body, self.key.as_ref())?.into_iter() })
+    }
+
+    /// The spans and log records of the file's OTLP records, one dict each, as `deltapack log show`
+    /// writes them (attributes as plain values, `record` and `received` added): ready for
+    /// `pandas.DataFrame`. Records that are not OTLP are left out. `trace` keeps one trace's (by its
+    /// hex id, in either case), `attrs` those with each attribute or resource attribute equal to its
+    /// value, `since` and `until` (Unix ms, inclusive) those received then.
+    #[pyo3(signature = (trace = None, attrs = None, since = None, until = None))]
+    fn spans<'py>(
+        &self,
+        py: Python<'py>,
+        trace: Option<&str>,
+        attrs: Option<std::collections::BTreeMap<String, String>>,
+        since: Option<u64>,
+        until: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let filter = show::Filter {
+            trace: trace.map(str::to_ascii_lowercase),
+            attrs: attrs.unwrap_or_default().into_iter().collect(),
+            since,
+            until,
+        };
+        let mut reader = open(&self.path, self.max_body, self.key.as_ref())?;
+        let rows = py
+            .detach(|| {
+                let mut rows = Vec::new();
+                let mut index = 0u64;
+                reader.scan(|record, body| {
+                    let meta = show::Meta::parse(&record.meta);
+                    if filter.wants(&meta) && meta.decoded() {
+                        let signal = meta.path.and_then(show::signal);
+                        for mut row in show::rows(body, signal).unwrap_or_default() {
+                            if filter.keeps(&row) {
+                                row["record"] = index.into();
+                                row["received"] = meta.time.into();
+                                rows.push(row);
+                            }
+                        }
+                    }
+                    index += 1;
+                    Ok(())
+                })?;
+                serde_json::to_string(&rows).map_err(io::Error::other)
+            })
+            .map_err(err)?;
+        py.import("json")?.call_method1("loads", (rows,))
     }
 }
 

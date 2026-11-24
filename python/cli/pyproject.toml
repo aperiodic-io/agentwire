@@ -1,0 +1,25 @@
+# `pip install deltapack-cli`: the `deltapack` command (collect, server, log), built from the crate
+# with the `proxy` feature, as a wheel of its own (the library's wheel stays small).
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "deltapack-cli"
+description = "The deltapack command: an OpenTelemetry collector and recording proxy that stores LLM prompts as deltas."
+license = "Apache-2.0"
+requires-python = ">=3.9"
+classifiers = [
+  "Programming Language :: Rust",
+  "Topic :: System :: Archiving :: Compression",
+  "Topic :: System :: Logging",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/aperiodic-io/deltapack"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "../../Cargo.toml"
+features = ["proxy"]

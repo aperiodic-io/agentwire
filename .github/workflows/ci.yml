@@ -116,6 +116,39 @@ jobs:
           kubectl describe pod deltapack-0 || true
           kubectl logs deltapack-0 --tail 50 || true
 
+  # the Go package (go/: DPK1 read and written) and the Collector exporter built on it
+  # (go/otelcol/deltapackexporter, a module of its own), each against files the CLI packs and reads
+  go:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with: { go-version-file: go/otelcol/deltapackexporter/go.mod, cache-dependency-path: "go/**/go.sum" }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
+      - run: cargo build --features proxy
+      - run: test -z "$(gofmt -l go)"
+      - run: go vet ./... && go test -race ./...
+        working-directory: go
+        env: { DELTAPACK_BIN: "${{ github.workspace }}/target/debug/deltapack" }
+      - run: go vet ./... && go test -race ./...
+        working-directory: go/otelcol/deltapackexporter
+        env: { DELTAPACK_BIN: "${{ github.workspace }}/target/debug/deltapack" }
+
+  # the TypeScript reader (ts/: Node's own zstd and crypto), against files the CLI packs
+  typescript:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: "22.19", cache: npm, cache-dependency-path: ts/package-lock.json }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
+      - run: cargo build --features proxy
+      - run: npm ci && npm test
+        working-directory: ts
+        env: { DELTAPACK_BIN: "${{ github.workspace }}/target/debug/deltapack" }
+
   # the Python bindings (python/, a workspace of its own): built as a wheel and tested from Python,
   # on the oldest Python the abi3 wheel claims, against files the CLI packs
   python:
@@ -134,6 +167,10 @@ jobs:
       - run: cargo build --features proxy
       - run: python -m unittest discover -s python/tests -v
         env: { DELTAPACK_BIN: target/debug/deltapack }
+      # the CLI's own wheel: built (into the same target), installed, run
+      - run: maturin build -o dist-cli
+        working-directory: python/cli
+      - run: pip install python/cli/dist-cli/*.whl && deltapack --version && deltapack log --help
 
   mutants-plan:
     if: github.event_name == 'pull_request' && !github.event.pull_request.draft

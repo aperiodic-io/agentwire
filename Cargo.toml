@@ -15,12 +15,15 @@ include = ["/src", "/README.md", "/SPEC.md", "/LICENSE"]
 default = ["server"]
 # DPK1 version 2: records sealed with a key (log::Key, Writer::new_sealed, Reader::with_key)
 encrypt = ["dep:chacha20poly1305", "dep:hkdf"]
+# OTLP exports decoded to JSON rows, and split (log show, collect, the Python bindings)
+show = ["dep:serde_json"]
 # the tower layer that decodes DPD1 requests (src/server.rs)
 server = ["dep:http", "dep:http-body", "dep:http-body-util", "dep:tower-layer", "dep:tower-service"]
 # the `deltapack` binary: the server layer as a reverse proxy, and a local client proxy
 proxy = [
   "server",
   "encrypt",
+  "show",
   "dep:clap",
   "dep:flate2",
   "dep:brotli-decompressor",
@@ -28,7 +31,6 @@ proxy = [
   "dep:hyper",
   "dep:hyper-util",
   "dep:reqwest",
-  "dep:serde_json",
   "dep:tokio-tungstenite",
   "dep:snap",
   "dep:tokio",

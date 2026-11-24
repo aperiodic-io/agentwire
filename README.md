@@ -378,7 +378,18 @@ with deltapack.Writer("spans.dpk", window=16) as w:
 
 for meta, body in deltapack.Reader("/var/log/deltapack/1763650000000-4242-000000.dpk"):
     ...
+
+import pandas as pd                                   # the spans, decoded, as `log show` writes them
+spans = pd.DataFrame(deltapack.Reader("/var/log/deltapack/1763650000000-4242-000000.dpk").spans())
+spans.to_parquet("spans.parquet")
 ```
+
+Go ([go/](go/README.md)) reads and writes them, and an OpenTelemetry Collector exporter built on it
+records a Collector's traces and logs as `collect` does. TypeScript ([ts/](ts/README.md)) reads them in
+Node, with no dependencies.
+
+`pip install deltapack-cli` installs the `deltapack` command itself, from a wheel of its own
+(`python/cli/`).
 
 ### Reading it back
 
@@ -410,6 +421,7 @@ deltapack log show --since 2h ~/deltapack/*.dpk | jq -r 'select(.name == "chat")
 
 ```bash
 duckdb -c "SELECT name, count(*) FROM read_json('spans.jsonl') GROUP BY name"   # after: deltapack log show … > spans.jsonl
+duckdb -c "COPY (SELECT * FROM read_json('spans.jsonl')) TO 'spans.parquet'"     # Parquet, for any warehouse
 ```
 
 `--trace` skips the batches whose meta does not list the trace. Trace ids are hex, as OTLP/JSON
