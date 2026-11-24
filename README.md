@@ -256,6 +256,18 @@ recording proxy instead.
 </table>
 <!-- integrations:end -->
 
+## Deploy it
+
+- **Docker Compose:** [deploy/docker-compose.yml](deploy/docker-compose.yml) runs `deltapack collect`
+  in front of Arize Phoenix: exporters send to `localhost:4318`, Phoenix shows the traces, deltapack
+  keeps every span whole for 30 days.
+- **Kubernetes:** [deploy/k8s/deltapack.yaml](deploy/k8s/deltapack.yaml) is a StatefulSet with its
+  record directory on a persistent volume, unprivileged and with a read-only root, behind a Service
+  on 4318 and 4317, with metrics on 9464.
+
+CI runs both on every pull request: the compose stack with spans checked in Phoenix and in the
+recording, the manifest on a kind cluster.
+
 ## Other ways in
 
 OpenTelemetry covers most tools. For the rest:

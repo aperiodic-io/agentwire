@@ -1,0 +1,21 @@
+# The OpenTelemetry Collector between two deltapack collectors (test_backends.py): it receives
+# what the first forwards, and exports every batch to a file and, as a tee would, to the second.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:24318
+exporters:
+  file:
+    path: /out/spans.json
+  otlphttp/deltapack:
+    endpoint: http://127.0.0.1:24320
+    compression: gzip
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [file, otlphttp/deltapack]
+  telemetry:
+    metrics:
+      level: none

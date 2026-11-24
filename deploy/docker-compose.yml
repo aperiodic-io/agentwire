@@ -1,0 +1,30 @@
+# A local stack: deltapack stores every span whole and forwards it to Arize Phoenix.
+#   docker compose -f deploy/docker-compose.yml up -d --build
+# Point your exporter at http://localhost:4318 (OTLP/HTTP) or localhost:4317 (OTLP/gRPC), open
+# Phoenix at http://localhost:6006, and read what deltapack stored:
+#   docker compose -f deploy/docker-compose.yml exec deltapack sh -c 'deltapack log stats /data/*.dpk'
+# Phoenix runs with authentication off: a local demo, not a deployment.
+services:
+  deltapack:
+    build: ..
+    command:
+      - collect
+      - --record-dir=/data
+      - --listen=0.0.0.0:4318,0.0.0.0:4317
+      - --forward=http://phoenix:6006
+      - --keep-days=30
+    ports:
+      - "4318:4318"
+      - "4317:4317"
+    volumes:
+      - deltapack:/data
+    depends_on:
+      - phoenix
+  phoenix:
+    image: arizephoenix/phoenix:version-21.0.0
+    environment:
+      PHOENIX_ENABLE_AUTH: "false"
+    ports:
+      - "6006:6006"
+volumes:
+  deltapack: {}

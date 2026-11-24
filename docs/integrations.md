@@ -31,9 +31,10 @@ For **full request** and **messages**, use A. For the rest, use B.
 **Sources.** Keys and flags below were read from each project's official documentation in
 November 2026, and each section links its pages. Settings marked *(unverified)* were not
 confirmed by the docs. Check those against the linked page before you rely on them. Deltapack's
-CI runs only LiteLLM, Kong and Portkey ([tests/gateways/](../tests/gateways/test_gateways.py)).
-Langfuse and the OpenTelemetry Collector were run end to end once, by hand (the README's
-"Measured end to end"). The rest have not been run end to end.
+CI runs LiteLLM, Kong and Portkey ([tests/gateways/](../tests/gateways/test_gateways.py)), and the
+OpenTelemetry Collector (both as the backend deltapack forwards to and teeing into deltapack) and
+Arize Phoenix ([tests/backends/](../tests/backends/test_backends.py)). Langfuse was run end to end
+once, by hand (the README's "Measured end to end"). The rest have not been run end to end.
 
 ## Contents
 

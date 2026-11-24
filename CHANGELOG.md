@@ -5,6 +5,9 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- `deploy/`: a docker-compose stack (deltapack in front of Arize Phoenix) and a Kubernetes
+  StatefulSet; the image creates `/data` for its unprivileged user. CI runs both, and runs deltapack
+  between real backends: the OpenTelemetry Collector both ways, and Phoenix (`tests/backends/`).
 - `--read-listen ADDR` (`collect`, `server --record-dir`) serves `GET /v1/traces/{trace id}`: the
   trace's spans and log records as JSON lines, as `log show --trace` writes them (`?since=`,
   `?tenant=`; sealed files read with the collector's key), so a backend can link a span to its
