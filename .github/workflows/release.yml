@@ -96,9 +96,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
-        with: { working-directory: python, target: "${{ matrix.target }}", manylinux: auto, args: --release --out ../dist }
+        # the toolchain rust-toolchain.toml names, given to the action so it adds the target to it
+        with: { working-directory: python, target: "${{ matrix.target }}", manylinux: auto, rust-toolchain: "1.95.0", args: --release --out ../dist }
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
-        with: { working-directory: python/cli, target: "${{ matrix.target }}", manylinux: auto, args: --release --out ../../dist }
+        with: { working-directory: python/cli, target: "${{ matrix.target }}", manylinux: auto, rust-toolchain: "1.95.0", args: --release --out ../../dist }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: "wheels-${{ matrix.os }}-${{ matrix.target }}", path: dist }
 
@@ -124,15 +125,17 @@ jobs:
 
   npm:
     needs: [crate]
+    environment: npm
     runs-on: ubuntu-24.04
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: "22.19", registry-url: "https://registry.npmjs.org" }
+      # trusted publishing (npm 11.5.1 or later): no token, the npm package trusts this workflow
+      - run: npm install -g npm@11.6.2
       - run: npm ci && npm run build && npm publish --provenance --access public
         working-directory: ts
-        env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}" }
 
   # Go modules are published by their tags: the proxy fetches them from this repository
   go:

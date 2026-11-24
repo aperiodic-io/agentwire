@@ -303,10 +303,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: |
+          # a branch for brew's clone to check out: a pull request's checkout is a detached HEAD
+          git checkout -B ci
           brew tap-new --no-git local/deltapack
-          sed "s#head \"https://github.com/aperiodic-io/deltapack.git\", branch: \"main\"#head \"file://$GITHUB_WORKSPACE\", using: :git#" \
+          sed "s#head \"https://github.com/aperiodic-io/deltapack.git\", branch: \"main\"#head \"file://$GITHUB_WORKSPACE\", branch: \"ci\"#" \
             Formula/deltapack.rb > "$(brew --repository local/deltapack)/Formula/deltapack.rb"
-          HOMEBREW_NO_INSTALL_FROM_API=1 brew install --HEAD local/deltapack/deltapack
+          brew install --HEAD local/deltapack/deltapack
           brew test local/deltapack/deltapack
           brew audit --formula local/deltapack/deltapack || true # advisory: a tap's own formula
 

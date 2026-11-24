@@ -16,8 +16,8 @@ One tag releases everything: `vX.Y.Z` on a commit of `main` that passed CI.
 | The crate | crates.io | the `CARGO_REGISTRY_TOKEN` secret |
 | The image | ghcr.io/aperiodic-io/deltapack | nothing (the workflow's token) |
 | Binaries (Linux x86_64 and aarch64, macOS arm64), the release notes | the GitHub release | nothing |
-| `deltapack`, `deltapack-cli` (wheels for Linux x86_64, aarch64, macOS arm64; the library's sdist) | PyPI | each project's trusted publisher: this repository, workflow `release.yml`, environment `pypi` (and that environment in the repository's settings) |
-| `deltapack` (the TypeScript reader) | npm | the `NPM_TOKEN` secret, an automation token of the npm account that owns the name |
+| `deltapack`, `deltapack-cli` (wheels for Linux x86_64, aarch64, macOS arm64; the library's sdist) | PyPI | for each name, a pending trusted publisher (the projects do not exist until the first upload): this repository, workflow `release.yml`, environment `pypi`; and the `pypi` environment in this repository's settings |
+| `deltapack` (the TypeScript reader) | npm | a trusted publisher for the package (this repository, workflow `release.yml`, environment `npm`; npm asks for the package to exist, so the first version is published once by hand with `npm publish --access public` in `ts/`), and the `npm` environment in this repository's settings |
 | `go/vX.Y.Z`, `go/otelcol/deltapackexporter/vX.Y.Z` | tags here, which the Go proxy reads | nothing |
 | `deltapack.rb`, the formula with the tag's source and its sha256 | the GitHub release | copy it over `Formula/deltapack.rb` on `main` so `brew install deltapack` installs the release |
 
