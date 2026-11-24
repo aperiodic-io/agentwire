@@ -5,6 +5,10 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- `server` proxies WebSocket sessions (realtime and voice APIs) to `--upstream` as `ws://` or
+  `wss://`, with the tool's headers and subprotocols, and with `--record-dir` stores each text or
+  binary message as a record, its direction (`WS>`, `WS<`), path and kind in the meta. A handshake
+  the upstream refuses keeps its status; an upstream that cannot be reached is a 502.
 - `deploy/`: a docker-compose stack (deltapack in front of Arize Phoenix) and a Kubernetes
   StatefulSet; the image creates `/data` for its unprivileged user. CI runs both, and runs deltapack
   between real backends: the OpenTelemetry Collector both ways, and Phoenix (`tests/backends/`).

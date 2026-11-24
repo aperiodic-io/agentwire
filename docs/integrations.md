@@ -125,7 +125,7 @@ deltapack server --listen 127.0.0.1:8081 --upstream https://api.openai.com --rec
 ```
 
 Run one server per provider, each on its own port and directory. The proxy speaks plain HTTP,
-including streamed (SSE) responses. It does not speak WebSocket. The default `--listen` is
+including streamed (SSE) responses, and WebSocket sessions, each message a record. The default `--listen` is
 `0.0.0.0:8080`, so pass `127.0.0.1` on a laptop.
 
 **Any common compression works.** `collect` and `server --record-dir` decode gzip, deflate, brotli,
@@ -405,8 +405,9 @@ wire_api = "responses"
 deltapack server --listen 127.0.0.1:8081 --upstream https://api.openai.com --record-dir ~/deltapack/codex
 ```
 
-- Leave `supports_websockets` unset or false on this provider. The Responses WebSocket transport
-  would not pass through the proxy.
+- `supports_websockets` can stay unset (SSE, one record per request). With it on, the session
+  passes through the proxy as WebSocket, each message a record; Codex over that path is
+  *(unverified)*.
 - `openai_base_url = "http://127.0.0.1:8081/v1"` redirects the built-in provider instead. Whether
   that path also tries WebSocket, or honours ChatGPT-subscription login, is *(unverified)*. Prefer
   the custom provider with an API key.
@@ -778,7 +779,7 @@ env_key = "OPENAI_API_KEY"
 wire_api = "responses"   # or "chat"
 ```
 
-Leave `supports_websockets` off on this provider.
+`supports_websockets` can stay off (SSE); with it on, each WebSocket message is a record *(unverified)*.
 
 **A (prompts).** The schema has a Codex-style `[otel]` table with `log_user_prompt` and an
 `exporter = { otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "binary" } }`
@@ -1892,7 +1893,6 @@ AWS Bedrock is not on this list: its SigV4 signature covers the host name. Use i
 |---|---|---|
 | Cursor | Requests with your own key are "routed through Cursor's servers for final prompt building", so a local base URL is never called | none locally |
 | Amp | Bring-your-own-key was removed; inference goes through Amp's servers | none |
-| Codex over WebSocket | `deltapack server` does not proxy WebSocket | a custom provider without `supports_websockets` |
 | Splunk Observability Cloud as `--forward` | its OTLP path is not `/v1/traces` | tee through an OpenTelemetry Collector |
 
 Missing a tool, or found a key that changed? Open an issue or a pull request against this file.

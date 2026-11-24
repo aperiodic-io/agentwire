@@ -957,11 +957,19 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, request: Request<InnerBody<Incoming>>) -> Self::Future {
+    fn call(&mut self, mut request: Request<InnerBody<Incoming>>) -> Self::Future {
         let (http, upstream, max_body, split) = (self.http.clone(), self.upstream.clone(), self.max_body, self.split);
         // which recording, by the request's tenant; none when its tenant's cannot be started
         let record = self.record.as_ref().map(|r| r.of(request.headers()));
         let grpc = self.grpc && grpc::is_grpc(request.headers());
+        if let (true, Some(upstream)) = (websocket::is_upgrade(&request), &upstream) {
+            let upgrade = hyper::upgrade::on(&mut request);
+            let (parts, _) = request.into_parts();
+            let upstream = upstream.clone();
+            return Box::pin(async move {
+                Ok(websocket::proxy(&upstream, record.flatten(), parts, upgrade, max_body).await)
+            });
+        }
         Box::pin(async move {
             let (parts, body) = request.into_parts();
             // a tenant that cannot be recorded, and nothing to forward to: refused, so the exporter
@@ -1000,6 +1008,151 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
                 (None, _) => ack(&parts.headers),
             })
         })
+    }
+}
+
+/// `server`'s WebSocket sessions (realtime and voice APIs): the upgrade is proxied to the upstream,
+/// and each text or binary message, either way, is stored as a record of its own as it passes. Its
+/// meta is the time, `WS>` (to the upstream) or `WS<` (from it), the session's path, `text` or
+/// `binary`, and `-` (stored as it came). Pings, pongs and the close are passed on, not stored.
+mod websocket {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{self, Message, handshake::derive_accept_key, protocol::WebSocketConfig};
+
+    /// A WebSocket handshake (RFC 6455 §4.1): a GET asking to upgrade to `websocket`.
+    pub(super) fn is_upgrade<B>(request: &Request<B>) -> bool {
+        let has = |name, token: &str| {
+            request
+                .headers()
+                .get_all(name)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .flat_map(|v| v.split(','))
+                .any(|t| t.trim().eq_ignore_ascii_case(token))
+        };
+        request.method() == http::Method::GET && has(header::UPGRADE, "websocket") && has(header::CONNECTION, "upgrade")
+    }
+
+    /// The upstream's answer to the handshake, given to the tool: 101 and the session pumped both
+    /// ways, or the upstream's refusal (its status), or 502 when it cannot be reached.
+    pub(super) async fn proxy(
+        upstream: &reqwest::Url,
+        record: Option<Recorder>,
+        parts: http::request::Parts,
+        upgrade: hyper::upgrade::OnUpgrade,
+        max_body: usize,
+    ) -> Response<ResBody> {
+        let path = parts.uri.path_and_query().map_or("/", |p| p.as_str()).to_owned();
+        let Some(key) = parts.headers.get(header::SEC_WEBSOCKET_KEY).cloned() else {
+            return status(StatusCode::BAD_REQUEST);
+        };
+        let Ok(mut url) = upstream_url(upstream, &path) else { return status(StatusCode::BAD_REQUEST) };
+        if url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" }).is_err() {
+            return status(StatusCode::BAD_GATEWAY);
+        }
+        let Ok(mut to_upstream) = tungstenite::client::IntoClientRequest::into_client_request(url.as_str()) else {
+            return status(StatusCode::BAD_GATEWAY);
+        };
+        // the tool's own headers (authorization, subprotocols, ...); the handshake's are the
+        // upstream connection's own, and no extension is offered (none is spoken here)
+        let mut headers = parts.headers.clone();
+        strip_hop_by_hop(&mut headers);
+        for name in [
+            header::SEC_WEBSOCKET_KEY,
+            header::SEC_WEBSOCKET_VERSION,
+            header::SEC_WEBSOCKET_EXTENSIONS,
+            header::CONTENT_LENGTH,
+        ] {
+            headers.remove(name);
+        }
+        for (name, value) in &headers {
+            to_upstream.headers_mut().append(name, value.clone());
+        }
+        let config = WebSocketConfig::default().max_message_size(Some(max_body)).max_frame_size(Some(max_body));
+        let (upstream_ws, answer) =
+            match tokio_tungstenite::connect_async_with_config(to_upstream, Some(config), false).await {
+                Ok(c) => c,
+                Err(tungstenite::Error::Http(refused)) => {
+                    let code = refused.status();
+                    return status(if code.is_client_error() || code.is_server_error() {
+                        code
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "upstream WebSocket handshake failed");
+                    return status(StatusCode::BAD_GATEWAY);
+                }
+            };
+        tokio::spawn(async move {
+            let tool = match upgrade.await {
+                Ok(io) => {
+                    let io = hyper_util::rt::TokioIo::new(io);
+                    tokio_tungstenite::WebSocketStream::from_raw_socket(
+                        io,
+                        tungstenite::protocol::Role::Server,
+                        Some(config),
+                    )
+                    .await
+                }
+                Err(e) => return tracing::warn!(error = %e, "the tool's WebSocket upgrade failed"),
+            };
+            let (to_tool, from_tool) = tool.split();
+            let (to_up, from_up) = upstream_ws.split();
+            let mut sent = tokio::spawn(pump(from_tool, to_up, record.clone(), "WS>", path.clone()));
+            let mut answered = tokio::spawn(pump(from_up, to_tool, record, "WS<", path));
+            // a side that ends lets the other finish its close a moment later, then ends it too
+            let grace = Duration::from_secs(5);
+            tokio::select! {
+                _ = &mut sent => { let _ = tokio::time::timeout(grace, &mut answered).await; answered.abort(); }
+                _ = &mut answered => { let _ = tokio::time::timeout(grace, &mut sent).await; sent.abort(); }
+            }
+        });
+        let mut response = Response::new(ResBody::default());
+        *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+        let h = response.headers_mut();
+        h.insert(header::UPGRADE, http::HeaderValue::from_static("websocket"));
+        h.insert(header::CONNECTION, http::HeaderValue::from_static("upgrade"));
+        if let Ok(accept) = http::HeaderValue::from_str(&derive_accept_key(key.as_bytes())) {
+            h.insert(header::SEC_WEBSOCKET_ACCEPT, accept);
+        }
+        if let Some(protocol) = answer.headers().get(header::SEC_WEBSOCKET_PROTOCOL) {
+            h.insert(header::SEC_WEBSOCKET_PROTOCOL, protocol.clone());
+        }
+        response
+    }
+
+    /// One direction of a session: each message stored (text and binary), then passed on.
+    async fn pump<S, T>(mut from: S, mut to: T, record: Option<Recorder>, direction: &'static str, path: String)
+    where
+        S: futures_util::Stream<Item = Result<Message, tungstenite::Error>> + Unpin,
+        T: futures_util::Sink<Message> + Unpin,
+    {
+        while let Some(Ok(m)) = from.next().await {
+            let (kind, body) = match &m {
+                Message::Text(t) => ("text", Bytes::copy_from_slice(t.as_bytes())),
+                Message::Binary(b) => ("binary", b.clone()),
+                // answered by the side that received it
+                Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
+                Message::Close(_) => {
+                    let _ = to.send(m).await;
+                    break;
+                }
+            };
+            if let Some(record) = &record {
+                let meta = format!("{} {direction} {path} {kind} -", unix_ms());
+                let record = record.clone();
+                if let Err(e) = tokio::task::spawn_blocking(move || lock(&record).append(meta.as_bytes(), body)).await {
+                    tracing::error!(error = %e, "recording panicked; passing the message on unrecorded");
+                }
+            }
+            if to.send(m).await.is_err() {
+                break;
+            }
+        }
+        let _ = to.close().await;
     }
 }
 
@@ -2082,6 +2235,24 @@ mod tests {
             assert!(!authorized(Some(&v(bad)), Some("s3cret")), "{bad:?}");
         }
         assert!(!authorized(None, Some("s3cret")));
+    }
+
+    #[test]
+    fn a_websocket_handshake_is_a_get_asking_to_upgrade_to_websocket() {
+        let req = |method: &str, headers: &[(&str, &str)]| {
+            let mut r = Request::builder().method(method).uri("/v1/realtime");
+            for (k, v) in headers {
+                r = r.header(*k, *v);
+            }
+            r.body(()).unwrap()
+        };
+        let ws = [("upgrade", "websocket"), ("connection", "Upgrade")];
+        assert!(websocket::is_upgrade(&req("GET", &ws)));
+        assert!(websocket::is_upgrade(&req("GET", &[("upgrade", "WebSocket"), ("connection", "keep-alive, Upgrade")])));
+        assert!(!websocket::is_upgrade(&req("POST", &ws)), "only a GET");
+        assert!(!websocket::is_upgrade(&req("GET", &[("connection", "upgrade")])), "no upgrade");
+        assert!(!websocket::is_upgrade(&req("GET", &[("upgrade", "websocket")])), "no connection: upgrade");
+        assert!(!websocket::is_upgrade(&req("GET", &[("upgrade", "h2c"), ("connection", "upgrade")])), "not websocket");
     }
 
     #[test]

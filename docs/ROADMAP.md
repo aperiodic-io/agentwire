@@ -44,5 +44,4 @@ CLI beside the collector).
 | An OpenTelemetry Collector exporter | A Go component in another repository, built on the Rust library through FFI or on a reimplementation of DPK1 | Users ask to keep their Collector as the only hop |
 | Splitting forwarded batches for backends with low OTLP body limits (docs/integrations.md, "Watch for these") | Needs OTLP re-encoding per backend | A user forwards to one of them |
 | TypeScript and Go bindings | Most read paths are the CLI or Python | An ingest path in either language asks |
-| WebSocket (realtime and voice APIs) | The proxies speak HTTP only | A voice-agent user asks |
 | More gateways and agents run in CI | Each costs a container and minutes on every pull request | An integration breaks unseen |

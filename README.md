@@ -334,6 +334,13 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8080 claude
 
 API keys pass straight through. Headers are never written to the file.
 
+WebSocket sessions (realtime and voice APIs) go through too: the server passes the upgrade to the
+upstream (`ws://` or `wss://`, by `--upstream`'s scheme), with the tool's headers and subprotocols,
+and stores each text or binary message as a record of its own as it passes, `WS>` towards the
+upstream and `WS<` back, after the time in its meta (`deltapack log ls` shows them in order). A
+handshake the upstream refuses is refused to the tool with the same status; one it cannot reach,
+with 502. A message is limited to `--max-body`.
+
 ### On files you already have
 
 One JSON object per line in, a `.dpk` file out: exported spans, a gateway's JSON-lines log, an

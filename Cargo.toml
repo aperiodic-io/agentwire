@@ -29,6 +29,7 @@ proxy = [
   "dep:hyper-util",
   "dep:reqwest",
   "dep:serde_json",
+  "dep:tokio-tungstenite",
   "dep:snap",
   "dep:tokio",
   "dep:tracing",
@@ -54,12 +55,14 @@ clap = { version = "4", features = ["derive", "env"], optional = true }
 flate2 = { version = "1", optional = true }
 brotli-decompressor = { version = "6", optional = true }
 snap = { version = "1", optional = true }
-futures-util = { version = "0.3", default-features = false, optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink"], optional = true }
 hyper = { version = "1", features = ["server", "http1", "http2"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful", "service"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"], optional = true }
 # `deltapack log show`: OTLP JSON read, and every record written, as JSON
 serde_json = { version = "1", optional = true }
+# `server` records WebSocket traffic (realtime and voice APIs) as it proxies it
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"], optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
@@ -68,7 +71,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], option
 brotli = "9"                 # brotli fixtures for the decoding tests
 cucumber = "0.23"
 flate2 = "1"
-futures-util = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
@@ -77,6 +80,7 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 proptest = "1"
 reqwest = { version = "0.12", default-features = false, features = ["stream"] }
 serde_json = "1"
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake"] }
 tokio = { version = "1", features = ["full"] }
 tower-layer = "0.3"
 tower-service = "0.3"
