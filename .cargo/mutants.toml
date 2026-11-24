@@ -10,6 +10,11 @@ cap_lints = true
 # every test, the acceptance scenarios (the binary) included
 additional_cargo_args = ["--all-features"]
 exclude_re = [
+  # Equivalent mutant: a failed start forgotten when exactly `retry_after` has passed or just after
+  # (`<` as `<=` on an `Instant`'s elapsed time) cannot be told apart by any test.
+  "main.rs:.*replace < with <= in Recorders::of",
+  # Only a build without the `encrypt` feature compiles it, and mutants run with --all-features.
+  "sealed_needs_the_encrypt_feature",
   # The Kani proofs (`#[cfg(kani)] mod proofs`): only Kani's build compiles them, so a mutant of one
   # builds the same test binary and no test can catch it. The kani job checks them.
   "( in | replace )(\\w+::)*proofs::",

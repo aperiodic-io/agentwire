@@ -5,6 +5,17 @@ version byte (SPEC.md); a crate release that changes it says so here.
 
 ## [Unreleased]
 
+- Records sealed at rest: `collect` and `server --record-dir` take `--key-file` (one key) or, with
+  `--tenant-header`, `--key-dir` (a key per tenant, `DIR/<tenant>.key`; a tenant without one is not
+  recorded). Sealed files are DPK1 version 2 (SPEC.md, "Sealed files"): each record's delta sealed
+  with ChaCha20-Poly1305 under a per-file HKDF key, its place and meta authenticated; meta stays
+  readable. `deltapack log --key-file` reads them and `log pack` writes them; in Python,
+  `Writer(…, key=)`, `Reader(…, key=)` and `Reader.sealed`. The library's `encrypt` feature
+  (`log::Key`, `Writer::new_sealed`, `Reader::with_key`) is on in the binary and the wheel.
+- `collect` and `server --record-dir` take `--tenant-header NAME`: each request is recorded in the
+  directory of the tenant the header names (sanitised; `_none`, `_invalid`), each with its own
+  files, lock, retention and `--on-rotate`, so a tenant is deleted on its own. `--max-tenants`
+  (256) caps the directories; any more share `_other`. Metrics sum every tenant's.
 - `log show --attr KEY=VALUE` keeps the spans and log records with that attribute or resource
   attribute (repeat for all of them). `log estimate` reads lines on stdin and says what `pack` would
   store, and with `--usd-per-gb` what each would cost. `log ls` and `log unpack` take many files.

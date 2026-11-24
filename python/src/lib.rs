@@ -21,8 +21,14 @@ fn err(e: io::Error) -> PyErr {
     }
 }
 
+/// A key given as 64 hex digits: `ValueError` otherwise.
+fn key(hex: Option<&str>) -> PyResult<Option<log::Key>> {
+    hex.map(|h| log::Key::from_hex(h).map_err(|e| PyValueError::new_err(e.to_string()))).transpose()
+}
+
 /// Appends records to a new DPK1 file (never an existing one). Each body is stored as a delta
-/// against one of the `window` latest records. Use it as a context manager, or `close()` it.
+/// against one of the `window` latest records; with `key` (64 hex digits), sealed with it. Use it as
+/// a context manager, or `close()` it.
 #[pyclass(module = "deltapack")]
 struct Writer {
     inner: Option<log::Writer<BufWriter<File>>>,
@@ -31,10 +37,15 @@ struct Writer {
 #[pymethods]
 impl Writer {
     #[new]
-    #[pyo3(signature = (path, window = 16))]
-    fn new(path: PathBuf, window: usize) -> PyResult<Self> {
+    #[pyo3(signature = (path, window = 16, key = None))]
+    fn new(path: PathBuf, window: usize, key: Option<&str>) -> PyResult<Self> {
+        let key = self::key(key)?;
         let file = File::options().write(true).create_new(true).open(path).map_err(err)?;
-        let mut w = log::Writer::new(BufWriter::new(file), window).map_err(err)?;
+        let mut w = match &key {
+            Some(k) => log::Writer::new_sealed(BufWriter::new(file), window, k),
+            None => log::Writer::new(BufWriter::new(file), window),
+        }
+        .map_err(err)?;
         w.flush().map_err(err)?; // a valid, empty file before the first record
         Ok(Writer { inner: Some(w) })
     }
@@ -71,12 +82,21 @@ impl Writer {
 
 /// Reads a DPK1 file: `len(r)`, `r[i]` (one record's body), `r.meta(i)`, `r.records()`, and
 /// `for meta, body in r` (every record, in order, each rebuilt once). `max_body` caps any body it
-/// will rebuild.
+/// will rebuild; `key` (64 hex digits) reads a sealed file.
 #[pyclass(module = "deltapack")]
 struct Reader {
     path: PathBuf,
     max_body: usize,
+    key: Option<log::Key>,
     inner: log::Reader<File>,
+}
+
+fn open(path: &PathBuf, max_body: usize, key: Option<&log::Key>) -> PyResult<log::Reader<File>> {
+    let r = log::Reader::open(File::open(path).map_err(err)?, max_body).map_err(err)?;
+    match key {
+        Some(k) => r.with_key(k).map_err(err),
+        None => Ok(r),
+    }
 }
 
 impl Reader {
@@ -90,10 +110,17 @@ impl Reader {
 #[pymethods]
 impl Reader {
     #[new]
-    #[pyo3(signature = (path, max_body = 64 << 20))]
-    fn new(path: PathBuf, max_body: usize) -> PyResult<Self> {
-        let inner = log::Reader::open(File::open(&path).map_err(err)?, max_body).map_err(err)?;
-        Ok(Reader { path, max_body, inner })
+    #[pyo3(signature = (path, max_body = 64 << 20, key = None))]
+    fn new(path: PathBuf, max_body: usize, key: Option<&str>) -> PyResult<Self> {
+        let key = self::key(key)?;
+        let inner = open(&path, max_body, key.as_ref())?;
+        Ok(Reader { path, max_body, key, inner })
+    }
+
+    /// Whether the file's records are sealed (reading them needs its key).
+    #[getter]
+    fn sealed(&self) -> bool {
+        self.inner.is_sealed()
     }
 
     fn __len__(&self) -> usize {
@@ -130,8 +157,7 @@ impl Reader {
     }
 
     fn __iter__(&self) -> PyResult<Records> {
-        let reader = log::Reader::open(File::open(&self.path).map_err(err)?, self.max_body).map_err(err)?;
-        Ok(Records { inner: reader.into_iter() })
+        Ok(Records { inner: open(&self.path, self.max_body, self.key.as_ref())?.into_iter() })
     }
 }
 

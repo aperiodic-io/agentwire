@@ -13,11 +13,14 @@ include = ["/src", "/README.md", "/SPEC.md", "/LICENSE"]
 
 [features]
 default = ["server"]
+# DPK1 version 2: records sealed with a key (log::Key, Writer::new_sealed, Reader::with_key)
+encrypt = ["dep:chacha20poly1305", "dep:hkdf"]
 # the tower layer that decodes DPD1 requests (src/server.rs)
 server = ["dep:http", "dep:http-body", "dep:http-body-util", "dep:tower-layer", "dep:tower-service"]
 # the `deltapack` binary: the server layer as a reverse proxy, and a local client proxy
 proxy = [
   "server",
+  "encrypt",
   "dep:clap",
   "dep:flate2",
   "dep:brotli-decompressor",
@@ -36,6 +39,8 @@ proxy = [
 bytes = "1"
 sha2 = "0.10"
 zstd-safe = { version = "7", default-features = false, features = ["std"] }
+chacha20poly1305 = { version = "0.10", optional = true }
+hkdf = { version = "0.12", optional = true }
 
 http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }

@@ -85,6 +85,10 @@ enum Mode {
         rotate_bytes: u64,
         #[command(flatten)]
         retention: Retention,
+        #[command(flatten)]
+        tenants: Tenants,
+        #[command(flatten)]
+        keys: Keys,
     },
     /// Store every request body posted (OTLP/HTTP traces and logs, a gateway's HTTP log plugin) in
     /// DPK1, decoded (gzip, deflate, br, zstd, snappy); forward each request as received when given a backend. Also accepts
@@ -115,6 +119,10 @@ enum Mode {
         metrics: Option<SocketAddr>,
         #[command(flatten)]
         retention: Retention,
+        #[command(flatten)]
+        tenants: Tenants,
+        #[command(flatten)]
+        keys: Keys,
     },
     /// Accept plain requests from a local tool and send them to a `deltapack server` as deltas.
     Client {
@@ -133,8 +141,13 @@ enum Mode {
         metrics: Option<SocketAddr>,
     },
     /// Read and write DPK1 files: bodies stored as deltas against earlier ones.
-    #[command(subcommand)]
-    Log(LogCmd),
+    Log {
+        /// The key sealed files were sealed with (a file of 64 hex digits); `pack` seals with it.
+        #[arg(long, env = "DELTAPACK_KEY_FILE", global = true)]
+        key_file: Option<PathBuf>,
+        #[command(subcommand)]
+        cmd: LogCmd,
+    },
 }
 
 /// What happens to a record directory's closed files. Files are deleted oldest first; the open file
@@ -156,6 +169,49 @@ struct Retention {
     /// whose command failed, get it again at start; retention keeps a file until its command succeeds.
     #[arg(long, env = "DELTAPACK_ON_ROTATE")]
     on_rotate: Option<String>,
+}
+
+/// Records kept apart by tenant: a directory each, in the record directory.
+#[derive(clap::Args, Clone, Default)]
+struct Tenants {
+    /// Record each request in the directory of the tenant this header names (letters, digits, `.`,
+    /// `_` and `-`, up to 64; `_none` when absent, `_invalid` otherwise), each with its own files,
+    /// lock, retention and --on-rotate. Set it at a gateway that authenticates the tenant.
+    #[arg(long, env = "DELTAPACK_TENANT_HEADER")]
+    tenant_header: Option<HeaderName>,
+    /// Tenants given a directory of their own; requests of any more share `_other`.
+    #[arg(long, env = "DELTAPACK_MAX_TENANTS", default_value_t = 256)]
+    max_tenants: usize,
+}
+
+/// Records sealed at rest: a key for all, or one per tenant.
+#[derive(clap::Args, Clone, Default)]
+struct Keys {
+    /// Seal every record with this key: a file of 64 hex digits (`openssl rand -hex 32`). Bodies
+    /// are unreadable without it; each record's meta (time, method, path, trace ids) is not sealed.
+    #[arg(long, env = "DELTAPACK_KEY_FILE", conflicts_with = "key_dir")]
+    key_file: Option<PathBuf>,
+    /// With --tenant-header: seal each tenant's records with its own key, DIR/<tenant>.key. Deleting
+    /// a tenant's key makes its records unreadable everywhere, copies included. A tenant without a
+    /// key is not recorded.
+    #[arg(long, env = "DELTAPACK_KEY_DIR", requires = "tenant_header")]
+    key_dir: Option<PathBuf>,
+}
+
+/// Whether a key file's mode lets anyone but its owner read it.
+fn key_too_open(mode: u32) -> bool {
+    mode & 0o077 != 0
+}
+
+/// A key file: 64 hex digits. One others can read is used, and warned of.
+fn read_key(path: &std::path::Path) -> io::Result<log::Key> {
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::metadata(path).is_ok_and(|m| key_too_open(m.permissions().mode())) {
+        eprintln!("warning: {} can be read by others than its owner: chmod 600 it", path.display());
+    }
+    let text =
+        std::fs::read_to_string(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    log::Key::from_hex(&text).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }
 
 #[derive(Subcommand)]
@@ -232,8 +288,9 @@ enum LogCmd {
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
-    if let Mode::Log(cmd) = cli.mode {
-        return match run_log(cmd) {
+    if let Mode::Log { key_file, cmd } = cli.mode {
+        let key = key_file.as_deref().map(read_key).transpose()?;
+        return match run_log(cmd, key.as_ref()) {
             // a reader that stopped reading (`| head`): the rest has nowhere to go, which is no error
             Err(e) if e.downcast_ref::<io::Error>().is_some_and(|e| e.kind() == io::ErrorKind::BrokenPipe) => Ok(()),
             done => done,
@@ -249,7 +306,7 @@ async fn main() -> Result<(), BoxError> {
         .connect_timeout(Duration::from_secs(10))
         .build()?;
     match cli.mode {
-        Mode::Log(_) => unreachable!("handled above"),
+        Mode::Log { .. } => unreachable!("handled above"),
         Mode::Server {
             listen,
             upstream,
@@ -262,9 +319,11 @@ async fn main() -> Result<(), BoxError> {
             record_window,
             rotate_bytes,
             retention,
+            tenants,
+            keys,
         } => {
             let record = match record_dir {
-                Some(dir) => Some(Recording::start(dir, record_window, rotate_bytes, retention)?),
+                Some(dir) => Some(Recorders::start(dir, record_window, rotate_bytes, retention, tenants, keys)?),
                 None => None,
             };
             let store = Store::new(store_bytes, Duration::from_secs(ttl_seconds));
@@ -273,8 +332,19 @@ async fn main() -> Result<(), BoxError> {
             let forward = Forward { http, upstream: Some(Arc::new(upstream)), record, max_body, grpc: false };
             run_server(vec![listen], store, Config { max_body, scope_headers }, metrics, forward).await
         }
-        Mode::Collect { listen, record_dir, forward, record_window, rotate_bytes, max_body, metrics, retention } => {
-            let record = Some(Recording::start(record_dir, record_window, rotate_bytes, retention)?);
+        Mode::Collect {
+            listen,
+            record_dir,
+            forward,
+            record_window,
+            rotate_bytes,
+            max_body,
+            metrics,
+            retention,
+            tenants,
+            keys,
+        } => {
+            let record = Some(Recorders::start(record_dir, record_window, rotate_bytes, retention, tenants, keys)?);
             let forward = Forward { http, upstream: forward.map(Arc::new), record, max_body, grpc: true };
             let config = Config { max_body, ..Config::default() };
             run_server(listen, Store::new(1 << 30, Duration::from_secs(1800)), config, metrics, forward).await
@@ -316,7 +386,7 @@ async fn run_server(
     if let Some(addr) = metrics {
         let (stats, store, record) = (layer.stats().clone(), store.clone(), forward.record.clone());
         serve_metrics(addr, move || {
-            server_metrics(&stats, &store) + &record.as_ref().map_or_else(String::new, |r| lock(r).metrics())
+            server_metrics(&stats, &store) + &record.as_ref().map_or_else(String::new, Recorders::metrics)
         })
         .await?;
     }
@@ -373,6 +443,201 @@ async fn shutdown_signal() {
 
 type Recorder = Arc<Mutex<Recording>>;
 
+/// Where requests are recorded: the record directory, or with --tenant-header a directory per
+/// tenant in it, each recording started at its tenant's first request.
+#[derive(Clone)]
+struct Recorders {
+    root: PathBuf,
+    window: usize,
+    rotate_bytes: u64,
+    retention: Retention,
+    tenants: Tenants,
+    /// --key-dir, or the key of --key-file
+    key_dir: Option<PathBuf>,
+    key: Option<log::Key>,
+    /// by tenant ("" without --tenant-header)
+    open: Arc<Mutex<std::collections::HashMap<String, Slot>>>,
+    /// requests that named a tenant whose recording could not be started, or one past the cap
+    /// with --key-dir
+    unrecorded: Arc<AtomicU64>,
+    /// tenants whose start failed, and when: tried again after `retry_after` ([`RETRY_START`]); they
+    /// hold no place under --max-tenants
+    failed: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    retry_after: Duration,
+}
+
+/// A tenant's recording, started once by its first request (`None`: its start failed).
+type Slot = Arc<std::sync::OnceLock<Option<Recorder>>>;
+
+/// Failed starts remembered at once, at most: past it, a failed tenant is tried again sooner.
+const MAX_FAILED: usize = 4096;
+
+/// A tenant whose recording could not be started is tried again after this long.
+const RETRY_START: Duration = Duration::from_secs(30);
+
+impl Recorders {
+    fn start(
+        root: PathBuf,
+        window: usize,
+        rotate_bytes: u64,
+        retention: Retention,
+        tenants: Tenants,
+        keys: Keys,
+    ) -> io::Result<Self> {
+        let key = keys.key_file.as_deref().map(read_key).transpose()?;
+        let r = Recorders {
+            root,
+            window,
+            rotate_bytes,
+            retention,
+            tenants,
+            key_dir: keys.key_dir,
+            key,
+            open: Default::default(),
+            unrecorded: Default::default(),
+            failed: Default::default(),
+            retry_after: RETRY_START,
+        };
+        if r.tenants.tenant_header.is_none() {
+            // one recording: started now, so that a directory it cannot use stops the process
+            let one = Recording::start(r.root.clone(), window, rotate_bytes, r.retention.clone(), r.key.clone())?;
+            lock_open(&r.open).insert(String::new(), Arc::new(Some(one).into()));
+        }
+        Ok(r)
+    }
+
+    /// The recording for a request; none when its tenant's cannot be started (logged once, counted,
+    /// tried again after [`RETRY_START`]), or the tenant is past the cap with --key-dir. A tenant's
+    /// start holds no lock but its own: other tenants' requests go on meanwhile.
+    fn of(&self, headers: &HeaderMap) -> Option<Recorder> {
+        let tenant = match &self.tenants.tenant_header {
+            None => String::new(),
+            Some(name) => tenant_dir(headers.get_all(name)),
+        };
+        let unrecorded = || {
+            self.unrecorded.fetch_add(1, Ordering::Relaxed);
+            None
+        };
+        let (tenant, slot) = {
+            let mut open = lock_open(&self.open);
+            let tenant = match open.contains_key(&tenant) {
+                true => tenant,
+                // past the cap: a tenant with a key of its own is not sealed with another's
+                false if open.len() >= self.tenants.max_tenants && self.key_dir.is_some() => return unrecorded(),
+                false if open.len() >= self.tenants.max_tenants => "_other".to_owned(),
+                false => tenant,
+            };
+            if lock_failed(&self.failed).get(&tenant).is_some_and(|at| at.elapsed() < self.retry_after) {
+                return unrecorded();
+            }
+            let slot = open.entry(tenant.clone()).or_default().clone();
+            (tenant, slot)
+        };
+        // the start holds no lock but its slot's: other tenants' requests go on meanwhile
+        let mut tried = false;
+        let started = tokio::task::block_in_place(|| {
+            slot.get_or_init(|| {
+                tried = true;
+                self.start_tenant(&tenant)
+            })
+            .clone()
+        });
+        match started {
+            Some(r) => {
+                if tried {
+                    lock_failed(&self.failed).remove(&tenant);
+                }
+                Some(r)
+            }
+            None => {
+                // only the request that tried the start forgets its slot and remembers when, both
+                // under the map's lock: no request sees the tenant in neither (and starts it again
+                // at once), and none that waited on the slot marks a tenant started since as failed
+                if tried {
+                    let mut open = lock_open(&self.open);
+                    let mut failed = lock_failed(&self.failed);
+                    failed.retain(|_, at| at.elapsed() < self.retry_after);
+                    if failed.len() < MAX_FAILED {
+                        failed.insert(tenant.clone(), std::time::Instant::now());
+                    }
+                    // still this slot: only a failed start's own request removes one
+                    open.remove(&tenant);
+                }
+                unrecorded()
+            }
+        }
+    }
+
+    /// A tenant's recording, started: with its own key (--key-dir), or the one for all.
+    fn start_tenant(&self, tenant: &str) -> Option<Recorder> {
+        let key = match &self.key_dir {
+            Some(dir) => read_key(&dir.join(format!("{tenant}.key"))).map(Some),
+            None => Ok(self.key.clone()),
+        };
+        let dir = self.root.join(tenant);
+        match key.and_then(|key| Recording::start(dir, self.window, self.rotate_bytes, self.retention.clone(), key)) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::error!(tenant, error = %e, "cannot record for this tenant; trying again in 30 s");
+                None
+            }
+        }
+    }
+
+    /// Every recording's counters, summed.
+    fn metrics(&self) -> String {
+        let mut sum = [0; 5];
+        // the recordings, taken out of the map so that routing waits for none of them
+        let started: Vec<Recorder> =
+            lock_open(&self.open).values().filter_map(|s| s.get().cloned().flatten()).collect();
+        for r in &started {
+            for (s, n) in sum.iter_mut().zip(lock(r).counters()) {
+                *s += n;
+            }
+        }
+        let names =
+            ["recorded", "recorded_body_bytes", "recorded_file_bytes", "record_failures", "rotate_command_failures"];
+        names
+            .iter()
+            .zip(sum)
+            .chain(std::iter::once((&"unrecorded", self.unrecorded.load(Ordering::Relaxed))))
+            .map(|(name, n)| format!("# TYPE deltapack_{name}_total counter\ndeltapack_{name}_total {n}\n"))
+            .collect()
+    }
+}
+
+fn lock_failed(
+    m: &Mutex<std::collections::HashMap<String, std::time::Instant>>,
+) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, std::time::Instant>> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn lock_open(
+    m: &Mutex<std::collections::HashMap<String, Slot>>,
+) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Slot>> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// A tenant's directory name, from its header, kept only if it cannot name another place, a
+/// reserved name, or (on a case-insensitive file system) another tenant's: lowercase letters,
+/// digits, `.`, `_`, `-`; up to 64; not starting with `.` or `_`. `_none` without the header, `_invalid`
+/// otherwise, and when it is given more than once (a gateway that appends instead of replacing it).
+fn tenant_dir(values: http::header::GetAll<'_, http::HeaderValue>) -> String {
+    let mut it = values.iter();
+    let v = match (it.next(), it.next()) {
+        (None, _) => return "_none".into(),
+        (Some(v), None) => v,
+        (Some(_), Some(_)) => return "_invalid".into(),
+    };
+    let ok = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(b);
+    match v.as_bytes() {
+        t if !t.is_empty() && t.len() <= 64 && !b"._".contains(&t[0]) && t.iter().all(ok) => {
+            String::from_utf8_lossy(t).into_owned()
+        }
+        _ => "_invalid".into(),
+    }
+}
+
 fn lock(r: &Recorder) -> std::sync::MutexGuard<'_, Recording> {
     // every append completes, or fails and moves to a new file, under the lock
     r.lock().unwrap_or_else(|p| p.into_inner())
@@ -382,6 +647,8 @@ fn lock(r: &Recorder) -> std::sync::MutexGuard<'_, Recording> {
 /// one, and in order by name. Each is self-contained: a new one starts without bases.
 struct Recording {
     dir: PathBuf,
+    /// what each file's records are sealed with, if anything
+    key: Option<log::Key>,
     window: usize,
     rotate_bytes: u64,
     path: PathBuf,
@@ -406,7 +673,13 @@ struct Recording {
 impl Recording {
     /// Opens a new file in `dir`; hands the files already there to `--on-rotate`, and applies
     /// retention now, at each new file, and hourly when it keeps by age.
-    fn start(dir: PathBuf, window: usize, rotate_bytes: u64, retention: Retention) -> io::Result<Recorder> {
+    fn start(
+        dir: PathBuf,
+        window: usize,
+        rotate_bytes: u64,
+        retention: Retention,
+        key: Option<log::Key>,
+    ) -> io::Result<Recorder> {
         std::fs::create_dir_all(&dir)?;
         // the directory itself is locked (flock), so it holds nothing but its files
         let dir_lock = File::open(&dir)?;
@@ -422,7 +695,7 @@ impl Recording {
             }
         }
         let earlier = dpk_files(&dir)?;
-        let (path, writer) = Self::create(&dir, window, 0)?;
+        let (path, writer) = Self::create(&dir, window, 0, key.as_ref())?;
         let by_age = retention.keep_days.is_some();
         let (held, command_failures) = (Arc::<Mutex<HashSet<PathBuf>>>::default(), Arc::<AtomicU64>::default());
         let commands = retention.on_rotate.clone().map(|command| {
@@ -463,6 +736,7 @@ impl Recording {
             commands,
             command_failures,
             _lock: dir_lock,
+            key,
         };
         for (file, ..) in earlier {
             r.hand_over(file);
@@ -509,11 +783,19 @@ impl Recording {
         }
     }
 
-    fn create(dir: &std::path::Path, window: usize, seq: u64) -> io::Result<(PathBuf, log::Writer<BufWriter<File>>)> {
+    fn create(
+        dir: &std::path::Path,
+        window: usize,
+        seq: u64,
+        key: Option<&log::Key>,
+    ) -> io::Result<(PathBuf, log::Writer<BufWriter<File>>)> {
         let path = dir.join(format!("{}-{}-{seq:06}.dpk", unix_ms(), std::process::id()));
         let file = File::options().write(true).create_new(true).open(&path)?;
         tracing::info!(path = %path.display(), "recording");
-        let mut w = log::Writer::new(BufWriter::new(file), window)?;
+        let mut w = match key {
+            Some(key) => log::Writer::new_sealed(BufWriter::new(file), window, key)?,
+            None => log::Writer::new(BufWriter::new(file), window)?,
+        };
         w.flush()?; // a valid, empty DPK1 file before the first record
         Ok((path, w))
     }
@@ -522,7 +804,7 @@ impl Recording {
         // first, so that a full disk is freed before the new file needs room (the open file is kept)
         self.prune();
         let len = std::fs::metadata(&self.path).map_or(0, |m| m.len());
-        let (path, writer) = Self::create(&self.dir, self.window, self.seq + 1)?;
+        let (path, writer) = Self::create(&self.dir, self.window, self.seq + 1, self.key.as_ref())?;
         let old = std::mem::replace(&mut self.path, path);
         (self.closed, self.seq, self.writer) = (self.closed + len, self.seq + 1, writer);
         self.hand_over(old);
@@ -550,19 +832,10 @@ impl Recording {
         Ok(())
     }
 
-    fn metrics(&self) -> String {
+    /// Records, their bytes, bytes of the files written, failed writes, failed --on-rotate commands.
+    fn counters(&self) -> [u64; 5] {
         let on_disk = self.closed + std::fs::metadata(&self.path).map_or(0, |m| m.len());
-        format!(
-            "# TYPE deltapack_recorded_total counter\ndeltapack_recorded_total {}\n\
-             # TYPE deltapack_recorded_body_bytes_total counter\ndeltapack_recorded_body_bytes_total {}\n\
-             # TYPE deltapack_recorded_file_bytes_total counter\ndeltapack_recorded_file_bytes_total {on_disk}\n\
-             # TYPE deltapack_record_failures_total counter\ndeltapack_record_failures_total {}\n\
-             # TYPE deltapack_rotate_command_failures_total counter\ndeltapack_rotate_command_failures_total {}\n",
-            self.recorded,
-            self.body_bytes,
-            self.failures,
-            self.command_failures.load(Ordering::Relaxed),
-        )
+        [self.recorded, self.body_bytes, on_disk, self.failures, self.command_failures.load(Ordering::Relaxed)]
     }
 }
 
@@ -625,7 +898,7 @@ fn unix_ms() -> u128 {
 struct Forward {
     http: reqwest::Client,
     upstream: Option<Arc<reqwest::Url>>,
-    record: Option<Recorder>,
+    record: Option<Recorders>,
     max_body: usize,
     /// `collect`: take OTLP/gRPC Export calls too
     grpc: bool,
@@ -641,13 +914,22 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
     }
 
     fn call(&mut self, request: Request<InnerBody<Incoming>>) -> Self::Future {
-        let (http, upstream, record, max_body) =
-            (self.http.clone(), self.upstream.clone(), self.record.clone(), self.max_body);
+        let (http, upstream, max_body) = (self.http.clone(), self.upstream.clone(), self.max_body);
+        // which recording, by the request's tenant; none when its tenant's cannot be started
+        let record = self.record.as_ref().map(|r| r.of(request.headers()));
         let grpc = self.grpc && grpc::is_grpc(request.headers());
         Box::pin(async move {
             let (parts, body) = request.into_parts();
+            // a tenant that cannot be recorded, and nothing to forward to: refused, so the exporter
+            // retries, rather than acknowledged and lost
+            if let (Some(None), None) = (&record, &upstream) {
+                return Ok(match grpc {
+                    true => grpc::error(grpc::Code::Unavailable, "cannot record for this tenant"),
+                    false => status(StatusCode::SERVICE_UNAVAILABLE),
+                });
+            }
             if let (true, Some(record)) = (grpc, &record) {
-                return Ok(export(&http, upstream.as_deref(), record, parts, body, max_body).await);
+                return Ok(export(&http, upstream.as_deref(), record.as_ref(), parts, body, max_body).await);
             }
             let (Some(record), upstream) = (record, &upstream) else {
                 let upstream = upstream.as_ref().expect("a server without a recorder has an upstream");
@@ -661,7 +943,9 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
                 Ok(d) => d,
                 Err(code) => return Ok(status(code)),
             };
-            store(&record, &parts, &encoding, stored).await;
+            if let Some(record) = &record {
+                store(record, &parts, &encoding, stored).await;
+            }
             Ok(match upstream {
                 Some(upstream) => forward(&http, upstream, &parts, body).await,
                 None => ack(&parts.headers),
@@ -701,7 +985,7 @@ async fn store(record: &Recorder, parts: &http::request::Parts, encoding: &str, 
 async fn export(
     http: &reqwest::Client,
     upstream: Option<&reqwest::Url>,
-    record: &Recorder,
+    record: Option<&Recorder>,
     mut parts: http::request::Parts,
     body: InnerBody<Incoming>,
     max_body: usize,
@@ -724,7 +1008,9 @@ async fn export(
     } else {
         body.slice_ref(message)
     };
-    store(record, &parts, "-", message.clone()).await;
+    if let Some(record) = record {
+        store(record, &parts, "-", message.clone()).await;
+    }
     let Some(upstream) = upstream else { return grpc::ok(b"") };
     // OTLP/HTTP: the same message, as protobuf, at the signal's path; the request's other headers
     // (authorization, user-agent) go along
@@ -746,12 +1032,15 @@ async fn export(
     }
 }
 
-fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
+fn run_log(cmd: LogCmd, key: Option<&log::Key>) -> Result<(), BoxError> {
     let mut out = BufWriter::new(io::stdout().lock());
     match cmd {
         LogCmd::Pack { file, window } => {
             let file = File::options().write(true).create_new(true).open(file)?;
-            let mut w = log::Writer::new(BufWriter::new(file), window)?;
+            let mut w = match key {
+                Some(key) => log::Writer::new_sealed(BufWriter::new(file), window, key)?,
+                None => log::Writer::new(BufWriter::new(file), window)?,
+            };
             for line in io::stdin().lock().split(b'\n') {
                 w.append(b"", Bytes::from(line?))?;
             }
@@ -759,7 +1048,7 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
         }
         LogCmd::Unpack { files, max_body } => {
             for file in &files {
-                open_log(file, max_body)?.scan(|_, body| {
+                open_log(file, max_body, key)?.scan(|_, body| {
                     out.write_all(body)?;
                     out.write_all(b"\n")
                 })?;
@@ -782,7 +1071,7 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
             }
             writeln!(out)?;
         }
-        LogCmd::Get { file, index, max_body } => out.write_all(&open_log(&file, max_body)?.get(index)?)?,
+        LogCmd::Get { file, index, max_body } => out.write_all(&open_log(&file, max_body, key)?.get(index)?)?,
         LogCmd::Show { files, trace, since, until, attrs, max_body } => {
             let now = unix_ms() as u64;
             let filter = show::Filter {
@@ -796,7 +1085,7 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
                 let mut index = 0;
                 // ponytail: every record is rebuilt to reach the ones wanted; `get` per indexed match
                 // when files outgrow a scan
-                open_log(file, max_body)?.scan(|record, body| {
+                open_log(file, max_body, key)?.scan(|record, body| {
                     let meta = show::Meta::parse(&record.meta);
                     if filter.wants(&meta) {
                         let otlp = meta.decoded().then(|| show::rows(body, meta.path.and_then(show::signal)));
@@ -820,7 +1109,7 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
                 // a file being written, deleted by retention or not DPK1 is named and skipped
                 let counted = std::fs::metadata(file).and_then(|m| {
                     let (mut records, mut body) = (0, 0);
-                    open_log(file, max_body)?.scan(|_, b| {
+                    open_log(file, max_body, key)?.scan(|_, b| {
                         (records, body) = (records + 1, body + b.len() as u64);
                         Ok(())
                     })?;
@@ -845,7 +1134,7 @@ fn run_log(cmd: LogCmd) -> Result<(), BoxError> {
         LogCmd::Ls { files } => {
             for file in &files {
                 let lead = if files.len() > 1 { format!("{}\t", file.display()) } else { String::new() };
-                for (i, r) in open_log(file, 0)?.records().iter().enumerate() {
+                for (i, r) in open_log(file, 0, key)?.records().iter().enumerate() {
                     writeln!(out, "{lead}{i} {} {} {}", r.back, r.stored, String::from_utf8_lossy(&r.meta))?;
                 }
             }
@@ -874,8 +1163,12 @@ impl Write for Counted {
     }
 }
 
-fn open_log(path: &std::path::Path, max_body: usize) -> io::Result<log::Reader<File>> {
-    let r = log::Reader::open(File::open(path)?, max_body)?;
+fn open_log(path: &std::path::Path, max_body: usize, key: Option<&log::Key>) -> io::Result<log::Reader<File>> {
+    let mut r = log::Reader::open(File::open(path)?, max_body)?;
+    // given a key, a file that is not sealed is refused: it could have replaced a sealed one
+    if let Some(key) = key {
+        r = r.with_key(key).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    }
     if r.truncated {
         eprintln!("{}: the file ends inside a record; reading the records before it", path.display());
     }
@@ -1362,7 +1655,7 @@ mod tests {
     fn a_failed_write_moves_recording_to_a_new_file_and_loses_nothing_after_it() {
         let dir = std::env::temp_dir().join(format!("deltapack-recording-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let r = Recording::start(dir.clone(), 4, 1 << 30, Retention::default()).unwrap();
+        let r = Recording::start(dir.clone(), 4, 1 << 30, Retention::default(), None).unwrap();
         let mut r = lock(&r);
         r.append(b"m", Bytes::from_static(b"before")).unwrap();
         // the disk fills up: /dev/full fails every write with ENOSPC
@@ -1381,7 +1674,7 @@ mod tests {
             })
             .collect();
         assert_eq!(bodies, [&b"before"[..], b"after"]);
-        assert!(r.metrics().contains("deltapack_record_failures_total 1\n"));
+        assert_eq!(r.counters()[3], 1, "one failed write");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1389,7 +1682,7 @@ mod tests {
     fn files_rotated_within_a_millisecond_get_their_own_names_in_order() {
         let dir = std::env::temp_dir().join(format!("deltapack-rotation-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let r = Recording::start(dir.clone(), 1, 1, Retention::default()).unwrap(); // every record fills its file
+        let r = Recording::start(dir.clone(), 1, 1, Retention::default(), None).unwrap(); // every record fills its file
         let mut r = lock(&r);
         for body in ["a", "b", "c"] {
             r.append(b"", Bytes::from(body)).unwrap();
@@ -1438,12 +1731,12 @@ mod tests {
     fn a_directory_is_recorded_to_by_one_process_at_a_time() {
         let dir = std::env::temp_dir().join(format!("deltapack-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let first = Recording::start(dir.clone(), 1, 1 << 30, Retention::default()).unwrap();
-        let second = Recording::start(dir.clone(), 1, 1 << 30, Retention::default()).map(|_| ());
+        let first = Recording::start(dir.clone(), 1, 1 << 30, Retention::default(), None).unwrap();
+        let second = Recording::start(dir.clone(), 1, 1 << 30, Retention::default(), None).map(|_| ());
         assert!(second.unwrap_err().to_string().contains("another process"), "the second is refused");
         drop(first);
         std::thread::sleep(Duration::from_millis(2)); // a file name of its own: the same pid, a new ms
-        Recording::start(dir.clone(), 1, 1 << 30, Retention::default()).unwrap();
+        Recording::start(dir.clone(), 1, 1 << 30, Retention::default(), None).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1466,6 +1759,119 @@ mod tests {
         assert_eq!(listed, [("1-x.dpk".into(), 7), ("2-x.dpk".into(), 7)]);
         assert!(dpk_files(&dir.join("missing")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_tenant_names_a_directory_inside_the_record_directory_only() {
+        let dir = |vs: &[&str]| {
+            let mut h = HeaderMap::new();
+            for v in vs {
+                h.append("x-tenant", http::HeaderValue::from_bytes(v.as_bytes()).unwrap());
+            }
+            tenant_dir(h.get_all("x-tenant"))
+        };
+        assert_eq!(dir(&[]), "_none");
+        for ok in ["acme", "a.b_c", "x2-y", "x".repeat(64).as_str()] {
+            assert_eq!(dir(&[ok]), ok);
+        }
+        assert_eq!(dir(&["Acme"]), "_invalid", "upper case: two tenants, one directory, on some file systems");
+        for bad in
+            ["", ".", "..", "../x", "a/b", ".hidden", "_none", "_other", "_x", "a b", "a\\b", "x".repeat(65).as_str()]
+        {
+            assert_eq!(dir(&[bad]), "_invalid", "{bad:?}");
+        }
+        assert_eq!(dir(&["acme", "globex"]), "_invalid", "given twice");
+        let mut h = HeaderMap::new();
+        h.insert("x-tenant", http::HeaderValue::from_bytes(b"\xff").unwrap());
+        assert_eq!(tenant_dir(h.get_all("x-tenant")), "_invalid");
+    }
+
+    fn tenant_recorders(dir: &std::path::Path, max: usize, keys: &[&str]) -> Recorders {
+        let key_dir = dir.join("keys");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        for k in keys {
+            std::fs::write(key_dir.join(format!("{k}.key")), "11".repeat(32)).unwrap();
+        }
+        let tenants = Tenants { tenant_header: Some(HeaderName::from_static("x-tenant")), max_tenants: max };
+        let keys = Keys { key_file: None, key_dir: Some(key_dir) };
+        Recorders::start(dir.join("rec"), 4, 1 << 30, Retention::default(), tenants, keys).unwrap()
+    }
+
+    fn as_tenant(t: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-tenant", t.parse().unwrap());
+        h
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tenant_that_could_not_start_is_tried_again_only_after_the_delay() {
+        let dir = std::env::temp_dir().join(format!("deltapack-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = tenant_recorders(&dir, 8, &["acme"]);
+        let acme = r.of(&as_tenant("acme")).expect("acme has a key");
+        assert!(Arc::ptr_eq(&acme, &r.of(&as_tenant("acme")).unwrap()), "started once");
+        assert!(r.of(&as_tenant("globex")).is_none(), "no key");
+        std::fs::write(dir.join("keys/globex.key"), "22".repeat(32)).unwrap();
+        assert!(r.of(&as_tenant("globex")).is_none(), "within the delay: not tried again");
+        assert_eq!(r.unrecorded.load(Ordering::Relaxed), 2);
+        r.retry_after = Duration::ZERO;
+        assert!(r.of(&as_tenant("globex")).is_some(), "past it: tried again, and started");
+        assert!(lock_failed(&r.failed).is_empty(), "a started tenant is not remembered as failed");
+        assert!(Arc::ptr_eq(&acme, &r.of(&as_tenant("acme")).unwrap()), "a started tenant is never restarted");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_starts_are_remembered_for_the_delay_and_no_more_than_so_many() {
+        let dir = std::env::temp_dir().join(format!("deltapack-failed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = tenant_recorders(&dir, 8, &[]);
+        let failed = |r: &Recorders| {
+            let mut v: Vec<String> = lock_failed(&r.failed).keys().cloned().collect();
+            v.sort();
+            v
+        };
+        r.of(&as_tenant("a"));
+        r.of(&as_tenant("b"));
+        assert_eq!(failed(&r), ["a", "b"], "within the delay: both remembered");
+        r.retry_after = Duration::ZERO;
+        r.of(&as_tenant("c"));
+        assert_eq!(failed(&r), ["c"], "past it: forgotten when another fails");
+        r.retry_after = RETRY_START;
+        let fill = |r: &Recorders, n: usize| {
+            let mut f = lock_failed(&r.failed);
+            f.clear();
+            f.extend((0..n).map(|i| (format!("t{i}"), std::time::Instant::now())));
+        };
+        fill(&r, MAX_FAILED - 1);
+        r.of(&as_tenant("d"));
+        assert!(lock_failed(&r.failed).contains_key("d"), "under the most: remembered");
+        fill(&r, MAX_FAILED);
+        r.of(&as_tenant("e"));
+        assert!(!lock_failed(&r.failed).contains_key("e"), "at the most: not remembered");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn past_the_cap_a_tenant_with_keys_of_its_own_is_not_sealed_with_others() {
+        let dir = std::env::temp_dir().join(format!("deltapack-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let r = tenant_recorders(&dir, 1, &["acme", "globex", "_other"]);
+        assert!(r.of(&as_tenant("nokey")).is_none(), "no key: failed");
+        assert!(r.of(&as_tenant("acme")).is_some(), "a failed tenant holds no place under the cap");
+        assert!(r.of(&as_tenant("globex")).is_none(), "past the cap, even with `_other.key` there");
+        assert!(!dir.join("rec/_other").exists());
+        assert_eq!(r.unrecorded.load(Ordering::Relaxed), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_key_file_others_can_read_is_warned_of() {
+        assert!(!key_too_open(0o100600));
+        assert!(!key_too_open(0o100400));
+        assert!(key_too_open(0o100640));
+        assert!(key_too_open(0o100604));
+        assert!(key_too_open(0o100644));
     }
 
     #[test]

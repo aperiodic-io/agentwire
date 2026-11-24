@@ -150,6 +150,30 @@ class AwlTest(unittest.TestCase):
             self.assertEqual([body for _, body in r], [request(str(n), t) for t in range(1, 6)])
 
     @unittest.skipUnless(os.environ.get("DELTAPACK_BIN"), "DELTAPACK_BIN: the deltapack binary, to read a file it packed")
+    def test_a_sealed_file_reads_back_with_its_key_only(self):
+        key, other = "42" * 32, "17" * 32
+        path = os.path.join(self.dir, "sealed.dpk")
+        bodies = [b"the prompt " * 50 + str(i).encode() for i in range(4)]
+        with deltapack.Writer(path, key=key) as w:
+            for b in bodies:
+                w.append(b, b"m")
+        self.assertNotIn(b"the prompt", open(path, "rb").read())
+        r = deltapack.Reader(path)
+        self.assertTrue(r.sealed)
+        self.assertEqual(len(r), 4)
+        self.assertEqual(r.meta(0), b"m")
+        with self.assertRaisesRegex(ValueError, "sealed"):
+            r[0]
+        with self.assertRaisesRegex(ValueError, "another key"):
+            deltapack.Reader(path, key=other)
+        r = deltapack.Reader(path, key=key)
+        self.assertEqual([r[i] for i in range(4)], bodies)
+        self.assertEqual([b for _, b in r], bodies)
+        with self.assertRaisesRegex(ValueError, "64 hex"):
+            deltapack.Reader(path, key="not a key")
+        self.write([(b"m", b"plain")])
+        self.assertFalse(deltapack.Reader(self.path).sealed)
+
     def test_a_file_packed_by_the_cli_reads_the_same(self):
         lines = [request("a", t) for t in range(1, 6)]
         subprocess.run([os.environ["DELTAPACK_BIN"], "log", "pack", self.path], input=b"".join(l + b"\n" for l in lines), check=True)
