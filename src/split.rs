@@ -282,6 +282,10 @@ mod tests {
             assert_eq!(per, [3, 3, 3, 1], "max {max}");
             assert!(parts.iter().all(|p| p.len() <= max));
         }
+        // small resources share a part: one that fits is not split, nor sent alone
+        let three = serde_json::to_vec(&json_export(3, 1, 10)).unwrap();
+        let parts = split(&three, Signal::Traces, three.len() - 1).unwrap();
+        assert_eq!(parts.len(), 2, "two resources in the first part");
         // a resource exactly the limit's size is not split into its scopes
         let two = serde_json::to_vec(&json!({"resourceSpans": [json_export(1, 2, 40)["resourceSpans"][0], json_export(1, 2, 40)["resourceSpans"][0]]})).unwrap();
         assert_eq!(split(&two, Signal::Traces, size(2)).unwrap().len(), 2);
@@ -301,6 +305,8 @@ mod tests {
         let one = export(1, 2, 2, 50).len();
         let parts = split(&body, Signal::Traces, one * 2 + 1).unwrap();
         assert_eq!(parts.len(), 2, "two resources a part");
+        let exactly = split(&body, Signal::Traces, one * 2).unwrap();
+        assert_eq!(exactly.len(), 2, "two resources fill a part to exactly the limit");
     }
 
     #[test]
