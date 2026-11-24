@@ -14,8 +14,9 @@ services:
       - --forward=http://phoenix:6006
       - --keep-days=30
     ports:
-      - "4318:4318"
-      - "4317:4317"
+      # this host only: the intake takes anyone's spans, and Phoenix shows them without a login
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:4317:4317"
     volumes:
       - deltapack:/data
     depends_on:
@@ -25,6 +26,6 @@ services:
     environment:
       PHOENIX_ENABLE_AUTH: "false"
     ports:
-      - "6006:6006"
+      - "127.0.0.1:6006:6006"
 volumes:
   deltapack: {}

@@ -962,7 +962,8 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
         // which recording, by the request's tenant; none when its tenant's cannot be started
         let record = self.record.as_ref().map(|r| r.of(request.headers()));
         let grpc = self.grpc && grpc::is_grpc(request.headers());
-        if let (true, Some(upstream)) = (websocket::is_upgrade(&request), &upstream) {
+        // `server` only: a collector's backend takes OTLP, not sessions
+        if let (true, false, Some(upstream)) = (websocket::is_upgrade(&request), self.grpc, &upstream) {
             let upgrade = hyper::upgrade::on(&mut request);
             let (parts, _) = request.into_parts();
             let upstream = upstream.clone();
@@ -996,7 +997,10 @@ impl tower_service::Service<Request<InnerBody<Incoming>>> for Forward {
                 Err(code) => return Ok(status(code)),
             };
             let pieces = match (split, show::signal(parts.uri.path())) {
-                (Some(max), Some(signal)) if stored.len() > max => split::split(&stored, signal, max),
+                // a body still in a coding deltapack cannot decode is forwarded as it came
+                (Some(max), Some(signal)) if stored.len() > max && encoding == "-" => {
+                    split::split(&stored, signal, max)
+                }
                 _ => None,
             };
             if let Some(record) = &record {
@@ -1019,6 +1023,15 @@ mod websocket {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{self, Message, handshake::derive_accept_key, protocol::WebSocketConfig};
+
+    /// The longest the upstream may take to answer a handshake.
+    const HANDSHAKE: Duration = Duration::from_secs(30);
+    /// How often the tool is pinged; a tool silent for [`IDLE`] (no message, no pong) has gone, and
+    /// its session (and the upstream's, perhaps billed) is ended.
+    const PING: Duration = Duration::from_secs(30);
+    const IDLE: Duration = Duration::from_secs(75);
+    /// Longer than any session: a timer that does not fire.
+    const NEVER: Duration = Duration::from_secs(365 * 86_400);
 
     /// A WebSocket handshake (RFC 6455 §4.1): a GET asking to upgrade to `websocket`.
     pub(super) fn is_upgrade<B>(request: &Request<B>) -> bool {
@@ -1070,22 +1083,26 @@ mod websocket {
             to_upstream.headers_mut().append(name, value.clone());
         }
         let config = WebSocketConfig::default().max_message_size(Some(max_body)).max_frame_size(Some(max_body));
-        let (upstream_ws, answer) =
-            match tokio_tungstenite::connect_async_with_config(to_upstream, Some(config), false).await {
-                Ok(c) => c,
-                Err(tungstenite::Error::Http(refused)) => {
-                    let code = refused.status();
-                    return status(if code.is_client_error() || code.is_server_error() {
-                        code
-                    } else {
-                        StatusCode::BAD_GATEWAY
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "upstream WebSocket handshake failed");
-                    return status(StatusCode::BAD_GATEWAY);
-                }
-            };
+        let connect = tokio_tungstenite::connect_async_with_config(to_upstream, Some(config), false);
+        let Ok(connected) = tokio::time::timeout(HANDSHAKE, connect).await else {
+            tracing::warn!("upstream WebSocket handshake timed out");
+            return status(StatusCode::GATEWAY_TIMEOUT);
+        };
+        let (upstream_ws, answer) = match connected {
+            Ok(c) => c,
+            Err(tungstenite::Error::Http(refused)) => {
+                let code = refused.status();
+                return status(if code.is_client_error() || code.is_server_error() {
+                    code
+                } else {
+                    StatusCode::BAD_GATEWAY
+                });
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "upstream WebSocket handshake failed");
+                return status(StatusCode::BAD_GATEWAY);
+            }
+        };
         tokio::spawn(async move {
             let tool = match upgrade.await {
                 Ok(io) => {
@@ -1101,8 +1118,9 @@ mod websocket {
             };
             let (to_tool, from_tool) = tool.split();
             let (to_up, from_up) = upstream_ws.split();
-            let mut sent = tokio::spawn(pump(from_tool, to_up, record.clone(), "WS>", path.clone()));
-            let mut answered = tokio::spawn(pump(from_up, to_tool, record, "WS<", path));
+            let mut sent =
+                tokio::spawn(pump(from_tool, to_up, record.clone(), "WS>", path.clone(), Keepalive::Idle(IDLE)));
+            let mut answered = tokio::spawn(pump(from_up, to_tool, record, "WS<", path, Keepalive::Ping(PING)));
             // a side that ends lets the other finish its close a moment later, then ends it too
             let grace = Duration::from_secs(5);
             tokio::select! {
@@ -1124,13 +1142,43 @@ mod websocket {
         response
     }
 
+    /// How a pump knows its tool is still there: it ends when the tool has said nothing for so
+    /// long, or it pings the tool so often (the other direction's pump hears the pong).
+    #[derive(Clone, Copy)]
+    pub(super) enum Keepalive {
+        Idle(Duration),
+        Ping(Duration),
+    }
+
     /// One direction of a session: each message stored (text and binary), then passed on.
-    async fn pump<S, T>(mut from: S, mut to: T, record: Option<Recorder>, direction: &'static str, path: String)
-    where
+    pub(super) async fn pump<S, T>(
+        mut from: S,
+        mut to: T,
+        record: Option<Recorder>,
+        direction: &'static str,
+        path: String,
+        keepalive: Keepalive,
+    ) where
         S: futures_util::Stream<Item = Result<Message, tungstenite::Error>> + Unpin,
         T: futures_util::Sink<Message> + Unpin,
     {
-        while let Some(Ok(m)) = from.next().await {
+        let (idle, every) = match keepalive {
+            Keepalive::Idle(d) => (d, NEVER),
+            Keepalive::Ping(d) => (NEVER, d),
+        };
+        let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        loop {
+            let next = tokio::select! {
+                next = tokio::time::timeout(idle, from.next()) => next,
+                _ = ping.tick() => {
+                    if to.send(Message::Ping(Bytes::new())).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            // silent too long, ended, or broken
+            let Ok(Some(Ok(m))) = next else { break };
             let (kind, body) = match &m {
                 Message::Text(t) => ("text", Bytes::copy_from_slice(t.as_bytes())),
                 Message::Binary(b) => ("binary", b.clone()),
@@ -1427,8 +1475,9 @@ async fn forward(
     }
 }
 
-/// An export split by --forward-max-body, sent one piece after another, decoded: the first answer
-/// that is not a success, or the last.
+/// An export split by --forward-max-body, sent one piece after another (in order), decoded: the
+/// first answer that is not a success, or the last. A piece refused after others were taken fails
+/// the export, and the exporter's retry sends those again: a backend may then hold them twice.
 async fn forward_pieces(
     http: &reqwest::Client,
     upstream: &reqwest::Url,
@@ -1707,13 +1756,36 @@ fn reads_allowed(addr: SocketAddr, token: Option<&str>) -> Result<(), String> {
     }
 }
 
-/// Whether `authorization` carries the token, compared in time that does not depend on where they
-/// differ.
+/// Whether `authorization` is `Bearer <token>` (the scheme in any case, RFC 9110 §11.1), compared
+/// by digest: in time that depends neither on where they differ nor on the token's length.
 fn authorized(authorization: Option<&http::HeaderValue>, token: Option<&str>) -> bool {
+    use sha2::{Digest, Sha256};
     let Some(token) = token else { return true };
     let given = authorization.map_or(&b""[..], |v| v.as_bytes());
-    let want = [b"Bearer ", token.as_bytes()].concat();
-    given.len() == want.len() && given.iter().zip(&want).fold(0, |d, (a, b)| d | (a ^ b)) == 0
+    let (scheme, given) = given.split_at(given.len().min(7));
+    let (given, want) = (Sha256::digest(given), Sha256::digest(token.as_bytes()));
+    scheme.eq_ignore_ascii_case(b"bearer ") & (given.iter().zip(&want).fold(0, |d, (a, b)| d | (a ^ b)) == 0)
+}
+
+/// Reads at once, at most: one more is answered 503 rather than scanning files beside the others.
+const MAX_READS: usize = 4;
+
+/// The JSON lines of a read, in memory: at most `left` more bytes.
+struct Capped {
+    out: Vec<u8>,
+    left: usize,
+}
+
+impl Write for Capped {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.left = self.left.checked_sub(buf.len()).ok_or(io::ErrorKind::FileTooLarge)?;
+        self.out.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// One read: the status and the JSON lines of a trace's rows.
@@ -1736,7 +1808,11 @@ fn read_trace(record: &Recorders, path: &str, query: &str, max_body: usize) -> (
             if let Ok(v) = http::HeaderValue::from_str(t) {
                 h.insert(header::HOST, v); // any name: tenant_dir reads the values given
             }
-            let tenant = tenant_dir(h.get_all(header::HOST));
+            // the directories of requests without a tenant, and past --max-tenants, by their names
+            let tenant = match t {
+                "_none" | "_other" => t.to_owned(),
+                _ => tenant_dir(h.get_all(header::HOST)),
+            };
             let key = match &record.key_dir {
                 Some(d) => match read_key(&d.join(format!("{tenant}.key"))) {
                     Ok(k) => Some(k),
@@ -1749,10 +1825,15 @@ fn read_trace(record: &Recorders, path: &str, query: &str, max_body: usize) -> (
     };
     let files: Vec<PathBuf> = dpk_files(&dir).map(|f| f.into_iter().map(|f| f.0).collect()).unwrap_or_default();
     let filter = show::Filter { trace: Some(id.to_ascii_lowercase()), since, ..show::Filter::default() };
-    let mut out = Vec::new();
+    let mut out = Capped { out: Vec::new(), left: max_body };
     match show_files(&files, &filter, max_body, key.as_ref(), &mut out) {
-        Ok(0) => (StatusCode::NOT_FOUND, out),
-        Ok(_) => (StatusCode::OK, out),
+        Ok(0) => (StatusCode::NOT_FOUND, out.out),
+        Ok(_) => (StatusCode::OK, out.out),
+        Err(e) if e.kind() == io::ErrorKind::FileTooLarge => {
+            let why =
+                format!("the trace's rows exceed {max_body} bytes (--max-body): read them with `deltapack log show`\n");
+            (StatusCode::PAYLOAD_TOO_LARGE, why.into_bytes())
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}\n").into_bytes()),
     }
 }
@@ -1765,23 +1846,27 @@ async fn serve_reads(reads: &Reads, record: Recorders, max_body: usize) -> Resul
     reads_allowed(addr, token.as_deref())?;
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(addr = %listener.local_addr()?, "reads");
+    let reading = Arc::new(tokio::sync::Semaphore::new(MAX_READS));
     tokio::spawn(async move {
-        let builder = auto::Builder::new(TokioExecutor::new());
+        let mut builder = auto::Builder::new(TokioExecutor::new());
+        builder.http1().timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(30));
         while let Ok((stream, _)) = listener.accept().await {
-            let (record, token) = (record.clone(), token.clone());
+            let (record, token, reading) = (record.clone(), token.clone(), reading.clone());
             let service = hyper::service::service_fn(move |r: Request<Incoming>| {
-                let (record, token) = (record.clone(), token.clone());
+                let (record, token, reading) = (record.clone(), token.clone(), reading.clone());
                 async move {
                     let (status, body) = if !authorized(r.headers().get(header::AUTHORIZATION), token.as_deref()) {
                         (StatusCode::UNAUTHORIZED, Vec::new())
                     } else if r.method() != http::Method::GET {
                         (StatusCode::METHOD_NOT_ALLOWED, Vec::new())
-                    } else {
+                    } else if let Ok(permit) = reading.try_acquire_owned() {
                         let (path, query) = (r.uri().path().to_owned(), r.uri().query().unwrap_or("").to_owned());
-                        let read = move || read_trace(&record, &path, &query, max_body);
+                        let read = move || (read_trace(&record, &path, &query, max_body), drop(permit)).0;
                         tokio::task::spawn_blocking(read)
                             .await
                             .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, Vec::new()))
+                    } else {
+                        (StatusCode::SERVICE_UNAVAILABLE, b"too many reads at once; try again\n".to_vec())
                     };
                     let mut response = Response::new(Full::new(Bytes::from(body)));
                     *response.status_mut() = status;
@@ -2227,11 +2312,82 @@ mod tests {
     }
 
     #[test]
+    fn a_read_holds_at_most_so_many_bytes() {
+        let mut out = Capped { out: Vec::new(), left: 5 };
+        out.write_all(b"abc").unwrap();
+        out.write_all(b"de").unwrap();
+        assert_eq!(out.write_all(b"f").unwrap_err().kind(), io::ErrorKind::FileTooLarge);
+        assert_eq!(out.out, b"abcde");
+        out.flush().unwrap();
+    }
+
+    fn ws_sink() -> (
+        impl futures_util::Sink<tokio_tungstenite::tungstenite::Message, Error = ()> + Unpin,
+        Arc<Mutex<Vec<tokio_tungstenite::tungstenite::Message>>>,
+    ) {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = futures_util::sink::unfold(got.clone(), |got, m| async move {
+            got.lock().unwrap().push(m);
+            Ok::<_, ()>(got)
+        });
+        (Box::pin(sink), got)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tool_silent_too_long_ends_its_session() {
+        use tokio_tungstenite::tungstenite::Message;
+        let (sink, got) = ws_sink();
+        let silent = futures_util::stream::pending::<Result<Message, tokio_tungstenite::tungstenite::Error>>();
+        let idle = Duration::from_secs(75);
+        let ended =
+            tokio::spawn(websocket::pump(silent, sink, None, "WS>", "/".into(), websocket::Keepalive::Idle(idle)));
+        tokio::time::sleep(idle - Duration::from_secs(1)).await;
+        assert!(!ended.is_finished(), "not yet");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        assert!(ended.is_finished(), "past it: ended");
+        assert!(got.lock().unwrap().is_empty(), "no ping from this side");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_tool_is_pinged_while_the_upstream_says_nothing() {
+        use tokio_tungstenite::tungstenite::Message;
+        let (sink, got) = ws_sink();
+        let silent = futures_util::stream::pending::<Result<Message, tokio_tungstenite::tungstenite::Error>>();
+        let every = Duration::from_secs(30);
+        let pump =
+            tokio::spawn(websocket::pump(silent, sink, None, "WS<", "/".into(), websocket::Keepalive::Ping(every)));
+        tokio::time::sleep(every * 3 + Duration::from_secs(1)).await;
+        assert_eq!(*got.lock().unwrap(), vec![Message::Ping(Bytes::new()); 3]);
+        assert!(!pump.is_finished(), "an upstream may be quiet for as long as it likes");
+        pump.abort();
+    }
+
+    #[tokio::test]
+    async fn messages_are_passed_on_pings_are_not_and_a_close_ends_the_pump() {
+        use tokio_tungstenite::tungstenite::Message;
+        let (sink, got) = ws_sink();
+        let from = futures_util::stream::iter(
+            [
+                Message::text("a"),
+                Message::Ping(Bytes::new()),
+                Message::binary(vec![1]),
+                Message::Close(None),
+                Message::text("late"),
+            ]
+            .map(Ok),
+        );
+        websocket::pump(from, sink, None, "WS>", "/".into(), websocket::Keepalive::Idle(Duration::from_secs(5))).await;
+        assert_eq!(*got.lock().unwrap(), [Message::text("a"), Message::binary(vec![1]), Message::Close(None)]);
+    }
+
+    #[test]
     fn a_read_carries_the_token_or_is_refused() {
         let v = |s: &str| http::HeaderValue::from_str(s).unwrap();
         assert!(authorized(None, None), "no token set: anyone on the address");
         assert!(authorized(Some(&v("Bearer s3cret")), Some("s3cret")));
-        for bad in ["Bearer s3cre", "Bearer s3cret2", "bearer s3cret", "s3cret", "Bearer S3cret", ""] {
+        assert!(authorized(Some(&v("bearer s3cret")), Some("s3cret")), "the scheme in any case");
+        for bad in ["Bearer s3cre", "Bearer s3cret2", "Basic  s3cret", "Bearers3cret", "s3cret", "Bearer S3cret", ""] {
             assert!(!authorized(Some(&v(bad)), Some("s3cret")), "{bad:?}");
         }
         assert!(!authorized(None, Some("s3cret")));

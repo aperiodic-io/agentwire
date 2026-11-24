@@ -1813,13 +1813,15 @@ async fn get_without_tenant(w: &mut Proxies, trace: usize, status: u16) {
     assert_eq!(w.read(&format!("/v1/traces/{trace:032x}"), None).await.0, status);
 }
 
-#[then(expr = r"GET \/v1\/traces\/ of trace {int} for tenant {string} answers {int} with acme's {int} spans of it")]
-async fn get_for_tenant(w: &mut Proxies, trace: usize, tenant: String, status: u16, n: usize) {
+#[then(
+    expr = r"GET \/v1\/traces\/ of trace {int} for tenant {string} answers {int} with the {int} spans of it {string} sent"
+)]
+async fn get_for_tenant(w: &mut Proxies, trace: usize, tenant: String, status: u16, n: usize, sender: String) {
     let (got, rows) = w.read(&format!("/v1/traces/{trace:032x}?tenant={tenant}"), None).await;
     assert_eq!(got, status);
     assert_eq!(rows.len(), n);
     let acme: Vec<_> =
-        w.sent_by("acme").iter().flat_map(|b| json_spans(b)).filter(|s| s.0 == format!("{trace:032x}")).collect();
+        w.sent_by(&sender).iter().flat_map(|b| json_spans(b)).filter(|s| s.0 == format!("{trace:032x}")).collect();
     let got: Vec<_> = rows
         .iter()
         .map(|r| (r["trace_id"].as_str().unwrap().to_owned(), r["span_id"].as_str().unwrap().to_owned()))

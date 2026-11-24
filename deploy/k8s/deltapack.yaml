@@ -32,13 +32,17 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9464"
     spec:
+      # it calls no Kubernetes API
+      automountServiceAccountToken: false
       securityContext:
+        seccompProfile: { type: RuntimeDefault }
         runAsUser: 65534
         runAsGroup: 65534
         fsGroup: 65534
         runAsNonRoot: true
       containers:
         - name: deltapack
+          # pin a release (or its digest) in production
           image: ghcr.io/aperiodic-io/deltapack:latest
           args:
             - collect

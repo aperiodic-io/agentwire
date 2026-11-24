@@ -10,7 +10,8 @@ use crate::show::{self, Signal, Wire};
 /// The parts of `body`, an OTLP export of `signal`, each at most `max` bytes where a span allows;
 /// `None` when it is not one (it is forwarded as it came).
 pub fn split(body: &[u8], signal: Signal, max: usize) -> Option<Vec<Vec<u8>>> {
-    if body.first() == Some(&b'{') {
+    // as `show::rows` tells them: OTLP/JSON may start with whitespace
+    if body.trim_ascii_start().first() == Some(&b'{') {
         let export: Value = serde_json::from_slice(body).ok()?;
         let path = match signal {
             Signal::Traces => ["resourceSpans", "scopeSpans", "spans"],
@@ -276,6 +277,8 @@ mod tests {
                 assert!(p.len() <= max, "{} > {max}", p.len());
             }
         }
+        let padded = [&b" \n"[..], &serde_json::to_vec(&json_export(3, 3, 50)).unwrap()].concat();
+        assert!(split(&padded, Signal::Traces, 500).unwrap().len() > 1, "JSON after whitespace");
         let small = serde_json::to_vec(&json_export(1, 1, 1)).unwrap();
         assert_eq!(split(&small, Signal::Traces, small.len()).unwrap(), vec![small]);
     }

@@ -339,7 +339,8 @@ upstream (`ws://` or `wss://`, by `--upstream`'s scheme), with the tool's header
 and stores each text or binary message as a record of its own as it passes, `WS>` towards the
 upstream and `WS<` back, after the time in its meta (`deltapack log ls` shows them in order). A
 handshake the upstream refuses is refused to the tool with the same status; one it cannot reach,
-with 502. A message is limited to `--max-body`.
+with 502, or 504 after 30 s. A message is limited to `--max-body`. The tool is pinged every 30 s,
+and a tool silent for 75 s (no message, no pong) has its session, and the upstream's, ended.
 
 ### On files you already have
 
@@ -431,6 +432,11 @@ Grafana data link, a Langfuse or Datadog custom link): `http://deltapack:4319/v1
 deltapack collect --record-dir ~/deltapack --read-listen 127.0.0.1:4319
 curl -s http://127.0.0.1:4319/v1/traces/4bf92f3577b34da6a3ce929d0e0e4736 | jq .name
 ```
+
+Each read scans the directory's files, at most 4 at once (one more is answered 503), and an answer
+is at most `--max-body` bytes (413 past it: use `log show`). The token is one for every tenant:
+whoever holds it reads any tenant's prompts with `?tenant=` (`_none` and `_other` included), so
+give it only to what may read them all.
 
 `stats` says what the files save: records, the bytes they stand for, the bytes on disk, and the
 ratio, per file (its name last, after a tab) and in total. A file it cannot read is named on stderr
@@ -557,7 +563,7 @@ library does it in your own stack. Everything about it is in [docs/dpd1.md](docs
 | `--read-listen` | `DELTAPACK_READ_LISTEN` | off | Serve `GET /v1/traces/{trace id}`: the trace's spans and log records as JSON lines, prompts whole (`?since=2h`; `?tenant=` with `--tenant-header`). Off a loopback address it needs `--read-token-file`. |
 | `--read-token-file` | `DELTAPACK_READ_TOKEN_FILE` | off | A file holding the token a reader must send as `Authorization: Bearer …`. |
 | `--max-body` | `DELTAPACK_MAX_BODY` | 64 MiB | The largest body stored, after decoding; larger ones are answered 413. |
-| `--forward-max-body` | `DELTAPACK_FORWARD_MAX_BODY` | off | Split an OTLP export larger than this (decoded) into exports that fit before forwarding it: by resource, then scope, then span, each part keeping its resource and scope. For backends with a body limit (New Relic 1 MB, Datadog 15 MiB). The record holds the whole export. |
+| `--forward-max-body` | `DELTAPACK_FORWARD_MAX_BODY` | off | Split an OTLP export larger than this (decoded) into exports that fit before forwarding it: by resource, then scope, then span, each part keeping its resource and scope. For backends with a body limit (New Relic 1 MB, Datadog 15 MiB). The record holds the whole export. Parts go in order; if one is refused after others were taken, the exporter's retry sends those again. |
 | `--metrics` | `DELTAPACK_METRICS` | off | |
 
 **`deltapack client`**: for tools you cannot change. They post plain requests to it, and it sends

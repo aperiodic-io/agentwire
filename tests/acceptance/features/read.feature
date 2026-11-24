@@ -17,6 +17,7 @@ Feature: A backend links a span to its full prompt
 
   Scenario: With a directory per tenant, a read names its tenant
     Given a deltapack collector recording to a directory, a directory per tenant by "x-tenant", serving reads
-    When an exporter posts 3 batches as tenant "acme", 2 as tenant "globex" and 0 as no tenant
+    When an exporter posts 3 batches as tenant "acme", 2 as tenant "globex" and 1 as no tenant
     Then GET /v1/traces/ of trace 1 without a tenant answers 400
-    And GET /v1/traces/ of trace 1 for tenant "acme" answers 200 with acme's 3 spans of it
+    And GET /v1/traces/ of trace 1 for tenant "acme" answers 200 with the 3 spans of it "acme" sent
+    And GET /v1/traces/ of trace 1 for tenant "_none" answers 200 with the 1 spans of it "" sent
