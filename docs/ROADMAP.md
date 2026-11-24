@@ -1,6 +1,7 @@
 # Roadmap: from a place to keep prompts to a place to use them
 
-Status: phase 1 done (2026-11-23: #11, #13, #14, #15; the rename in #12); phase 2 in progress. Each step
+Status: phase 1 done (2026-11-23: #11, #13, #14, #15; the rename in #12); phase 2 done (2026-11-24: #16,
+#17, #18 and the bindings). Each step
 lands as its own pull request, test first (AGENTS.md), after an independent review.
 
 Deltapack is strong on the way in: one binary, OTLP over HTTP and gRPC, every common content coding,
@@ -19,7 +20,7 @@ everything and decodes OTLP protobuf themselves. The files are a cheap backup, n
 | 4 | **Prebuilt binaries** | Linux (x86_64, aarch64) binaries on every GitHub release; macOS (arm64) once the organisation has macOS runners (the job never got one) | Today the choice is `cargo install deltapack --features proxy` or the ghcr.io image: a host without Docker or a Rust toolchain has neither |
 | 5 | **README** | What the files are for (replay, eval sets, audit, cost), a demo that ends in a readable conversation, a FAQ (redaction, why not zstd in the backend, tenants), DPD1 moved to its own page | The README goes from "how to store" straight to the format |
 
-## Phase 2
+## Phase 2: done
 
 | # | Step | What it adds |
 |---|---|---|
@@ -30,18 +31,9 @@ everything and decodes OTLP protobuf themselves. The files are a cheap backup, n
 | E | **WebSocket** | `server` proxies and records WebSocket traffic: realtime and voice APIs |
 | F | **Bindings and the Collector** | Spans decoded in Python (and so pandas); Parquet through DuckDB; TypeScript and Go readers; an OpenTelemetry Collector exporter; the CLI in the Python wheel |
 
-Phase 1 left these for later. Phase 2 takes on all but two: an index of attributes (`--attr` filters
-without one; add it when files are too large to decode on each query) and built-in object-store
-clients (`--on-rotate` with the provider's CLI does the job; add them when an operator cannot run a
-CLI beside the collector).
+Phase 1 left these for later. Phase 2 took on all but two, which stay for later:
 
 | Item | Why not now | Add when |
 |---|---|---|
-| An index of session ids, models and other attributes | `show`'s JSON lines can be filtered on any decoded field with `jq`; only trace ids need an index to skip decoding | A user's files are too large to decode on each query |
-| Parquet export, a DuckDB extension | JSON lines cover both readers today | Someone measures JSON lines as the bottleneck |
+| An index of session ids, models and other attributes | `show --attr` and `Reader.spans(attrs=)` filter without one; only trace ids need an index to skip decoding | A user's files are too large to decode on each query |
 | Built-in S3, GCS and R2 clients | `--on-rotate` with the provider's own CLI does it, with no client and no credentials handling in deltapack | An operator cannot run a CLI next to the collector |
-| Encryption at rest, deletion per tenant | Encrypted volumes, and one collector with its own `--record-dir` per tenant, cover both now | A buyer needs keys per tenant in one directory |
-| An OpenTelemetry Collector exporter | A Go component in another repository, built on the Rust library through FFI or on a reimplementation of DPK1 | Users ask to keep their Collector as the only hop |
-| Splitting forwarded batches for backends with low OTLP body limits (docs/integrations.md, "Watch for these") | Needs OTLP re-encoding per backend | A user forwards to one of them |
-| TypeScript and Go bindings | Most read paths are the CLI or Python | An ingest path in either language asks |
-| More gateways and agents run in CI | Each costs a container and minutes on every pull request | An integration breaks unseen |

@@ -384,6 +384,10 @@ spans = pd.DataFrame(deltapack.Reader("/var/log/deltapack/1763650000000-4242-000
 spans.to_parquet("spans.parquet")
 ```
 
+Go ([go/](go/README.md)) reads and writes them, and an OpenTelemetry Collector exporter built on it
+records a Collector's traces and logs as `collect` does. TypeScript ([ts/](ts/README.md)) reads them in
+Node, with no dependencies.
+
 `pip install deltapack-cli` installs the `deltapack` command itself, from a wheel of its own
 (`python/cli/`).
 
