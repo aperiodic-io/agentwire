@@ -15,15 +15,17 @@ on:
   push:
     tags: ["v*"]
   pull_request:
-    paths: [.github/workflows/release.yml, Formula/**, python/**, ts/**, go/**, scripts/**, Dockerfile, Cargo.toml]
+    paths:
+      [.github/workflows/release.yml, Formula/**, python/**, ts/**, go/**, scripts/**, src/**, Dockerfile,
+       Cargo.toml, Cargo.lock, rust-toolchain.toml, CHANGELOG.md, README.md, LICENSE]
   workflow_dispatch:
 permissions: { contents: read }
 env:
   CARGO_TERM_COLOR: always
-  # a tag publishes; anything else is a dry run
-  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') }}
+  # a tag pushed publishes; anything else (a run by hand, even on a tag) is a dry run
+  PUBLISH: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
   # the release's name in tags and file names: the tag, or `dry-run`
-  VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dry-run' }}
+  VERSION: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dry-run' }}
 jobs:
   crate:
     runs-on: ubuntu-24.04
@@ -33,53 +35,92 @@ jobs:
         run: scripts/versions.sh "$VERSION"
       - if: env.PUBLISH != 'true'
         run: scripts/versions.sh
-      - if: env.PUBLISH == 'true'
-        run: cargo publish --locked
-        env: { CARGO_REGISTRY_TOKEN: "${{ secrets.CARGO_REGISTRY_TOKEN }}" }
-      - if: env.PUBLISH != 'true'
-        run: cargo publish --locked --dry-run
+      - run: cargo publish --locked --dry-run
 
   image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          load: true
+          tags: deltapack:release
+          cache-from: type=gha,scope=image
+          cache-to: type=gha,scope=image,mode=max,ignore-error=true
+      - run: docker run --rm deltapack:release --version
+
+  # every build above has passed: only now does a tag publish anything, so a failed build leaves
+  # nothing half released
+  ready:
+    needs: [crate, image, changelog, wheels, sdist, npm-pack]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "every package built and checked; publishing ${PUBLISH}"
+
+  publish-crate:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [ready]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: cargo publish --locked
+        env: { CARGO_REGISTRY_TOKEN: "${{ secrets.CARGO_REGISTRY_TOKEN }}" }
+
+  publish-image:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [ready]
     runs-on: ubuntu-24.04
     permissions: { contents: read, packages: write }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - if: env.PUBLISH == 'true'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          push: ${{ env.PUBLISH == 'true' }}
-          load: ${{ env.PUBLISH != 'true' }}
+          push: true
+          # :latest for a release, not a pre-release (vX.Y.Z-rc.1)
           tags: |
             ghcr.io/aperiodic-io/deltapack:${{ env.VERSION }}
-            ghcr.io/aperiodic-io/deltapack:latest
+            ${{ !contains(github.ref_name, '-') && 'ghcr.io/aperiodic-io/deltapack:latest' || '' }}
           cache-from: type=gha,scope=image
-          cache-to: type=gha,scope=image,mode=max,ignore-error=true
-      - if: env.PUBLISH != 'true'
-        run: docker run --rm "ghcr.io/aperiodic-io/deltapack:$VERSION" --version
+
+  # the release notes: CHANGELOG.md's section for this version, which must say something. A dry run
+  # checks the crate's version's section if there is one (a release pull request), else [Unreleased].
+  changelog:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: |
+          section() { awk -v v="$1" '$0 ~ "^## \\[" v "\\]" { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md; }
+          if [ "$PUBLISH" = true ]; then v="${VERSION#v}"; else
+            v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            grep -q "^## \[$v\]" CHANGELOG.md || v=Unreleased
+          fi
+          section "$v" > notes.md
+          grep -q '[^[:space:]]' notes.md || { echo "CHANGELOG.md's section [$v] is missing or empty"; exit 1; }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: notes, path: notes.md }
 
   github-release:
-    needs: [crate, image]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [ready]
     runs-on: ubuntu-24.04
     permissions: { contents: write }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # the CHANGELOG section under "## [X.Y.Z]", up to the next "## " (a dry run: [Unreleased])
-      - run: |
-          v="${VERSION#v}"
-          [ "$PUBLISH" = true ] || v=Unreleased
-          awk -v v="$v" '$0 ~ "^## \\[" v "\\]" { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md > notes.md
-          test -s notes.md || { echo "CHANGELOG.md has no section [$v]"; exit 1; }
-      - if: env.PUBLISH == 'true'
-        run: gh release create "$VERSION" --title "$VERSION" --notes-file notes.md
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { name: notes }
+      - run: gh release create "$VERSION" --title "$VERSION" --notes-file notes.md
         env: { GH_TOKEN: "${{ github.token }}" }
 
   # the binary for each platform, attached to the release: for hosts with neither Docker nor Rust
   binaries:
-    needs: [github-release]
+    needs: [ready, github-release]
+    if: ${{ !failure() && !cancelled() }}
     strategy:
       matrix:
         include:
@@ -102,7 +143,8 @@ jobs:
   # attached to the release; RELEASING.md says how it reaches the tap. A dry run renders it for this
   # commit's source and installs it with the Homebrew the runner image carries.
   homebrew:
-    needs: [github-release]
+    needs: [ready, github-release]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-24.04
     permissions: { contents: write }
     steps:
@@ -137,8 +179,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - { os: ubuntu-24.04, target: x86_64 }
-          - { os: ubuntu-24.04-arm, target: aarch64 }
+          - { os: ubuntu-24.04, target: x86_64, python: "3.9" }
+          - { os: ubuntu-24.04-arm, target: aarch64, python: "3.12" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -147,8 +189,9 @@ jobs:
         with: { working-directory: python, target: "${{ matrix.target }}", manylinux: auto, rust-toolchain: "1.95.0", args: --release --out ../dist }
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with: { working-directory: python/cli, target: "${{ matrix.target }}", manylinux: auto, rust-toolchain: "1.95.0", args: --release --out ../../dist }
+      # abi3 from 3.9: the oldest where an image has it, a newer one on arm
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with: { python-version: "3.9" }
+        with: { python-version: "${{ matrix.python }}" }
       - run: |
           python -m venv "$RUNNER_TEMP/try" && . "$RUNNER_TEMP/try/bin/activate"
           pip install dist/*.whl
@@ -176,8 +219,8 @@ jobs:
 
   # PyPI by trusted publishing: no token, the PyPI projects trust this workflow (RELEASING.md)
   pypi:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [crate, wheels, sdist]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [ready]
     runs-on: ubuntu-24.04
     environment: pypi
     permissions: { id-token: write }
@@ -193,12 +236,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: "22.19" }
+      # the npm that publishes
+      - run: npm install -g npm@11.6.2
       - run: npm ci && npm run build && npm publish --dry-run --access public
         working-directory: ts
 
   npm:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [crate, npm-pack]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [ready]
     runs-on: ubuntu-24.04
     environment: npm
     permissions: { contents: read, id-token: write }
@@ -213,8 +258,8 @@ jobs:
 
   # Go modules are published by their tags: the proxy fetches them from this repository
   go:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [crate]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [ready]
     runs-on: ubuntu-24.04
     permissions: { contents: write }
     steps:
