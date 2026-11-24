@@ -1,4 +1,9 @@
-# Additions to OpenShell's ~/.config/openshell/gateway.toml (docs.nvidia.com/openshell,
+# OpenShell's ~/.config/openshell/gateway.toml (schema version 2: the gateway refuses a file without
+# the [openshell] version line). Merge these tables into a file you have.
+[openshell]
+version = 2
+
+# The gateway's settings below (docs.nvidia.com/openshell,
 # "Observability"): agents' own OpenTelemetry traces, relayed by the sandbox supervisors, to
 # `deltapack collect`. The relay sets OTEL_EXPORTER_OTLP_ENDPOINT in each sandbox, so an agent with an
 # OpenTelemetry SDK (and content capture on) exports its prompts with no more configuration.
