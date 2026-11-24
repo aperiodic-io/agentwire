@@ -296,22 +296,23 @@ jobs:
       - run: scripts/binary.sh ${{ matrix.target }} test
       - run: tar xzf deltapack-test-${{ matrix.target }}.tar.gz && deltapack-test-${{ matrix.target }}/deltapack --version
 
-  # the Homebrew formula installs this commit (its head pointed at the checkout) and passes its test:
-  # on Linux, with the Homebrew the runner image carries (the organisation has no macOS runners)
+  # the Homebrew formula, as a release renders it (release.yml's `homebrew` job: a url and its
+  # sha256), installs this commit's source and passes its test: on Linux, with the Homebrew the
+  # runner image carries (the organisation has no macOS runners)
   homebrew:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: |
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-          # a branch for brew's clone to check out: a pull request's checkout is a detached HEAD
-          git checkout -B ci
+          src="$RUNNER_TEMP/deltapack-0.0.0.tar.gz"
+          git archive --format=tar.gz --prefix=deltapack-0.0.0/ -o "$src" HEAD
+          sha=$(sha256sum "$src" | cut -d' ' -f1)
           brew tap-new --no-git local/deltapack
-          sed "s#head \"https://github.com/aperiodic-io/deltapack.git\", branch: \"main\"#head \"file://$GITHUB_WORKSPACE\", branch: \"ci\"#" \
+          sed "s#^  license \"Apache-2.0\"#  url \"file://$src\"\n  sha256 \"$sha\"\n  license \"Apache-2.0\"#" \
             Formula/deltapack.rb > "$(brew --repository local/deltapack)/Formula/deltapack.rb"
-          brew install --HEAD local/deltapack/deltapack
+          brew install --build-from-source local/deltapack/deltapack
           brew test local/deltapack/deltapack
-          brew audit --formula local/deltapack/deltapack || true # advisory: a tap's own formula
 
   # the release image builds, and its binary runs
   image:
