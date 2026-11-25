@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deltapack</title>
+<meta name="description" content="Deltapack is an open-source compression codec for LLM logs and traces: about 100× smaller, byte-exact, and any record reads back on its own.">
+<link rel="icon" href="deltapack-mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@300..600&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* The logsi site's look (aperiodic-io/precog, site/): one column on white, thin rules hold facts,
+   ink, grey and one orange. Orange means the bytes deltapack writes; the pale tint, the bytes it
+   does not. */
+:root {
+  --paper: #FFFFFF;
+  --ink: #111111;
+  --muted: #6B6A68;
+  --line: #E7E5E0;
+  --stored: #E9754D;
+  --stored-text: #B4491F;
+  --resent: #FCEBE4;
+  --surface: #FFFFFF;
+  --code: #F7F6F3;
+  --display: 'Outfit', 'Avenir Next', 'Century Gothic', Arial, sans-serif;
+  --text: 'Geist', 'Helvetica Neue', Arial, sans-serif;
+  --mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--text); font-size: 17px; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+.wrap { max-width: 1080px; margin: 0 auto; padding-left: max(24px, env(safe-area-inset-left, 0px)); padding-right: max(24px, env(safe-area-inset-right, 0px)); }
+a { color: inherit; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--stored); outline-offset: 3px; }
+h1, h2 { font-family: var(--display); font-weight: 500; letter-spacing: -0.035em; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2.9rem, 7vw, 4.6rem); line-height: 1.04; }
+h2 { font-size: clamp(2rem, 4.4vw, 3rem); line-height: 1.08; }
+p { margin: 0; }
+code { font-family: var(--mono); font-size: 0.88em; }
+.label { font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: clamp(1.1rem, 2vw, 1.3rem); color: var(--muted); max-width: 34em; }
+
+/* nav */
+.nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 22px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 500 1.6rem/1 var(--display); letter-spacing: -0.035em; }
+.brand img { width: 36px; height: 36px; }
+.nav-links { display: flex; gap: 26px; font-size: 0.95rem; }
+.nav-links a { text-decoration: none; color: var(--muted); }
+.nav-links a:hover { color: var(--ink); }
+.pill { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; border: 1px solid var(--stored); border-radius: 99px; padding: 6px 13px; color: var(--stored-text); white-space: nowrap; text-decoration: none; }
+
+/* hero */
+.hero { padding-block: clamp(40px, 7vw, 88px) clamp(40px, 6vw, 72px); display: flex; flex-direction: column; align-items: center; text-align: center; gap: 24px; }
+.hero .hero-mark { width: clamp(180px, 26vw, 280px); height: auto; margin-bottom: 8px; }
+.hero h1 { max-width: 12em; }
+.hero h1 em { font-style: normal; color: var(--stored); }
+.hero .lede { max-width: 32em; }
+.hero .cta { justify-content: center; }
+.cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; }
+.btn { display: inline-flex; align-items: center; gap: 8px; font: 500 0.98rem var(--text); padding: 12px 20px; border-radius: 99px; text-decoration: none; border: 1px solid var(--ink); }
+.btn-solid { background: var(--ink); color: var(--paper); }
+.btn-line { border-color: var(--line); }
+.btn:hover { border-color: var(--stored); }
+
+/* the trace panel */
+.stream { border: 1px solid var(--line); background: var(--surface); font-family: var(--mono); font-size: 0.86rem; }
+.stream-head, .stream-foot { display: flex; justify-content: space-between; gap: 16px; padding: 13px 20px; color: var(--muted); }
+.stream-head { border-bottom: 1px solid var(--line); }
+.stream-foot { border-top: 1px solid var(--line); flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.stream-foot b { font-weight: 500; color: var(--stored-text); }
+.live { display: inline-flex; align-items: center; gap: 8px; color: var(--stored-text); }
+.live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--stored); animation: pulse 1.8s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.25; } }
+.events { list-style: none; margin: 0; padding: 10px 0; height: calc(17.6em + 20px); overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+.ev { display: grid; grid-template-columns: 4.2em minmax(0, 15em) minmax(0, 1fr) 5.6em 5.6em; gap: 14px; align-items: center; padding: 0 20px; line-height: 2.2em; white-space: nowrap; }
+.ev .seq { color: var(--muted); font-variant-numeric: tabular-nums; }
+.ev .what { overflow: hidden; text-overflow: ellipsis; color: var(--ink); font-family: var(--text); font-size: 0.95rem; }
+.ev .sent, .ev .kept { text-align: right; font-variant-numeric: tabular-nums; }
+.ev .sent { color: var(--muted); }
+.ev .kept { color: var(--stored-text); }
+.ev .bar { display: flex; height: 8px; }
+.ev .bar i { display: block; height: 100%; background: var(--resent); }
+.ev .bar i + i { background: var(--stored); min-width: 2px; }
+.cols { color: var(--muted); font-size: 0.74rem; letter-spacing: 0.06em; text-transform: uppercase; line-height: 1.6em; padding-top: 4px; }
+.ev.fresh { animation: arrive 420ms ease-out; }
+@keyframes arrive { from { transform: translateY(8px); background: var(--resent); } }
+@media (prefers-reduced-motion: reduce) { .live::before, .ev.fresh { animation: none; } }
+
+/* sections */
+section { padding-block: clamp(56px, 8vw, 104px); border-top: 1px solid var(--line); }
+.sec-head { display: flex; flex-direction: column; gap: 14px; margin-bottom: 40px; }
+.lattice { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; border: 1px solid var(--line); background: var(--line); }
+.lattice.two { grid-template-columns: repeat(2, 1fr); }
+.cell { padding: 26px 24px 28px; display: flex; flex-direction: column; gap: 10px; min-width: 0; background: var(--surface); }
+.cell h3 { font: 600 1.05rem var(--text); margin: 0; }
+.cell p { color: var(--muted); font-size: 0.98rem; }
+
+/* code */
+.term { border: 1px solid var(--line); background: var(--code); }
+.term + .term { border-top: 0; }
+.term .label { padding: 12px 20px 0; display: block; }
+pre { margin: 0; padding: 12px 20px 16px; overflow-x: auto; font: 0.86rem/1.7 var(--mono); }
+pre .c { color: var(--muted); }
+
+/* the delta picture */
+.delta { border: 1px solid var(--line); display: grid; grid-template-columns: 1fr 1fr; }
+.delta > div { padding: 24px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.delta > div + div { border-left: 1px solid var(--line); }
+.row { display: flex; gap: 3px; font: 0.78rem var(--mono); }
+.row span { padding: 5px 8px; white-space: nowrap; background: var(--resent); color: var(--stored-text); }
+.row span.new { background: var(--stored); color: var(--paper); }
+.row span.plus { background: none; color: var(--muted); padding-inline: 2px; }
+
+/* bars, as on logsi's disk panel */
+.disk { border: 1px solid var(--line); background: var(--surface); display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); }
+.disk > div { padding: 26px 24px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.disk > div + div { border-left: 1px solid var(--line); }
+.disk h3 { font: 600 1.05rem var(--text); margin: 0; }
+.disk p { color: var(--muted); font-size: 0.98rem; }
+.bars { display: flex; flex-direction: column; gap: 14px; }
+.bar-item { display: flex; flex-direction: column; gap: 6px; }
+.bar-meta { display: flex; justify-content: space-between; gap: 16px; font-size: 0.9rem; }
+.bar-meta span:last-child { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.track { height: 8px; background: var(--resent); }
+.fill { height: 100%; background: var(--stored); min-width: 3px; }
+.fine { font-size: 0.86rem; color: var(--muted); max-width: 46em; margin-top: 28px; }
+
+/* calculator */
+.calc { margin-top: 28px; border: 1px solid var(--line); background: var(--surface); display: grid; grid-template-columns: 1fr 1fr; }
+.calc > div { padding: 26px 24px; display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.calc > div + div { border-left: 1px solid var(--line); }
+.field { display: flex; flex-direction: column; gap: 8px; }
+.field-top { display: flex; justify-content: space-between; gap: 12px; font-size: 0.95rem; }
+.field-top output { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+input[type=range] { width: 100%; accent-color: var(--stored); }
+.bill { display: flex; flex-direction: column; gap: 10px; font-variant-numeric: tabular-nums; }
+.bill-line { display: flex; justify-content: space-between; gap: 12px; font-size: 0.98rem; color: var(--muted); }
+.bill-line span:last-child { font-family: var(--mono); color: var(--ink); }
+.bill-total { border-top: 1px solid var(--line); padding-top: 14px; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.amount { font-family: var(--display); font-weight: 500; letter-spacing: -0.03em; font-size: clamp(2.6rem, 6vw, 4rem); line-height: 1; color: var(--stored); }
+
+/* table */
+.table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+.table th, .table td { text-align: left; padding: 12px 16px 12px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.table th { font: 0.74rem var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 400; }
+.table td:last-child { font-family: var(--mono); white-space: nowrap; text-align: right; padding-right: 0; }
+.table th:last-child { text-align: right; padding-right: 0; }
+.scroll { overflow-x: auto; margin-top: 28px; }
+
+/* integrations */
+.groups { display: flex; flex-direction: column; gap: 22px; }
+.group { display: grid; grid-template-columns: 11em minmax(0, 1fr); gap: 16px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chips span { border: 1px solid var(--line); border-radius: 99px; padding: 4px 12px; font-size: 0.9rem; }
+
+/* DPD1, as logsi's BYOC box */
+.byoc { margin-top: 28px; border: 1px solid var(--ink); display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) auto; gap: 24px 32px; align-items: center; padding: 26px 24px; }
+.byoc > div { display: flex; flex-direction: column; gap: 8px; }
+.byoc h3 { font: 600 1.15rem var(--text); margin: 0; }
+.byoc p:not(.label) { color: var(--muted); font-size: 0.98rem; }
+
+footer { border-top: 1px solid var(--line); padding-block: 32px 48px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 0.9rem; }
+
+@media (max-width: 760px) {
+  .nav-links { display: none; }
+  .pill { font-size: 0.62rem; padding: 5px 10px; }
+  .lattice, .lattice.two, .calc, .disk, .byoc, .delta { grid-template-columns: 1fr; }
+  .byoc .btn { justify-self: start; }
+  .calc > div + div, .disk > div + div, .delta > div + div { border-left: 0; border-top: 1px solid var(--line); }
+  .ev { grid-template-columns: 3.2em minmax(0, 1fr) 4.6em 4.6em; gap: 10px; padding: 0 14px; }
+  .ev .bar, .ev .barh { display: none; }
+  .stream-head, .stream-foot { padding: 12px 14px; }
+  .group { grid-template-columns: 1fr; gap: 10px; }
+}
+</style>
+
+<div class="wrap">
+  <nav class="nav" aria-label="Main">
+    <a class="brand" href="#top"><img src="deltapack-mark.svg" alt="" width="100" height="100">deltapack</a>
+    <div class="nav-links">
+      <a href="#use">Why</a>
+      <a href="#start">Quick start</a>
+      <a href="#numbers">Numbers</a>
+      <a href="#how">How it works</a>
+      <a href="#integrations">Integrations</a>
+      <a href="https://github.com/aperiodic-io/deltapack">GitHub</a>
+    </div>
+    <a class="pill" href="https://github.com/aperiodic-io/deltapack">Open source · Apache-2.0</a>
+  </nav>
+
+  <header class="hero" id="top">
+    <img class="hero-mark" src="deltapack-mark.svg" alt="" width="100" height="100">
+    <p class="label">A compression codec for LLM logs and traces</p>
+    <h1>Keep every prompt, <em>at a hundredth of the bytes.</em></h1>
+    <p class="lede">Every LLM call is logged with its whole prompt, and every prompt is the previous prompt plus one turn. Deltapack stores each record as a delta against the earlier record it shares the most with: about 100× smaller, byte-exact, and any record reads back on its own.</p>
+    <div class="cta">
+      <a class="btn btn-solid" href="#start">Try it in a minute</a>
+      <a class="btn btn-line" href="https://github.com/aperiodic-io/deltapack">View on GitHub</a>
+    </div>
+  </header>
+
+  <div class="stream" aria-label="An example agent trace: each span re-sends the whole prompt, and deltapack stores only the turn it adds.">
+    <div class="stream-head"><span>deltapack collect --record-dir ~/deltapack</span><span class="live">recording</span></div>
+    <ol class="events" id="events"></ol>
+    <div class="stream-foot"><span>example trace</span><span>sent <span id="t-sent">0 KB</span> · on disk <b id="t-kept">0 KB</b> · <span id="t-ratio">1×</span></span></div>
+  </div>
+
+  <section id="use">
+    <div class="sec-head">
+      <p class="label">Why</p>
+      <h2>Most of your log is copies of what it already holds</h2>
+      <p class="lede">A 200-step agent run writes its system prompt and tool schemas into your log 200 times, its first tool result 199 times. At a hundredth of the bytes you can keep every request in full, without sampling or truncating, and still pull any one out in milliseconds.</p>
+    </div>
+    <div class="lattice">
+      <div class="cell">
+        <h3>Replay a failure</h3>
+        <p><code>deltapack log get</code> writes a recorded request byte for byte, as the provider received it: post it again, or step through what the agent saw.</p>
+      </div>
+      <div class="cell">
+        <h3>Find a trace</h3>
+        <p><code>log show --trace &lt;id&gt;</code> writes each of its spans as a line of JSON, prompt and attributes decoded from OTLP.</p>
+      </div>
+      <div class="cell">
+        <h3>Build an eval set</h3>
+        <p><code>log show --since 7d</code> into <code>jq</code>, DuckDB or pandas: every prompt in full, not sampled or truncated.</p>
+      </div>
+      <div class="cell">
+        <h3>Answer an auditor</h3>
+        <p>Keep every request as long as you must with <code>--keep-days</code>, or hand each closed file to your archive with <code>--on-rotate</code>.</p>
+      </div>
+      <div class="cell">
+        <h3>Keep your backend</h3>
+        <p><code>--forward</code> stores each batch, then passes it on to Langfuse, Phoenix, Honeycomb or any OTLP endpoint. It can sample; you still hold every span.</p>
+      </div>
+      <div class="cell">
+        <h3>Know what it saves</h3>
+        <p><code>deltapack log stats</code> gives the ratio on your own traffic, file by file.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="start">
+    <div class="sec-head">
+      <p class="label">Quick start</p>
+      <h2>Point your OpenTelemetry exporter at it</h2>
+      <p class="lede">Your agent, framework or gateway most likely exports OpenTelemetry already. Run a collector, set one variable, and every span and log record is stored on your disk. Nothing sits in the path of your model calls.</p>
+    </div>
+    <div class="term"><span class="label">Install</span><pre>cargo install deltapack --features proxy
+<span class="c"># or: pip install deltapack-cli · brew install deltapack · ghcr.io/aperiodic-io/deltapack</span></pre></div>
+    <div class="term"><span class="label">Run the collector</span><pre>deltapack collect --record-dir ~/deltapack   <span class="c"># OTLP/HTTP on :4318, OTLP/gRPC on :4317</span></pre></div>
+    <div class="term"><span class="label">Point the exporter at it</span><pre>export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf</pre></div>
+    <div class="term"><span class="label">Read it back</span><pre>deltapack log stats ~/deltapack/*.dpk   <span class="c"># records, their bytes, bytes on disk, ratio</span>
+deltapack log show  ~/deltapack/*.dpk   <span class="c"># one JSON line per span or log record</span></pre></div>
+    <p class="fine">Takes OTLP traces, logs and metrics, as protobuf or JSON, compressed or not. Most exporters leave prompts out until asked: the <a href="https://github.com/aperiodic-io/deltapack/blob/main/docs/integrations.md">integrations guide</a> has the flag for each tool. Also a recording proxy, a gateway log sink, a CLI for files you already have, and a library for Rust and Python.</p>
+  </section>
+
+  <section id="numbers">
+    <div class="sec-head">
+      <p class="label">Numbers</p>
+      <h2>105× on real agent traces, where zstd gets 9.7×</h2>
+      <p class="lede">7,343 OpenTelemetry GenAI spans from 300 public SWE-agent runs, 16 traces in flight: 337 MB of JSON lines.</p>
+    </div>
+    <div class="disk">
+      <div>
+        <h3>Why a block compressor loses</h3>
+        <p>It only sees one block. With 16 agents running, the previous copy of a prompt usually sits in another block, and a late prompt is larger than a block anyway. Deltapack looks for the previous copy by record, whatever its size.</p>
+      </div>
+      <div class="bars">
+        <div class="bar-item">
+          <div class="bar-meta"><span>The spans as written</span><span>337 MB</span></div>
+          <div class="track"><div class="fill" style="width:100%"></div></div>
+        </div>
+        <div class="bar-item">
+          <div class="bar-meta"><span>zstd-1 in 1 MiB blocks</span><span>34.6 MB · 9.7×</span></div>
+          <div class="track"><div class="fill" style="width:10.3%"></div></div>
+        </div>
+        <div class="bar-item">
+          <div class="bar-meta"><span>Messages deduplicated, then zstd</span><span>14.6 MB · 23×</span></div>
+          <div class="track"><div class="fill" style="width:4.3%"></div></div>
+        </div>
+        <div class="bar-item">
+          <div class="bar-meta"><span>deltapack, one record per span</span><span>3.2 MB · 105×</span></div>
+          <div class="track"><div class="fill" style="width:0.95%"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="calc">
+      <div>
+        <div class="field">
+          <div class="field-top"><label for="vol">Spans you log each month</label><output id="vol-out" for="vol">1 TB</output></div>
+          <input type="range" id="vol" min="0" max="100" value="40" step="1">
+        </div>
+        <div class="field">
+          <div class="field-top"><label for="ratio">Compression ratio</label><output id="ratio-out" for="ratio">105×</output></div>
+          <input type="range" id="ratio" min="1" max="129" value="105" step="1">
+        </div>
+        <p class="fine" style="margin-top:0">105× is the benchmark’s figure, not a promise: your ratio depends on your sessions. <code>log stats</code> measures it.</p>
+      </div>
+      <div>
+        <div class="bill">
+          <div class="bill-line"><span>As written</span><span id="c-raw">1 TB</span></div>
+          <div class="bill-line"><span>zstd blocks, 9.7×</span><span id="c-zstd">103 GB</span></div>
+        </div>
+        <div class="bill-total">
+          <span>On disk with deltapack</span><span class="amount" id="c-dp">9.5 GB</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="scroll">
+      <table class="table">
+        <thead><tr><th>Measured end to end</th><th>What arrived</th><th>Stored</th></tr></thead>
+        <tbody>
+          <tr><td>OTel SDK → <code>collect --forward</code> → Langfuse</td><td>all 7,643 spans, in Langfuse and in the recording</td><td>3.26 MB · 104×</td></tr>
+          <tr><td>OTel SDK → <code>collect --forward</code> → OpenTelemetry Collector</td><td>all 7,343 chat spans, the same span ids at both ends</td><td>2.63 MB · 129×</td></tr>
+          <tr><td>OTel SDK over gRPC → <code>collect --forward</code> → Collector</td><td>all 7,343 chat spans</td><td>3.28 MB · 103×</td></tr>
+          <tr><td>Kong 3.9 <code>ai-proxy</code> → <code>http-log</code> → <code>collect</code></td><td>all 329 log entries, full message lists</td><td>325 KB · 52×</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="fine">In the Langfuse run, Langfuse itself kept 31.6 MiB in ClickHouse and 356 MB of raw events in S3 for what deltapack stored in 3.26 MB. Figures from the <a href="https://github.com/aperiodic-io/deltapack#measured-end-to-end">deltapack README</a>.</p>
+  </section>
+
+  <section id="how">
+    <div class="sec-head">
+      <p class="label">How it works</p>
+      <h2>A record costs about its new bytes</h2>
+      <p class="lede">Each record is a delta against one of the last records: it copies the unchanged start and end of that record and carries the edited middle as one Zstandard frame, which may reference the old middle, so content that moved is still found.</p>
+    </div>
+    <div class="delta">
+      <div>
+        <p class="label">What your log holds</p>
+        <div class="row"><span>system</span><span>tools</span><span>turn 1</span></div>
+        <div class="row"><span>system</span><span>tools</span><span>turn 1</span><span>turn 2</span></div>
+        <div class="row"><span>system</span><span>tools</span><span>turn 1</span><span>turn 2</span><span>turn 3</span></div>
+      </div>
+      <div>
+        <p class="label">What deltapack stores</p>
+        <div class="row"><span class="new">system</span><span class="new">tools</span><span class="new">turn 1</span></div>
+        <div class="row"><span class="plus">+</span><span class="new">turn 2</span></div>
+        <div class="row"><span class="plus">+</span><span class="new">turn 3</span></div>
+      </div>
+    </div>
+
+    <div class="lattice" style="margin-top:28px">
+      <div class="cell">
+        <h3>Lossless</h3>
+        <p>Every record carries the SHA-256 of its body and is checked when read. A file that does not rebuild what it names is an error, never wrong bytes.</p>
+      </div>
+      <div class="cell">
+        <h3>Any record on its own</h3>
+        <p>In 64 ms on the benchmark, without unpacking the file. The chain of deltas behind a record is bounded.</p>
+      </div>
+      <div class="cell">
+        <h3>Crash-safe</h3>
+        <p>A crash loses at most the record being written. A file that ends mid-record still holds every record before it.</p>
+      </div>
+      <div class="cell">
+        <h3>Never in the way</h3>
+        <p>A failed write is counted in a metric and the request goes on. Recording never takes your traffic down.</p>
+      </div>
+      <div class="cell">
+        <h3>No credentials stored</h3>
+        <p>Headers are never stored. <code>--key-file</code> seals every body with a key you hold; <code>--key-dir</code> gives each tenant its own.</p>
+      </div>
+      <div class="cell">
+        <h3>A small, public format</h3>
+        <p>A file of Zstandard frames, each behind a few varints, specified in <a href="https://github.com/aperiodic-io/deltapack/blob/main/SPEC.md">SPEC.md</a>. Tested with property tests, Kani proofs, fuzzing and mutation testing.</p>
+      </div>
+    </div>
+
+    <div class="byoc">
+      <div>
+        <p class="label">DPD1 · on the wire</p>
+        <h3>The same delta shrinks the request</h3>
+      </div>
+      <p>An agent that uploads its whole conversation on every call can send each request as a delta against the last one; the server rebuilds the exact body before the provider sees it. A 6 MiB request that adds one turn crosses the network as 141 bytes.</p>
+      <a class="btn btn-line" href="https://github.com/aperiodic-io/deltapack/blob/main/docs/dpd1.md">Read about DPD1</a>
+    </div>
+  </section>
+
+  <section id="integrations">
+    <div class="sec-head">
+      <p class="label">Integrations</p>
+      <h2>Works with what you run</h2>
+      <p class="lede">Step-by-step setup for 20 coding agents, 25 SDKs and frameworks, 15 gateways, cloud platform logs, telemetry pipelines and 20 backends, with what each export carries.</p>
+    </div>
+    <div class="groups">
+      <div class="group"><p class="label">Coding agents</p><div class="chips"><span>Claude Code</span><span>Claude Agent SDK</span><span>Gemini CLI</span><span>Qwen Code</span><span>GitHub Copilot CLI</span><span>VS Code Copilot</span><span>Goose</span><span>Codex CLI</span><span>OpenHands</span><span>Aider</span><span>SWE-agent</span><span>Zed</span></div></div>
+      <div class="group"><p class="label">SDKs, frameworks</p><div class="chips"><span>OpenTelemetry GenAI</span><span>OpenLLMetry</span><span>OpenInference</span><span>LangChain, LangGraph</span><span>LlamaIndex</span><span>OpenAI Agents SDK</span><span>Vercel AI SDK</span><span>Mastra</span><span>CrewAI</span><span>Pydantic AI</span><span>Google ADK</span><span>Semantic Kernel</span></div></div>
+      <div class="group"><p class="label">Gateways</p><div class="chips"><span>LiteLLM</span><span>Kong AI Gateway</span><span>Portkey</span><span>Apache APISIX</span><span>Bifrost</span><span>TensorZero</span><span>Envoy AI Gateway</span><span>OpenRouter</span><span>Cloudflare AI Gateway</span><span>Helicone</span></div></div>
+      <div class="group"><p class="label">Forward to</p><div class="chips"><span>Langfuse</span><span>Arize Phoenix</span><span>LangSmith</span><span>Braintrust</span><span>Opik</span><span>W&amp;B Weave</span><span>Logfire</span><span>Datadog</span><span>Honeycomb</span><span>Grafana Cloud</span><span>Elastic</span><span>Any OTLP endpoint</span></div></div>
+    </div>
+    <p class="fine"><a href="https://github.com/aperiodic-io/deltapack/blob/main/docs/integrations.md">The integrations guide</a> covers each one. LiteLLM, Kong and Portkey run against deltapack in CI on every pull request.</p>
+  </section>
+
+  <section id="not">
+    <div class="sec-head">
+      <p class="label">What it is not</p>
+      <h2>Keep your backend for search; keep deltapack for the bodies</h2>
+    </div>
+    <div class="lattice two">
+      <div class="cell">
+        <h3>Not a query engine</h3>
+        <p><code>log show</code> finds records by trace and time and writes JSON lines for other tools to query. Keep your tracing backend for search and dashboards.</p>
+      </div>
+      <div class="cell">
+        <h3>Not a general log compressor</h3>
+        <p>The gain comes from records that repeat earlier records, as LLM requests and spans do. On logs without that shape, expect what zstd gives.</p>
+      </div>
+      <div class="cell">
+        <h3>Not fast enough for everything</h3>
+        <p>One record per span writes at about 12 MB/s on one core, because each span is tried against several candidate bases.</p>
+      </div>
+      <div class="cell">
+        <h3>Not a redaction layer</h3>
+        <p>A record is the body as it was sent, which is what makes replay exact. Redact where the content is produced.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Deltapack 0.1 · Apache-2.0 · built by Aperiodic</span>
+    <span><a href="https://github.com/aperiodic-io/deltapack">github.com/aperiodic-io/deltapack</a></span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  // The trace panel: an agent's chat spans, each re-sending the whole prompt. Each span stores
+  // only the turn it adds (about a quarter of its bytes after zstd); the very first stores the
+  // system prompt and tools whole, and each later trace deltas against the last one's.
+  var TURNS = [
+    ['user · fix the failing test in parser.rs', 0.2],
+    ['+ read_file parser.rs, 212 lines', 6.4],
+    ['+ cargo test parser, 1 failed', 3.1],
+    ['+ read_file lexer.rs, 140 lines', 4.2],
+    ['+ edit parser.rs, 4 lines', 0.6],
+    ['+ cargo test parser, 42 passed', 1.2],
+    ['+ response · the test passes now', 0.9]
+  ];
+  var BASE = 21, MAX = 40, seq = 0, step = 0, prompt = BASE, sent = 0, kept = 0, first = true, VISIBLE = 7;
+  var list = document.getElementById('events');
+  function kb(x) { return x >= 1000 ? (x / 1000).toFixed(1) + ' MB' : x.toFixed(1) + ' KB'; }
+  function span(cls, text) { var s = document.createElement('span'); s.className = cls; s.textContent = text; return s; }
+  function append(fresh) {
+    var t = TURNS[step], add = t[1];
+    if (step === 0) prompt = BASE;
+    var old = prompt; prompt += add;
+    var stored = first ? BASE * 0.24 + add * 0.3 : add * 0.25 + 0.08;
+    first = false; sent += prompt; kept += stored;
+    var li = document.createElement('li');
+    li.className = 'ev' + (fresh ? ' fresh' : '');
+    li.appendChild(span('seq', String(seq).padStart(4, '0')));
+    li.appendChild(span('what', 'chat ' + t[0]));
+    var bar = document.createElement('span'); bar.className = 'bar'; bar.setAttribute('aria-hidden', 'true');
+    var a = document.createElement('i'), b = document.createElement('i');
+    a.style.width = (old / MAX * 100) + '%'; b.style.width = (add / MAX * 100) + '%';
+    bar.appendChild(a); bar.appendChild(b); li.appendChild(bar);
+    li.appendChild(span('sent', kb(prompt)));
+    li.appendChild(span('kept', kb(stored)));
+    list.appendChild(li); seq++; step = (step + 1) % TURNS.length;
+    while (list.children.length > VISIBLE + 1) list.removeChild(list.children[1]);
+    document.getElementById('t-sent').textContent = kb(sent);
+    document.getElementById('t-kept').textContent = kb(kept);
+    document.getElementById('t-ratio').textContent = Math.round(sent / kept) + '×';
+  }
+  var head = document.createElement('li'); head.className = 'ev cols'; head.setAttribute('aria-hidden', 'true');
+  ['span', 'what it adds', 'repeated · new', 'sent', 'stored'].forEach(function (c, i) { head.appendChild(span(['seq', 'what', 'bar', 'sent', 'kept'][i], c)); });
+  head.children[2].className = 'barh'; head.children[1].style.font = 'inherit';
+  list.appendChild(head);
+  for (var i = 0; i < VISIBLE; i++) append(false);
+  if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) setInterval(function () { append(true); }, 1700);
+
+  // The calculator. Volume slider is logarithmic: 10 GB to 1 PB.
+  var vol = document.getElementById('vol'), ratio = document.getElementById('ratio');
+  function size(gb) {
+    var u = [['PB', 1e6], ['TB', 1e3], ['GB', 1], ['MB', 1e-3]];
+    for (var i = 0; i < u.length; i++) if (gb >= u[i][1] || i === u.length - 1) {
+      var v = gb / u[i][1];
+      return v.toLocaleString('en-US', { maximumFractionDigits: v < 10 ? 1 : 0 }) + ' ' + u[i][0];
+    }
+  }
+  function draw() {
+    var gb = Number(Math.pow(10, 1 + vol.value / 20).toPrecision(2)), r = Number(ratio.value);
+    document.getElementById('vol-out').textContent = size(gb);
+    document.getElementById('ratio-out').textContent = r + '×';
+    document.getElementById('c-raw').textContent = size(gb);
+    document.getElementById('c-zstd').textContent = size(gb / 9.7);
+    document.getElementById('c-dp').textContent = size(gb / r);
+  }
+  vol.addEventListener('input', draw); ratio.addEventListener('input', draw);
+  draw();
+})();
+</script>
